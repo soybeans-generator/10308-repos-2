@@ -7,9 +7,6 @@ import (
 
 type File struct {
    Moof MovieFragmentBox
-   Mdat []byte
-   Styp []byte
-   Sidx []byte
 }
 
 func (f *File) Decode(r io.Reader) error {
@@ -21,11 +18,19 @@ func (f *File) Decode(r io.Reader) error {
       } else if err != nil {
          return err
       }
-      switch head.String() {
-      case "mdat":
-         io.CopyN(io.Discard, r, int64(head.Size)-8)
+      size := head.Size.Payload()
+      switch head.Type.String() {
       case "moof":
-         io.CopyN(io.Discard, r, int64(head.Size)-8)
+         err := f.Moof.Decode(io.LimitReader(r, size))
+         if err != nil {
+            return err
+         }
+      case "mdat":
+         io.CopyN(io.Discard, r, size)
+      case "sidx":
+         io.CopyN(io.Discard, r, size)
+      case "styp":
+         io.CopyN(io.Discard, r, size)
       default:
          return fmt.Errorf("%q", head.Type)
       }
