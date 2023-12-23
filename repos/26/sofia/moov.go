@@ -9,10 +9,24 @@ import (
 // }
 type MovieBox struct {
    Header  BoxHeader
-   Boxes []Box
+   Boxes []*Box
 }
 
-func (MovieBox) Decode(src io.Reader) error {
+func (m MovieBox) Encode(dst io.Writer) error {
+   err := m.Header.Encode(dst)
+   if err != nil {
+      return err
+   }
+   for _, b := range m.Boxes {
+      err := b.Encode(dst)
+      if err != nil {
+         return err
+      }
+   }
+   return nil
+}
+
+func (m *MovieBox) Decode(src io.Reader) error {
    for {
       var head BoxHeader
       err := head.Decode(src)
@@ -21,13 +35,18 @@ func (MovieBox) Decode(src io.Reader) error {
       } else if err != nil {
          return err
       }
+      size := head.BoxPayload()
       switch head.Type() {
+      case "mvex", "mvhd", "pssh", "trak":
+         b := Box{Header: head}
+         b.Payload = make([]byte, size)
+         _, err := src.Read(b.Payload)
+         if err != nil {
+            return err
+         }
+         m.Boxes = append(m.Boxes, &b)
       default:
          return fmt.Errorf("%q", head.RawType)
       }
    }
-}
-
-func (MovieBox) Encode(io.Writer) error {
-   return nil
 }
