@@ -10,6 +10,7 @@ import (
 type MediaInformationBox struct {
    Header  BoxHeader
    Boxes []Box
+   Stbl SampleTableBox
 }
 
 func (b *MediaInformationBox) Decode(r io.Reader) error {
@@ -23,7 +24,7 @@ func (b *MediaInformationBox) Decode(r io.Reader) error {
       }
       size := head.BoxPayload()
       switch head.Type() {
-      case "dinf", "stbl", "vmhd":
+      case "dinf", "vmhd":
          value := Box{Header: head}
          value.Payload = make([]byte, size)
          _, err := r.Read(value.Payload)
@@ -31,6 +32,12 @@ func (b *MediaInformationBox) Decode(r io.Reader) error {
             return err
          }
          b.Boxes = append(b.Boxes, value)
+      case "stbl":
+         b.Stbl.Header = head
+         err := b.Stbl.Decode(r)
+         if err != nil {
+            return err
+         }
       default:
          return fmt.Errorf("%q", head.RawType)
       }
@@ -48,5 +55,5 @@ func (b MediaInformationBox) Encode(w io.Writer) error {
          return err
       }
    }
-   return nil
+   return b.Stbl.Encode(w)
 }
