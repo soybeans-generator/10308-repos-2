@@ -1,0 +1,12 @@
+[color "diff"]
+meta = yellow bold
+
+[core]
+askPass = git-askpass
+
+[diff]
+wsErrorHighlight = all
+
+[user]
+name = 3052
+email = spen+3052@protonmail.com

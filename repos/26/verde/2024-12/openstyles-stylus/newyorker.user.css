@@ -1,0 +1,10 @@
+/*
+==userstyle==
+@name New Yorker
+@namespace 3052
+@version 2023.09.24
+==/userstyle==
+*/
+@-moz-document domain("newyorker.com") {
+   [class*="PersistentTopWrapper"] { position: static }
+}

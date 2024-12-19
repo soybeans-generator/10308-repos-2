@@ -1,0 +1,12 @@
+/*
+==userstyle==
+@name Wikipedia
+@namespace 3052
+@version 2023.03.28
+==/userstyle==
+*/
+@-moz-document domain("wikipedia.org") {
+   :visited {
+      color: hsl(270 100% 50%) !important
+   }
+}
