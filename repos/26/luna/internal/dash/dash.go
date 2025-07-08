@@ -2,9 +2,18 @@ package dash
 
 import (
    "math"
+   "strconv"
    "strings"
    "time"
 )
+
+func (s *SegmentTemplate) segments(periodVar *Period) []string {
+   var segment []string
+   for _, number := range s.numbers(periodVar) {
+      segment = append(segment, strconv.Itoa(number))
+   }
+   return segment
+}
 
 type Representation struct {
    Bandwidth       int     `xml:"bandwidth,attr"`
@@ -24,15 +33,6 @@ type SegmentBase struct {
       Range string `xml:"range,attr"`
    }
    IndexRange string `xml:"indexRange,attr"`
-}
-
-type SegmentList struct {
-   Initialization struct {
-      SourceUrl string `xml:"sourceURL,attr"`
-   }
-   SegmentUrl []*struct {
-      Media string `xml:"media,attr"`
-   } `xml:"SegmentURL"`
 }
 
 type SegmentTemplate struct {
@@ -144,7 +144,43 @@ func (s *SegmentTemplate) byTimelineTime() []int {
    return numbers
 }
 
-func (s *SegmentTemplate) Numbers(periodVar *Period) []int {
+func (*SegmentBase) segments() []string {
+   return nil
+}
+
+type SegmentList struct {
+   Initialization struct {
+      SourceUrl string `xml:"sourceURL,attr"`
+   }
+   SegmentUrl []*struct {
+      Media string `xml:"media,attr"`
+   } `xml:"SegmentURL"`
+}
+
+func (s *SegmentList) segments() []string {
+   var segments []string
+   for _, segment := range s.SegmentUrl {
+      segments = append(segments, segment.Media)
+   }
+   return segments
+}
+
+func (r *Representation) Segments(
+   adapt *AdaptationSet, periodVar *Period,
+) []string {
+   if r.SegmentBase != nil {
+      return r.SegmentBase.segments()
+   }
+   if r.SegmentList != nil {
+      return r.SegmentList.segments()
+   }
+   if r.SegmentTemplate != nil {
+      return r.SegmentTemplate.segments(periodVar)
+   }
+   return adapt.SegmentTemplate.segments(periodVar)
+}
+
+func (s *SegmentTemplate) numbers(periodVar *Period) []int {
    if s.EndNumber >= 1 {
       return s.byEndNumber()
    }
@@ -155,29 +191,4 @@ func (s *SegmentTemplate) Numbers(periodVar *Period) []int {
       return s.byTimelineNumber()
    }
    return s.byPeriod(periodVar)
-}
-
-func (r *Representation) Segments(adapt *AdaptationSet) []string {
-   if r.SegmentBase != nil {
-      return r.SegmentBase.segments()
-   }
-   if r.SegmentList != nil {
-      return r.SegmentList.segments()
-   }
-   if r.SegmentTemplate != nil {
-      return r.SegmentTemplate.segments()
-   }
-   return adapt.SegmentTemplate.segments()
-}
-
-func (*SegmentBase) segments() []string {
-   return nil
-}
-
-func (*SegmentList) segments() []string {
-   return nil
-}
-
-func (*SegmentTemplate) segments() []string {
-   return nil
 }
