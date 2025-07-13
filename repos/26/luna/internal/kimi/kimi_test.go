@@ -13,6 +13,22 @@ var tests = []struct {
    representation []representation
 }{
    {
+      name: "molotov.txt",
+      url:  "https://vod-molotov.akamaized.net/output/v2/d8/a1/65/32e3c47902de4911dca77b0ad73e9ac34965a1d8/32e3c47902de4911dca77b0ad73e9ac34965a1d8.ism/fhdready.mpd",
+      representation: []representation{
+         {
+            id:     "video=4800000",
+            length: 1 + 3555,
+            url:    "dash/32e3c47902de4911dca77b0ad73e9ac34965a1d8-video=4800000-3555.m4s",
+         },
+         {
+            id:     "3=1000",
+            length: 1 + 3339,
+            url:    "dash/32e3c47902de4911dca77b0ad73e9ac34965a1d8-3=1000-3339.m4s",
+         },
+      },
+   },
+   {
       name: "criterion.txt",
       url:  "https://vod-adaptive-ak.vimeocdn.com/exp=1752284211~acl=%2F15be2d09-cb01-46d4-9948-2667ba2e3907%2F%2A~hmac=6997e9aef9fd359a03a2b49a7a82db955064361a16ed4d875e1d927a62f2ca35/15be2d09-cb01-46d4-9948-2667ba2e3907/v2/playlist/drm/cenc,derived,325579370,e4576465a745213f336c1ef1bf5d513e/av/primary/sub/7433271-c-en/prot/bWF4X2hlaWdodD0xMDgw/playlist.mpd",
       representation: []representation{
@@ -20,11 +36,6 @@ var tests = []struct {
             id:     "video-888d2bc7-75b5-4264-bf57-08e3dc24ecbb",
             length: 1 + 1114 + 1,
             url:    "drm/cenc,derived,325579370,e4576465a745213f336c1ef1bf5d513e/remux/avf/888d2bc7-75b5-4264-bf57-08e3dc24ecbb/segment.mp4?pathsig=8c953e4f~vEyD7FR7NMtgBhRbRGol6tYRL0pVp7AQxjE5pUlKliI&r=dXMtY2VudHJhbDE%3D&sid=1116&st=video",
-         },
-         {
-            id:     "audio-916e7eef-13ce-4a46-9bda-b2627ec04b4f",
-            length: 1047 + 69,
-            url:    "drm/cenc,derived,325579370,e4576465a745213f336c1ef1bf5d513e/remux/avf/916e7eef-13ce-4a46-9bda-b2627ec04b4f/segment.mp4?pathsig=8c953e4f~ta8gBIdEHUUP_p39sTXzQwDgjmCoZMymCeDBI6DL2H4&r=dXMtY2VudHJhbDE%3D&sid=1116&st=audio",
          },
          {
             id:     "subs-7433271",

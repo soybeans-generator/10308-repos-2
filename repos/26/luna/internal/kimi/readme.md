@@ -1,6 +1,7 @@
 # kimi
 
-keep reaching limit before getting acceptable solution
+The current model has reached its conversation limit. Please switch to another
+model to continue.
 
 https://kimi.com
 
