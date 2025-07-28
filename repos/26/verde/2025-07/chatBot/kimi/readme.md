@@ -1,7 +1,6 @@
 # kimi
 
-provide markdown prompt I can give you in the future to return this script,
-assume zero knowledge
+provide markdown prompt I can give you in the future to return this script
 
 https://kimi.com
 
