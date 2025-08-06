@@ -1,6 +1,7 @@
 # qwen
 
-https://wikipedia.org/wiki/Qwen
+- https://app.fireworks.ai/models/fireworks/qwen3-coder-480b-a35b-instruct
+- https://wikipedia.org/wiki/Qwen
 
 I reached the limit after 5 prompts
 
