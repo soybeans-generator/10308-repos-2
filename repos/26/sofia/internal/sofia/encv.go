@@ -1,18 +1,12 @@
-// File: encv_box.go
 package mp4parser
 
-// EncvBox (Encrypted Video Sample Entry)
-type EncvBox struct {
-   // The 78 bytes of the VisualSampleEntry prefix.
-   Prefix   []byte
-   Children []*EncvChildBox
-}
-
+// EncvChildBox can hold any of the parsed child types or a raw box.
 type EncvChildBox struct {
    Sinf *SinfBox
    Raw  *RawBox
 }
 
+// Size calculates the size of the contained child.
 func (c *EncvChildBox) Size() uint64 {
    if c.Sinf != nil {
       return c.Sinf.Size()
@@ -22,6 +16,8 @@ func (c *EncvChildBox) Size() uint64 {
    }
    return 0
 }
+
+// Format formats the contained child.
 func (c *EncvChildBox) Format(dst []byte, offset int) int {
    if c.Sinf != nil {
       return c.Sinf.Format(dst, offset)
@@ -32,8 +28,23 @@ func (c *EncvChildBox) Format(dst []byte, offset int) int {
    return offset
 }
 
+// EncvBox (Encrypted Video Sample Entry)
+type EncvBox struct {
+   // Type allows the box to be renamed on format (e.g., to "avc1").
+   // It is initialized to "encv" on parse.
+   Type string
+
+   // The 78 bytes of the VisualSampleEntry prefix.
+   Prefix   []byte
+   Children []*EncvChildBox
+}
+
+// ParseEncvBox parses the EncvBox from its content slice.
 func ParseEncvBox(data []byte) (*EncvBox, error) {
    b := &EncvBox{}
+   b.Type = "encv" // Default to the parsed type.
+
+   // VisualSampleEntry has a 78-byte prefix before its child boxes.
    const prefixSize = 78
    if len(data) < prefixSize {
       return nil, ErrUnexpectedEOF
@@ -67,6 +78,7 @@ func ParseEncvBox(data []byte) (*EncvBox, error) {
    return b, nil
 }
 
+// Size calculates the total byte size of the EncvBox.
 func (b *EncvBox) Size() uint64 {
    size := uint64(8 + len(b.Prefix))
    for _, child := range b.Children {
@@ -75,9 +87,10 @@ func (b *EncvBox) Size() uint64 {
    return size
 }
 
+// Format serializes the EncvBox into the destination slice using its Type field.
 func (b *EncvBox) Format(dst []byte, offset int) int {
    offset = writeUint32(dst, offset, uint32(b.Size()))
-   offset = writeString(dst, offset, "encv")
+   offset = writeString(dst, offset, b.Type) // Use the mutable Type field here
    offset = writeBytes(dst, offset, b.Prefix)
    for _, child := range b.Children {
       offset = child.Format(dst, offset)
