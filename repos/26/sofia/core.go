@@ -42,6 +42,12 @@ func (p *parser) Bytes(n int) []byte {
    return val
 }
 
+func (p *parser) Byte() byte {
+   val := p.data[p.offset]
+   p.offset++
+   return val
+}
+
 // --- WRITING HELPER ---
 
 type writer struct {
