@@ -58,6 +58,7 @@ type TrafBox struct {
    Tfhd        *TfhdBox
    Trun        []*TrunBox
    Senc        *SencBox
+   Tenc        *TencBox
    RawChildren [][]byte
 }
 
@@ -101,6 +102,12 @@ func (b *TrafBox) Parse(data []byte) error {
             return err
          }
          b.Senc = &senc
+      case "tenc":
+         var tenc TencBox
+         if err := tenc.Parse(content); err != nil {
+            return err
+         }
+         b.Tenc = &tenc
       default:
          b.RawChildren = append(b.RawChildren, content)
       }

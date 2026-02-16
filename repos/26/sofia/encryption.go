@@ -54,6 +54,63 @@ func (b *PsshBox) Parse(data []byte) error {
    return nil
 }
 
+// --- TENC ---
+// TencBox defines the Track Encryption Box ('tenc'), which contains
+// default encryption parameters for a track.
+// Specification: ISO/IEC 23001-7
+type TencBox struct {
+   Header                 BoxHeader
+   Version                byte
+   Flags                  uint32
+   DefaultIsProtected     byte
+   DefaultPerSampleIVSize byte
+   DefaultKID             [16]byte
+   DefaultConstantIVSize  byte   // Present if DefaultIsProtected=1 and DefaultPerSampleIVSize=0
+   DefaultConstantIV      []byte // Present if DefaultIsProtected=1 and DefaultPerSampleIVSize=0
+}
+
+func (b *TencBox) Parse(data []byte) error {
+   if err := b.Header.Parse(data); err != nil {
+      return err
+   }
+   p := parser{data: data, offset: 8}
+   if len(data) < p.offset+4 {
+      return errors.New("tenc box too short for version/flags")
+   }
+   versionAndFlags := p.Uint32()
+   b.Version = byte(versionAndFlags >> 24)
+   b.Flags = versionAndFlags & 0x00FFFFFF
+
+   // This parser only implements Version 0, as it is the most common.
+   // Version > 0 uses bit-level fields not seen elsewhere in this package.
+   if b.Version == 0 {
+      // Required fields for v0: reserved(1) + isProtected(1) + perSampleIVSize(1) + KID(16) = 19 bytes
+      if len(data) < p.offset+19 {
+         return errors.New("tenc v0 box too short for required fields")
+      }
+      _ = p.Bytes(1) // Skip reserved byte
+      b.DefaultIsProtected = p.Bytes(1)[0]
+      b.DefaultPerSampleIVSize = p.Bytes(1)[0]
+      copy(b.DefaultKID[:], p.Bytes(16))
+
+      if b.DefaultIsProtected == 1 && b.DefaultPerSampleIVSize == 0 {
+         // Check for optional Constant IV fields, if there's more data in the box.
+         if p.offset < int(b.Header.Size) {
+            if len(data) < p.offset+1 {
+               return errors.New("tenc box truncated before constant IV size")
+            }
+            b.DefaultConstantIVSize = p.Bytes(1)[0]
+            if len(data) < p.offset+int(b.DefaultConstantIVSize) {
+               return errors.New("tenc box truncated, not enough data for constant IV")
+            }
+            b.DefaultConstantIV = p.Bytes(int(b.DefaultConstantIVSize))
+         }
+      }
+   }
+   // For other versions, we do nothing and leave the fields as their zero-value.
+   return nil
+}
+
 // --- SENC ---
 type SubsampleInfo struct {
    BytesOfClearData     uint16

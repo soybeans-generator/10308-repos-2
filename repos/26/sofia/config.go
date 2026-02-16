@@ -179,6 +179,7 @@ func (b *EncBox) Unprotect() error {
 type SinfBox struct {
    Header      BoxHeader
    Frma        *FrmaBox
+   Tenc        *TencBox
    RawChildren [][]byte
 }
 
@@ -210,6 +211,12 @@ func (b *SinfBox) Parse(data []byte) error {
             return err
          }
          b.Frma = &frma
+      case "tenc":
+         var tenc TencBox
+         if err := tenc.Parse(content); err != nil {
+            return err
+         }
+         b.Tenc = &tenc
       default:
          b.RawChildren = append(b.RawChildren, content)
       }
