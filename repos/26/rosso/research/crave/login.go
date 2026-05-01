@@ -7,17 +7,23 @@ import (
    "41.neocities.org/maya"
 )
 
-type Login struct {
+type AccountToken struct {
    AccessToken  string `json:"access_token"`
    RefreshToken string `json:"refresh_token"`
    AccountId    string `json:"account_id"`
+   Jti          string `json:"jti"`
 }
 
-func LoginAccount(username string, password string) (*Login, error) {
-   endpoint := url.URL{
+func PerformLogin(username string, password string) (*AccountToken, error) {
+   endpoint := &url.URL{
       Scheme: "https",
       Host:   "account.bellmedia.ca",
       Path:   "/api/login/v2.1",
+   }
+
+   headers := map[string]string{
+      "authorization": "Basic Y3JhdmUtd2ViOmRlZmF1bHQ=",
+      "content-type":  "application/x-www-form-urlencoded",
    }
 
    values := url.Values{}
@@ -25,21 +31,18 @@ func LoginAccount(username string, password string) (*Login, error) {
    values.Set("password", password)
    values.Set("username", username)
 
-   headers := map[string]string{
-      "content-type":  "application/x-www-form-urlencoded",
-      "authorization": "Basic Y3JhdmUtd2ViOmRlZmF1bHQ=",
-   }
+   body := []byte(values.Encode())
 
-   resp, err := maya.Post(&endpoint, headers, []byte(values.Encode()))
+   resp, err := maya.Post(endpoint, headers, body)
    if err != nil {
       return nil, err
    }
    defer resp.Body.Close()
 
-   var targetLogin Login
-   if err := json.NewDecoder(resp.Body).Decode(&targetLogin); err != nil {
+   account := &AccountToken{}
+   if err := json.NewDecoder(resp.Body).Decode(account); err != nil {
       return nil, err
    }
 
-   return &targetLogin, nil
+   return account, nil
 }
