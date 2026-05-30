@@ -116,6 +116,14 @@ type Chain struct {
    Certificates []Certificate
 }
 
+type ChainHeader struct {
+   HeaderTag uint32 // = ChainHeaderTag
+   Version   uint32 // = ChainVersion
+   CbChain   uint32
+   Flags     uint32
+   Certs     uint32
+}
+
 type ClientId struct {
    Rgb [16]byte
 }
@@ -206,12 +214,4 @@ type Certificate struct {
 
    RecordOrder    []uint16
    UnknownRecords map[uint16][]UnknownRecord
-}
-
-type ChainHeader struct {
-   HeaderTag uint32 // = ChainHeaderTag
-   Version   uint32 // = ChainVersion
-   CbChain   uint32
-   Flags     uint32
-   Certs     uint32
 }
