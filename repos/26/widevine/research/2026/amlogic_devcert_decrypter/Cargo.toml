@@ -1,0 +1,9 @@
+[package]
+name = "amlogic_devcert_decrypter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes = "0.8.4"
+binrw = "0.15.0"
+playready = "0.3.0"
