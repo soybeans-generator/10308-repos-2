@@ -1,13 +1,16 @@
 # amazon
 
-- https://apkmirror.com/apk/amazon-mobile-llc/prime-video-android-tv-android-tv
-- https://play.google.com/store/apps/details?id=com.amazon.amazonvideo.livingroom
+## test 1
+
+with no proxy everything is fine
+
+## test 2
 
 ~~~
-adb install-multiple (Get-ChildItem *.apk)
+adb shell monkey -p com.topjohnwu.magisk -c android.intent.category.LAUNCHER 1
 ~~~
 
-then:
+do you want to proceed and reboot? OK
 
 ~~~
 adb push C:/Users/Steven/.mitmproxy/mitmproxy-ca-cert.pem /data/local/tmp/c8750f0d.0
@@ -28,7 +31,17 @@ adb reboot
 adb shell su -c 'ls /apex/com.android.conscrypt/cacerts | grep c8750f0d'
 ~~~
 
-then:
+set proxy, start app
+
+Error code: 0.60
+
+## test 3
+
+start app, set proxy
+
+error code: 9345
+
+## test 4
 
 ~~~
 pip install frida-tools
@@ -47,14 +60,10 @@ frida-server-17.3.2-android-x86.xz
 install app, then push server:
 
 ~~~
-$frida = 'frida-server-17.3.2-android-x86'
-adb root
-adb push $frida /data/app/frida-server
-adb shell chmod +x /data/app/frida-server
-adb shell /data/app/frida-server
+adb push frida-server-17.11.0-android-x86 /data/local/tmp/frida-server
+adb shell chmod +x /data/local/tmp/frida-server
+adb shell su -c /data/local/tmp/frida-server
 ~~~
-
-then:
 
 https://github.com/httptoolkit/frida-interception-and-unpinning
 
@@ -65,7 +74,32 @@ update `config.js`:
 
 ~~~
 frida -U `
--l config.js `
--l android/android-certificate-unpinning.js `
--f com.amazon.avod.thirdpartyclient
+-l ./android/android-certificate-unpinning-fallback.js `
+-l ./android/android-certificate-unpinning.js `
+-l ./android/android-disable-root-detection.js `
+-l ./android/android-proxy-override.js `
+-l ./android/android-system-certificate-injection.js `
+-l ./config.js `
+-l ./native-connect-hook.js `
+-l ./native-tls-hook.js `
+-f com.amazon.amazonvideo.livingroom
 ~~~
+
+Failed to spawn: unable to find a front-door activity
+
+## test 5
+
+~~~
+frida -U `
+-l ./android/android-certificate-unpinning-fallback.js `
+-l ./android/android-certificate-unpinning.js `
+-l ./android/android-disable-root-detection.js `
+-l ./android/android-proxy-override.js `
+-l ./android/android-system-certificate-injection.js `
+-l ./config.js `
+-l ./native-connect-hook.js `
+-l ./native-tls-hook.js `
+com.amazon.amazonvideo.livingroom
+~~~
+
+Failed to attach: target terminated with signal 31
