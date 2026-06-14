@@ -1,1 +1,4 @@
-ignore
+client_id.bin
+device_client_id_blob
+device_private_key
+private_key.pem

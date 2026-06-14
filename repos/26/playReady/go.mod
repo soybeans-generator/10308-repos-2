@@ -3,9 +3,9 @@ module 41.neocities.org/diana
 go 1.26.0
 
 require (
-	41.neocities.org/protobuf v1.6.2
+	41.neocities.org/protobuf v1.6.6
 	filippo.io/nistec v0.0.4
-	github.com/emmansun/gmsm v0.42.0
+	github.com/emmansun/gmsm v0.43.0
 )
 
-require golang.org/x/sys v0.43.0 // indirect
+require golang.org/x/sys v0.46.0 // indirect
