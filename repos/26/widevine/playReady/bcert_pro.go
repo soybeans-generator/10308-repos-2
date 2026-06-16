@@ -139,6 +139,12 @@ type DeviceInfo struct {
    MaxChainDepth uint32
 }
 
+type FeatureInfo struct {
+   Header            ObjectHeader
+   NumFeatureEntries uint32
+   FeatureSet        []uint32
+}
+
 type ObjectHeader struct {
    Flags    uint16
    Type     uint16
@@ -146,12 +152,6 @@ type ObjectHeader struct {
 }
 
 ///
-
-type FeatureInfo struct {
-   Header            ObjectHeader
-   NumFeatureEntries uint32
-   FeatureSet        []uint32
-}
 
 type CertKey struct {
    Type     uint16
