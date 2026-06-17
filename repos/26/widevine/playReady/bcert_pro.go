@@ -111,6 +111,14 @@ func (c CertId) String() string {
    return hex.EncodeToString(c.Rgb[:])
 }
 
+type CertKey struct {
+   Type     uint16
+   Length   uint16
+   Flags    uint32
+   Value    []byte
+   UsageSet []uint32
+}
+
 type Chain struct {
    Header       ChainHeader
    Certificates []Certificate
@@ -152,14 +160,6 @@ type ObjectHeader struct {
 }
 
 ///
-
-type CertKey struct {
-   Type     uint16
-   Length   uint16
-   Flags    uint32
-   Value    []byte
-   UsageSet []uint32
-}
 
 type KeyInfo struct {
    Header  ObjectHeader
