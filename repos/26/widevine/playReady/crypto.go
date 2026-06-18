@@ -53,7 +53,7 @@ func newLa(pubKey *ecdsa.PublicKey, cipherData, kid []byte, contentId string) (*
 
    headerData := xml.WrmHeaderData{
       Kid: kid, // microsoft.com
-      ProtectInfo: xml.ProtectInfo{ //microsoft.com
+      ProtectInfo: xml.ProtectInfo{ // microsoft.com
          AlgId:  "AESCTR", // microsoft.com
          KeyLen: 16,       // microsoft.com
       },
@@ -63,6 +63,8 @@ func newLa(pubKey *ecdsa.PublicKey, cipherData, kid []byte, contentId string) (*
          ContentId: contentId, // 9c9media.com
       }
    }
+
+   nonce := [16]byte{1} // amazon.com cannot be zero
 
    return &xml.La{
       ContentHeader: xml.ContentHeader{ // microsoft.com
@@ -99,7 +101,7 @@ func newLa(pubKey *ecdsa.PublicKey, cipherData, kid []byte, contentId string) (*
          XmlNs: "http://www.w3.org/2001/04/xmlenc#",        // microsoft.com
       },
       Id:           "SignedData",                                         // microsoft.com
-      LicenseNonce: make([]byte, 16),                                     // 9c9media.com
+      LicenseNonce: nonce[:],                                             // 9c9media.com
       Version:      "1",                                                  // microsoft.com
       XmlNs:        "http://schemas.microsoft.com/DRM/2007/03/protocols", // microsoft.com
    }, nil
