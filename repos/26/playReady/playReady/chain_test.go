@@ -3,7 +3,6 @@ package playReady
 import (
    "bytes"
    "encoding/hex"
-   "encoding/json"
    "io"
    "log"
    "net/http"
@@ -116,22 +115,11 @@ var key_tests = []struct {
       key:        "00000000000000000000000000000000",
    },
    {
-      key_id:     "3f962a1fb6aadb5cbc484df69dfda971",
-      content_id: "ff-41f446bd-1474247",
-      transform: func(payload []byte) ([]byte, error) {
-         return json.Marshal(map[string]any{
-            "payload": payload,
-            "playbackContext": map[string]any{
-               "contentId":        3300246,
-               "contentpackageId": 8401705,
-               "destinationId":    1880,
-               "platformId":       1,
-               "jwt":              "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI2OTk2N2RhOWM5M2VlZjVkZjIwZjg3MTIiLCJzY29wZSI6ImFjY291bnQ6d3JpdGUgZGVmYXVsdCBtYXR1cml0eTphZHVsdCIsImlzcyI6Imh0dHBzOi8vYWNjb3VudC5iZWxsbWVkaWEuY2EiLCJjb250ZXh0Ijp7InByb2ZpbGVfaWQiOiI2OTk3MGVmYTczMTc2ZDJiMmU1M2E1YTMiLCJicmFuZF9pZHMiOlsiMWQ3MmQ5OTBjYjc2NWRlN2U0MjExMTExIiwiMWQ3MmQ5OTBjYjc2NWRlN2U0MjExMTE0IiwiMWQ3MmQ5OTBjYjc2NWRlN2U0MjExMTE1Il19LCJleHAiOjE3NzUyODMwOTcsImlhdCI6MTc3NTI2ODY5NywidmVyc2lvbiI6IlYyIiwianRpIjoiMTUxN2UxNjItMzIxNC00NTBkLTg5MjktM2JjMmEyMTUxZTc1IiwiYXV0aG9yaXRpZXMiOlsiUkVHVUxBUl9VU0VSIl0sImNsaWVudF9pZCI6ImNyYXZlLXdlYiJ9.tOEcceaYZ21odINnl5mbxgOdFqbtXLolqi2Iu8Lib_HDRm-QqwsB_KCM0kyuaMnIU2053zSfrIBowHiQd5-4kTyGzpppP9MtQtQwlL9vyf6boG8SIVd5KCiRw3-7q2ky7p77DITD7RXWqEiKw31EqUeGJ9CcNJoJ7CugJx77ywKfHZfRhtdyzikYTgKH9R4TDdXXf4JZjakXzT7kMv-O3_-v_8TI1UiCSaYEP9w58PjdgWvYb5483xBNl0qpZ9F0xPfFwvYqCP4V2ANToGCeC5UDhOS68W8kasLqZgrTcGOVNFkxC5MKBQV6Atn6128WXiuUGxIeCrbR9tGpS1fCpQ",
-            },
-         })
-      },
-      url: "https://license.9c9media.com/playready",
-      key: "13207ee81394da90b6451e9ec0e917a7",
+      key_id:     "10000000000000000000000000000000",
+      content_id: "",
+      transform:  func(payload []byte) ([]byte, error) { return payload, nil },
+      url:        "https://test.playready.microsoft.com/service/rightsmanager.asmx?cfg=ck:AAAAAAAAAAAAAAAAAAAAAA==",
+      key:        "00000000000000000000000000000000",
    },
 }
 
