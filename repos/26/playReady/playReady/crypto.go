@@ -7,6 +7,7 @@ import (
    "crypto/ecdsa"
    "crypto/elliptic"
    "encoding/hex"
+   "errors"
    "filippo.io/nistec"
    "github.com/emmansun/gmsm/cipher"
 )
@@ -112,7 +113,10 @@ func GenerateKey() (*ecdsa.PrivateKey, error) {
 }
 
 func ParseRawPrivateKey(data []byte) (*ecdsa.PrivateKey, error) {
-   return ecdsa.ParseRawPrivateKey(elliptic.P256(), data)
+   if len(data) < 32 {
+      return nil, errors.New("private key data too short")
+   }
+   return ecdsa.ParseRawPrivateKey(elliptic.P256(), data[:32])
 }
 
 func PrivateKeyBytes(key *ecdsa.PrivateKey) ([]byte, error) {
@@ -120,7 +124,11 @@ func PrivateKeyBytes(key *ecdsa.PrivateKey) ([]byte, error) {
    if err != nil {
       return nil, err
    }
-   return ecdhKey.Bytes(), nil
+   pubBytes, err := publicKeyBytes(key)
+   if err != nil {
+      return nil, err
+   }
+   return append(ecdhKey.Bytes(), pubBytes...), nil
 }
 
 func publicKeyBytes(key *ecdsa.PrivateKey) ([]byte, error) {
