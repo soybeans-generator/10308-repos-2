@@ -6,19 +6,6 @@ import (
    "fmt"
 )
 
-// Error implements the standard Go error interface.
-func (le *LicenseError) Error() string {
-   if le.ErrorCode == nil {
-      return "widevine license error: unknown code"
-   }
-   return fmt.Sprint("widevine license error: code ", le.ErrorCode.Numeric)
-}
-
-// LicenseError reflects the structure of the Widevine LicenseError protobuf.
-type LicenseError struct {
-   ErrorCode *protobuf.Field
-}
-
 // decodeErrorFromMessage constructs a LicenseError struct from a pre-parsed
 // protobuf message
 func decodeErrorFromMessage(message protobuf.Message) error {
@@ -26,4 +13,17 @@ func decodeErrorFromMessage(message protobuf.Message) error {
    return &LicenseError{
       ErrorCode: errorCode,
    }
+}
+
+// LicenseError reflects the structure of the Widevine LicenseError protobuf.
+type LicenseError struct {
+   ErrorCode *protobuf.Field
+}
+
+// Error implements the standard Go error interface.
+func (le *LicenseError) Error() string {
+   if le.ErrorCode == nil {
+      return "widevine license error: unknown code"
+   }
+   return fmt.Sprint("widevine license error: code ", le.ErrorCode.Numeric)
 }

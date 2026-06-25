@@ -11,12 +11,6 @@ import (
    "fmt"
 )
 
-type noopReader struct{}
-
-func (noopReader) Read(p []byte) (n int, err error) {
-   return len(p), nil
-}
-
 func DecodePrivateKey(pemData []byte) (*rsa.PrivateKey, error) {
    block, _ := pem.Decode(pemData)
    if block == nil {
@@ -46,4 +40,10 @@ func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error)
       Hash:       crypto.SHA1,
    }
    return rsa.SignPSS(noopReader{}, privateKey, crypto.SHA1, hashed, opts)
+}
+
+type noopReader struct{}
+
+func (noopReader) Read(p []byte) (n int, err error) {
+   return len(p), nil
 }
