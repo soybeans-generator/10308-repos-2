@@ -15,6 +15,29 @@ import (
    "github.com/emmansun/gmsm/padding"
 )
 
+const (
+   kWrappingKeyLabel    = "ENCRYPTION"
+   kWrappingKeySizeBits = 128
+)
+
+// GetKey searches for a key by its ID in a slice of KeyContainers.
+// If the key is found, it returns the key and a nil error.
+// If the key is not found, it returns nil and an error.
+func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
+   for _, key := range keys {
+      if bytes.Equal(key.Id, id) {
+         return key.Key, nil
+      }
+   }
+   return nil, errors.New("key not found")
+}
+
+type KeyContainer struct {
+   Id  []byte
+   Iv  []byte
+   Key []byte
+}
+
 func DecodeLicenseResponse(responseData []byte, requestData []byte, privateKey *rsa.PrivateKey) ([]*KeyContainer, error) {
    message, err := protobuf.DecodeMessage(responseData)
    if err != nil {
@@ -94,27 +117,4 @@ func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sess
       keys = append(keys, kc)
    }
    return keys, nil
-}
-
-// GetKey searches for a key by its ID in a slice of KeyContainers.
-// If the key is found, it returns the key and a nil error.
-// If the key is not found, it returns nil and an error.
-func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
-   for _, key := range keys {
-      if bytes.Equal(key.Id, id) {
-         return key.Key, nil
-      }
-   }
-   return nil, errors.New("key not found")
-}
-
-const (
-   kWrappingKeyLabel    = "ENCRYPTION"
-   kWrappingKeySizeBits = 128
-)
-
-type KeyContainer struct {
-   Id  []byte
-   Iv  []byte
-   Key []byte
 }

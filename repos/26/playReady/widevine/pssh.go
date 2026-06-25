@@ -3,6 +3,12 @@ package widevine
 
 import "41.neocities.org/protobuf"
 
+// PsshData represents the Widevine-specific protobuf message.
+type PsshData struct {
+   KeyIds    [][]byte
+   ContentId []byte
+}
+
 // DecodePsshData parses the protobuf wire format into a PsshData struct.
 func DecodePsshData(data []byte) (*PsshData, error) {
    message, err := protobuf.DecodeMessage(data)
@@ -21,12 +27,6 @@ func DecodePsshData(data []byte) (*PsshData, error) {
       p.ContentId = field.Bytes
    }
    return p, nil
-}
-
-// PsshData represents the Widevine-specific protobuf message.
-type PsshData struct {
-   KeyIds    [][]byte
-   ContentId []byte
 }
 
 // Encode serializes the PsshData struct into the protobuf wire format.
