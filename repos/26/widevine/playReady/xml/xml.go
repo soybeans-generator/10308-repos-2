@@ -5,12 +5,6 @@ import (
    "encoding/xml"
 )
 
-type WrmHeaderData struct {
-   ProtectInfo      ProtectInfo       `xml:"PROTECTINFO"`      // microsoft.com
-   CustomAttributes *CustomAttributes `xml:"CUSTOMATTRIBUTES"` // 9c9media.com
-   Kid              Bytes             `xml:"KID"`              // microsoft.com
-}
-
 var (
    Marshal   = xml.Marshal
    Unmarshal = xml.Unmarshal
@@ -39,6 +33,8 @@ type Body struct {
    }
 }
 
+type Bytes []byte
+
 func (b Bytes) MarshalText() ([]byte, error) {
    return base64.StdEncoding.AppendEncode(nil, b), nil
 }
@@ -51,8 +47,6 @@ func (b *Bytes) UnmarshalText(data []byte) error {
    }
    return nil
 }
-
-type Bytes []byte
 
 type CertificateChains struct {
    CertificateChain Bytes `xml:"CertificateChain"` // microsoft.com
@@ -105,6 +99,12 @@ type EncryptionMethod struct {
    Algorithm string `xml:"Algorithm,attr"` // microsoft.com
 }
 
+type Envelope struct {
+   Body    Body     `xml:"soap:Body"`       // microsoft.com
+   Soap    string   `xml:"xmlns:soap,attr"` // microsoft.com
+   XMLName xml.Name `xml:"soap:Envelope"`   // microsoft.com
+}
+
 type EnvelopeResponse struct {
    Body Body
 }
@@ -121,12 +121,6 @@ type InnerChallenge struct {
    La        *La       `xml:"LA"`         // microsoft.com
    Signature Signature `xml:"Signature"`  // microsoft.com
    XmlNs     string    `xml:"xmlns,attr"` // microsoft.com
-}
-
-type Envelope struct {
-   Body    Body     `xml:"soap:Body"`       // microsoft.com
-   Soap    string   `xml:"xmlns:soap,attr"` // microsoft.com
-   XMLName xml.Name `xml:"soap:Envelope"`   // microsoft.com
 }
 
 type La struct {
@@ -160,6 +154,11 @@ type Signature struct {
    SignatureValue Bytes      `xml:"SignatureValue"` // microsoft.com
 }
 
+type SignedInfo struct {
+   Reference Reference `xml:"Reference"`  // microsoft.com
+   XmlNs     string    `xml:"xmlns,attr"` // microsoft.com
+}
+
 type WrmHeader struct {
    Data WrmHeaderData `xml:"DATA"` // microsoft.com
    // ATTRIBUTE ORDER MATTERS
@@ -167,7 +166,8 @@ type WrmHeader struct {
    Version string `xml:"version,attr"` // microsoft.com
 }
 
-type SignedInfo struct {
-   Reference Reference `xml:"Reference"`  // microsoft.com
-   XmlNs     string    `xml:"xmlns,attr"` // microsoft.com
+type WrmHeaderData struct {
+   ProtectInfo      ProtectInfo       `xml:"PROTECTINFO"`      // microsoft.com
+   CustomAttributes *CustomAttributes `xml:"CUSTOMATTRIBUTES"` // 9c9media.com
+   Kid              Bytes             `xml:"KID"`              // microsoft.com
 }

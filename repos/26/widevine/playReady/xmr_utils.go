@@ -2,6 +2,34 @@ package playReady
 
 import "encoding/binary"
 
+func decodePaddedString(data []byte) (PaddedString, int) {
+   length := binary.BigEndian.Uint32(data)
+   paddedLength := (length + 3) &^ 3
+   val := string(data[4 : 4+length])
+   return PaddedString(val), int(4 + paddedLength)
+}
+
+const (
+   HeaderLength  = (4 * 2) + 16 // Assuming SIZEOF(DRM_ID) == 16
+   MagicConstant = 0x584D5200   // 'XMR\0'
+)
+
+func UuidOrGuid(data []byte) {
+   data[0], data[3] = data[3], data[0]
+   data[1], data[2] = data[2], data[1]
+   data[4], data[5] = data[5], data[4]
+   data[6], data[7] = data[7], data[6]
+}
+
+func encodePaddedString(val PaddedString) []byte {
+   length := uint32(len(val))
+   paddedLength := (length + 3) &^ 3
+   data := make([]byte, int(4+paddedLength))
+   binary.BigEndian.PutUint32(data, length)
+   copy(data[4:], val)
+   return data
+}
+
 // AsymmetricEncryptionType is used for encrypting the content key
 type AsymmetricEncryptionType uint16
 
@@ -15,10 +43,65 @@ const (
    AsymmetricEncryptionTypeECC256ViaSymmetric AsymmetricEncryptionType = 0x0006
 )
 
-const (
-   HeaderLength  = (4 * 2) + 16 // Assuming SIZEOF(DRM_ID) == 16
-   MagicConstant = 0x584D5200   // 'XMR\0'
-)
+type AuxKey struct {
+   Valid       bool
+   Entries     uint16
+   EntriesList []AuxKeyEntry
+}
+
+type AuxKeyEntry struct {
+   Location uint32
+   Key      [16]byte
+}
+
+type ContentKey struct {
+   Valid                   bool
+   GuidKeyID               []byte
+   IGuidKeyID              uint32
+   SymmetricCipherType     uint16
+   KeyEncryptionCipherType uint16
+   CBEncryptedKey          uint16
+   EncryptedKeyBuffer      []byte
+   IEncryptedKey           uint32
+}
+
+type EccDeviceKey struct {
+   Valid        bool
+   EccCurveType uint16
+   IKeyData     uint32
+   CBKeyData    uint16
+   KeyData      []byte
+}
+
+type KeyMaterial struct {
+   Valid      bool
+   ContentKey ContentKey
+   ECCKey     EccDeviceKey
+   AuxKey     AuxKey
+}
+
+type License struct {
+   RightsIdBuffer []byte
+   IRightsId      uint32
+   Version        uint32
+   ContainerOuter OuterContainer
+   XMRLic         []byte
+   CBXMRLic       uint32
+}
+
+type OuterContainer struct {
+   Valid         bool
+   ContainerKeys KeyMaterial
+   Signature     Signature
+}
+
+type Signature struct {
+   Valid           bool
+   Type            uint16
+   SignatureBuffer []byte
+   ISignature      uint32
+   CBSignature     uint16
+}
 
 type XmrObject uint16
 
@@ -103,73 +186,6 @@ const (
    XmrObjectMaximumDefined                                XmrObject = 0x0052
 )
 
-type ContentKey struct {
-   Valid                   bool
-   GuidKeyID               []byte
-   IGuidKeyID              uint32
-   SymmetricCipherType     uint16
-   KeyEncryptionCipherType uint16
-   CBEncryptedKey          uint16
-   EncryptedKeyBuffer      []byte
-   IEncryptedKey           uint32
-}
-
-type EccDeviceKey struct {
-   Valid        bool
-   EccCurveType uint16
-   IKeyData     uint32
-   CBKeyData    uint16
-   KeyData      []byte
-}
-
-type AuxKeyEntry struct {
-   Location uint32
-   Key      [16]byte
-}
-
-type AuxKey struct {
-   Valid       bool
-   Entries     uint16
-   EntriesList []AuxKeyEntry
-}
-
-type KeyMaterial struct {
-   Valid      bool
-   ContentKey ContentKey
-   ECCKey     EccDeviceKey
-   AuxKey     AuxKey
-}
-
-type Signature struct {
-   Valid           bool
-   Type            uint16
-   SignatureBuffer []byte
-   ISignature      uint32
-   CBSignature     uint16
-}
-
-type OuterContainer struct {
-   Valid         bool
-   ContainerKeys KeyMaterial
-   Signature     Signature
-}
-
-type License struct {
-   RightsIdBuffer []byte
-   IRightsId      uint32
-   Version        uint32
-   ContainerOuter OuterContainer
-   XMRLic         []byte
-   CBXMRLic       uint32
-}
-
-func UuidOrGuid(data []byte) {
-   data[0], data[3] = data[3], data[0]
-   data[1], data[2] = data[2], data[1]
-   data[4], data[5] = data[5], data[4]
-   data[6], data[7] = data[7], data[6]
-}
-
 type ftlv struct {
    Flags  uint16
    Type   uint16
@@ -188,20 +204,4 @@ func decodeFtlv(data []byte) (ftlv, int) {
    f.Value = data[n:][:f.Length-8]
    n += len(f.Value)
    return f, n
-}
-
-func decodePaddedString(data []byte) (PaddedString, int) {
-   length := binary.BigEndian.Uint32(data)
-   paddedLength := (length + 3) &^ 3
-   val := string(data[4 : 4+length])
-   return PaddedString(val), int(4 + paddedLength)
-}
-
-func encodePaddedString(val PaddedString) []byte {
-   length := uint32(len(val))
-   paddedLength := (length + 3) &^ 3
-   data := make([]byte, int(4+paddedLength))
-   binary.BigEndian.PutUint32(data, length)
-   copy(data[4:], val)
-   return data
 }

@@ -119,6 +119,19 @@ type CertKey struct {
    UsageSet []uint32
 }
 
+type Certificate struct {
+   Header           CertHeader
+   BasicInfo        *BasicInfo
+   DeviceInfo       *DeviceInfo
+   FeatureInfo      *FeatureInfo
+   KeyInfo          *KeyInfo
+   ManufacturerInfo *ManufacturerInfo
+   SignatureInfo    *SignatureInfo
+
+   RecordOrder    []uint16
+   UnknownRecords map[uint16][]UnknownRecord
+}
+
 type Chain struct {
    Header       ChainHeader
    Certificates []Certificate
@@ -153,12 +166,6 @@ type FeatureInfo struct {
    FeatureSet        []uint32
 }
 
-type ObjectHeader struct {
-   Flags    uint16
-   Type     uint16
-   CbLength uint32
-}
-
 ///
 
 type KeyInfo struct {
@@ -167,10 +174,10 @@ type KeyInfo struct {
    Keys    []CertKey
 }
 
-type PaddedString string
-
-func (ps PaddedString) String() string {
-   return strings.TrimRight(string(ps), "\x00")
+type ManufacturerInfo struct {
+   Header              ObjectHeader
+   Flags               uint32
+   ManufacturerStrings ManufacturerStrings
 }
 
 type ManufacturerStrings struct {
@@ -179,10 +186,16 @@ type ManufacturerStrings struct {
    ModelNumber      PaddedString
 }
 
-type ManufacturerInfo struct {
-   Header              ObjectHeader
-   Flags               uint32
-   ManufacturerStrings ManufacturerStrings
+type ObjectHeader struct {
+   Flags    uint16
+   Type     uint16
+   CbLength uint32
+}
+
+type PaddedString string
+
+func (ps PaddedString) String() string {
+   return strings.TrimRight(string(ps), "\x00")
 }
 
 type SignatureData struct {
@@ -201,17 +214,4 @@ type SignatureInfo struct {
 type UnknownRecord struct {
    Flags uint16
    Value []byte
-}
-
-type Certificate struct {
-   Header           CertHeader
-   BasicInfo        *BasicInfo
-   DeviceInfo       *DeviceInfo
-   FeatureInfo      *FeatureInfo
-   KeyInfo          *KeyInfo
-   ManufacturerInfo *ManufacturerInfo
-   SignatureInfo    *SignatureInfo
-
-   RecordOrder    []uint16
-   UnknownRecords map[uint16][]UnknownRecord
 }

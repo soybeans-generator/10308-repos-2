@@ -12,34 +12,119 @@ import (
    "github.com/emmansun/gmsm/cipher"
 )
 
-type xmlKey struct {
-   PublicKey *ecdsa.PublicKey
-   X         [32]byte
+const magicConstantZero = "7ee9ed4af773224f00b8ea7efb027cbb"
+
+const wmrmPublicKey = "C8B6AF16EE941AADAA5389B4AF2C10E356BE42AF175EF3FACE93254E7B0B3D9B982B27B5CB2341326E56AA857DBFD5C634CE2CF9EA74FCA8F2AF5957EFEEA562"
+
+func GenerateKey() (*ecdsa.PrivateKey, error) {
+   return ecdsa.GenerateKey(elliptic.P256(), nil)
 }
 
-func (x *xmlKey) initialize() error {
-   privBytes := [32]byte{1}
-
-   privECDH, err := ecdh.P256().NewPrivateKey(privBytes[:])
-   if err != nil {
-      return err
+func ParseRawPrivateKey(data []byte) (*ecdsa.PrivateKey, error) {
+   if len(data) < 32 {
+      return nil, errors.New("private key data too short")
    }
-   pubBytes := privECDH.PublicKey().Bytes()
-   x.PublicKey, err = ecdsa.ParseUncompressedPublicKey(elliptic.P256(), pubBytes)
+   return ecdsa.ParseRawPrivateKey(elliptic.P256(), data[:32])
+}
+
+func PrivateKeyBytes(key *ecdsa.PrivateKey) ([]byte, error) {
+   ecdhKey, err := key.ECDH()
    if err != nil {
-      return err
+      return nil, err
+   }
+   pubBytes, err := publicKeyBytes(key)
+   if err != nil {
+      return nil, err
+   }
+   return append(ecdhKey.Bytes(), pubBytes...), nil
+}
+
+func aesEcbEncrypt(data, key []byte) ([]byte, error) {
+   block, err := aes.NewCipher(key)
+   if err != nil {
+      return nil, err
+   }
+   encData := make([]byte, len(data))
+   cipher.NewECBEncrypter(block).CryptBlocks(encData, data)
+   return encData, nil
+}
+
+func elGamalDecrypt(ciphertext []byte, privKey *ecdsa.PrivateKey) ([]byte, error) {
+   c1Bytes := [65]byte{4}
+   copy(c1Bytes[1:], ciphertext[:64])
+   c1, err := nistec.NewP256Point().SetBytes(c1Bytes[:])
+   if err != nil {
+      return nil, err
    }
 
-   copy(x.X[:], pubBytes[1:33])
-   return nil
+   c2Bytes := [65]byte{4}
+   copy(c2Bytes[1:], ciphertext[64:128])
+   c2, err := nistec.NewP256Point().SetBytes(c2Bytes[:])
+   if err != nil {
+      return nil, err
+   }
+
+   ecdhKey, err := privKey.ECDH()
+   if err != nil {
+      return nil, err
+   }
+
+   sharedSec, err := nistec.NewP256Point().ScalarMult(c1, ecdhKey.Bytes())
+   if err != nil {
+      return nil, err
+   }
+
+   invSec := nistec.NewP256Point().Negate(sharedSec)
+   mPoint := nistec.NewP256Point().Add(c2, invSec)
+   return mPoint.Bytes()[1:], nil
 }
 
-func (x *xmlKey) aesIv() []byte {
-   return x.X[:16]
+func elGamalEncrypt(data, pubKey *ecdsa.PublicKey) ([]byte, error) {
+   randY := [32]byte{1}
+
+   c1, err := nistec.NewP256Point().ScalarBaseMult(randY[:])
+   if err != nil {
+      return nil, err
+   }
+
+   keyECDH, err := pubKey.ECDH()
+   if err != nil {
+      return nil, err
+   }
+
+   keyPoint, err := nistec.NewP256Point().SetBytes(keyECDH.Bytes())
+   if err != nil {
+      return nil, err
+   }
+
+   sharedSec, err := nistec.NewP256Point().ScalarMult(keyPoint, randY[:])
+   if err != nil {
+      return nil, err
+   }
+
+   dataECDH, err := data.ECDH()
+   if err != nil {
+      return nil, err
+   }
+
+   dataPoint, err := nistec.NewP256Point().SetBytes(dataECDH.Bytes())
+   if err != nil {
+      return nil, err
+   }
+
+   c2 := nistec.NewP256Point().Add(dataPoint, sharedSec)
+
+   return append(c1.Bytes()[1:], c2.Bytes()[1:]...), nil
 }
 
-func (x *xmlKey) aesKey() []byte {
-   return x.X[16:]
+func elGamalKeyGeneration() (*ecdsa.PublicKey, error) {
+   uncompressed := [65]byte{4}
+   _, err := hex.Decode(uncompressed[1:], []byte(wmrmPublicKey))
+   if err != nil {
+      return nil, err
+   }
+
+   return ecdsa.ParseUncompressedPublicKey(elliptic.P256(), uncompressed[:])
 }
 
 func newLa(pubKey *ecdsa.PublicKey, cipherData, kid []byte, contentId string) (*xml.La, error) {
@@ -108,29 +193,6 @@ func newLa(pubKey *ecdsa.PublicKey, cipherData, kid []byte, contentId string) (*
    }, nil
 }
 
-func GenerateKey() (*ecdsa.PrivateKey, error) {
-   return ecdsa.GenerateKey(elliptic.P256(), nil)
-}
-
-func ParseRawPrivateKey(data []byte) (*ecdsa.PrivateKey, error) {
-   if len(data) < 32 {
-      return nil, errors.New("private key data too short")
-   }
-   return ecdsa.ParseRawPrivateKey(elliptic.P256(), data[:32])
-}
-
-func PrivateKeyBytes(key *ecdsa.PrivateKey) ([]byte, error) {
-   ecdhKey, err := key.ECDH()
-   if err != nil {
-      return nil, err
-   }
-   pubBytes, err := publicKeyBytes(key)
-   if err != nil {
-      return nil, err
-   }
-   return append(ecdhKey.Bytes(), pubBytes...), nil
-}
-
 func publicKeyBytes(key *ecdsa.PrivateKey) ([]byte, error) {
    ecdhKey, err := key.PublicKey.ECDH()
    if err != nil {
@@ -138,50 +200,6 @@ func publicKeyBytes(key *ecdsa.PrivateKey) ([]byte, error) {
    }
    // Return 64 bytes (X and Y coordinates) without the 0x04 uncompressed prefix
    return ecdhKey.Bytes()[1:], nil
-}
-
-const wmrmPublicKey = "C8B6AF16EE941AADAA5389B4AF2C10E356BE42AF175EF3FACE93254E7B0B3D9B982B27B5CB2341326E56AA857DBFD5C634CE2CF9EA74FCA8F2AF5957EFEEA562"
-
-const magicConstantZero = "7ee9ed4af773224f00b8ea7efb027cbb"
-
-func elGamalDecrypt(ciphertext []byte, privKey *ecdsa.PrivateKey) ([]byte, error) {
-   c1Bytes := [65]byte{4}
-   copy(c1Bytes[1:], ciphertext[:64])
-   c1, err := nistec.NewP256Point().SetBytes(c1Bytes[:])
-   if err != nil {
-      return nil, err
-   }
-
-   c2Bytes := [65]byte{4}
-   copy(c2Bytes[1:], ciphertext[64:128])
-   c2, err := nistec.NewP256Point().SetBytes(c2Bytes[:])
-   if err != nil {
-      return nil, err
-   }
-
-   ecdhKey, err := privKey.ECDH()
-   if err != nil {
-      return nil, err
-   }
-
-   sharedSec, err := nistec.NewP256Point().ScalarMult(c1, ecdhKey.Bytes())
-   if err != nil {
-      return nil, err
-   }
-
-   invSec := nistec.NewP256Point().Negate(sharedSec)
-   mPoint := nistec.NewP256Point().Add(c2, invSec)
-   return mPoint.Bytes()[1:], nil
-}
-
-func aesEcbEncrypt(data, key []byte) ([]byte, error) {
-   block, err := aes.NewCipher(key)
-   if err != nil {
-      return nil, err
-   }
-   encData := make([]byte, len(data))
-   cipher.NewECBEncrypter(block).CryptBlocks(encData, data)
-   return encData, nil
 }
 
 func xorKey(left, right []byte) []byte {
@@ -195,50 +213,32 @@ func xorKey(left, right []byte) []byte {
    return result
 }
 
-func elGamalEncrypt(data, pubKey *ecdsa.PublicKey) ([]byte, error) {
-   randY := [32]byte{1}
-
-   c1, err := nistec.NewP256Point().ScalarBaseMult(randY[:])
-   if err != nil {
-      return nil, err
-   }
-
-   keyECDH, err := pubKey.ECDH()
-   if err != nil {
-      return nil, err
-   }
-
-   keyPoint, err := nistec.NewP256Point().SetBytes(keyECDH.Bytes())
-   if err != nil {
-      return nil, err
-   }
-
-   sharedSec, err := nistec.NewP256Point().ScalarMult(keyPoint, randY[:])
-   if err != nil {
-      return nil, err
-   }
-
-   dataECDH, err := data.ECDH()
-   if err != nil {
-      return nil, err
-   }
-
-   dataPoint, err := nistec.NewP256Point().SetBytes(dataECDH.Bytes())
-   if err != nil {
-      return nil, err
-   }
-
-   c2 := nistec.NewP256Point().Add(dataPoint, sharedSec)
-
-   return append(c1.Bytes()[1:], c2.Bytes()[1:]...), nil
+type xmlKey struct {
+   PublicKey *ecdsa.PublicKey
+   X         [32]byte
 }
 
-func elGamalKeyGeneration() (*ecdsa.PublicKey, error) {
-   uncompressed := [65]byte{4}
-   _, err := hex.Decode(uncompressed[1:], []byte(wmrmPublicKey))
+func (x *xmlKey) aesIv() []byte {
+   return x.X[:16]
+}
+
+func (x *xmlKey) aesKey() []byte {
+   return x.X[16:]
+}
+
+func (x *xmlKey) initialize() error {
+   privBytes := [32]byte{1}
+
+   privECDH, err := ecdh.P256().NewPrivateKey(privBytes[:])
    if err != nil {
-      return nil, err
+      return err
+   }
+   pubBytes := privECDH.PublicKey().Bytes()
+   x.PublicKey, err = ecdsa.ParseUncompressedPublicKey(elliptic.P256(), pubBytes)
+   if err != nil {
+      return err
    }
 
-   return ecdsa.ParseUncompressedPublicKey(elliptic.P256(), uncompressed[:])
+   copy(x.X[:], pubBytes[1:33])
+   return nil
 }
