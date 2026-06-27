@@ -14,6 +14,9 @@ import (
    "41.neocities.org/diana/widevine"
 )
 
+// demo.unified-streaming.com/k8s/features
+const content_id = "fkj3ljaSdfalkr3j"
+
 func main() {
    log.SetFlags(log.Ltime)
    var client_id struct {
@@ -48,8 +51,26 @@ func main() {
    }
 }
 
-// demo.unified-streaming.com/k8s/features
-const content_id = "fkj3ljaSdfalkr3j"
+type client_info struct {
+   Name  string `json:"name"`
+   Value string `json:"value"`
+}
+
+type get_license struct {
+   ClientInfo           []*client_info `json:"client_info"`
+   ClientMaxHdcpVersion string         `json:"client_max_hdcp_version"`
+   DrmCertSerialNumber  []byte         `json:"drm_cert_serial_number"`
+   InternalStatus       int            `json:"internal_status"`
+   Make                 string
+   Model                string
+   OemCryptoApiVersion  int `json:"oem_crypto_api_version"`
+   Platform             string
+   SecurityLevel        int `json:"security_level"`
+   Soc                  string
+   Status               string
+   StatusMessage        string `json:"status_message"`
+   SystemId             int    `json:"system_id"`
+}
 
 func (g *get_license) New(pem_bytes, client_id []byte) error {
    var pssh widevine.PsshData
@@ -123,25 +144,4 @@ func (g *get_license) String() string {
    b = fmt.Appendf(b, "system_id: %d\n", g.SystemId)
 
    return string(bytes.TrimRight(b, "\n"))
-}
-
-type client_info struct {
-   Name  string `json:"name"`
-   Value string `json:"value"`
-}
-
-type get_license struct {
-   ClientInfo           []*client_info `json:"client_info"`
-   ClientMaxHdcpVersion string         `json:"client_max_hdcp_version"`
-   DrmCertSerialNumber  []byte         `json:"drm_cert_serial_number"`
-   InternalStatus       int            `json:"internal_status"`
-   Make                 string
-   Model                string
-   OemCryptoApiVersion  int `json:"oem_crypto_api_version"`
-   Platform             string
-   SecurityLevel        int `json:"security_level"`
-   Soc                  string
-   Status               string
-   StatusMessage        string `json:"status_message"`
-   SystemId             int    `json:"system_id"`
 }

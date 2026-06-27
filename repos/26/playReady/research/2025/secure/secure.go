@@ -8,13 +8,6 @@ import (
    "os"
 )
 
-type device_id [32]byte
-
-func (d *device_id) UnmarshalText(data []byte) error {
-   copy(d[:], data)
-   return nil
-}
-
 func main() {
    in := flag.String("i", "", "input")
    out := flag.String("o", "keybox.bin", "output")
@@ -33,6 +26,13 @@ func main() {
    } else {
       flag.Usage()
    }
+}
+
+type device_id [32]byte
+
+func (d *device_id) UnmarshalText(data []byte) error {
+   copy(d[:], data)
+   return nil
 }
 
 type hex_data []byte

@@ -1,12 +1,51 @@
 package main
 
 import (
-   "41.neocities.org/diana/playReady"
    "flag"
    "fmt"
    "log"
    "os"
+
+   "41.neocities.org/diana/playReady"
 )
+
+func main() {
+   log.SetFlags(log.Ltime)
+   err := new(client).do()
+   if err != nil {
+      log.Fatal(err)
+   }
+}
+
+func write_file(name string, data []byte) error {
+   log.Println("WriteFile", name)
+   return os.WriteFile(name, data, os.ModePerm)
+}
+
+type client struct {
+   // 1
+   certificate string
+   // 2
+   key string
+}
+
+func (c *client) do() error {
+   // 1
+   flag.StringVar(&c.certificate, "c", "", "certificate")
+   // 2
+   flag.StringVar(&c.key, "k", "", "key")
+   flag.Parse()
+   if c.certificate != "" {
+      // 2
+      if c.key != "" {
+         return c.do_certificate_key()
+      }
+      // 1
+      return c.do_certificate()
+   }
+   flag.Usage()
+   return nil
+}
 
 func (c *client) do_certificate() error {
    data, err := os.ReadFile(c.certificate)
@@ -17,9 +56,13 @@ func (c *client) do_certificate() error {
    if err != nil {
       return err
    }
-   for _, certificate := range chain.Certificates {
-      fmt.Printf("%+v\n", certificate.ManufacturerInfo)
+
+   if len(chain.Certificates) == 0 {
+      return fmt.Errorf("no certificates found in the chain")
    }
+
+   fmt.Println(&chain.Certificates[0])
+
    return nil
 }
 
@@ -69,42 +112,4 @@ func (c *client) do_certificate_key() error {
       return err
    }
    return write_file("zprivsig.dat", data)
-}
-
-func write_file(name string, data []byte) error {
-   log.Println("WriteFile", name)
-   return os.WriteFile(name, data, os.ModePerm)
-}
-
-func main() {
-   log.SetFlags(log.Ltime)
-   err := new(client).do()
-   if err != nil {
-      log.Fatal(err)
-   }
-}
-
-func (c *client) do() error {
-   // 1
-   flag.StringVar(&c.certificate, "c", "", "certificate")
-   // 2
-   flag.StringVar(&c.key, "k", "", "key")
-   flag.Parse()
-   if c.certificate != "" {
-      // 2
-      if c.key != "" {
-         return c.do_certificate_key()
-      }
-      // 1
-      return c.do_certificate()
-   }
-   flag.Usage()
-   return nil
-}
-
-type client struct {
-   // 1
-   certificate string
-   // 2
-   key string
 }
