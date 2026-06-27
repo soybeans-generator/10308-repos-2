@@ -8,6 +8,21 @@ import (
    "os"
 )
 
+func (c *client) do_certificate() error {
+   data, err := os.ReadFile(c.certificate)
+   if err != nil {
+      return err
+   }
+   chain, err := playReady.ParseChain(data)
+   if err != nil {
+      return err
+   }
+   for _, certificate := range chain.Certificates {
+      fmt.Printf("%+v\n", certificate.ManufacturerInfo)
+   }
+   return nil
+}
+
 func (c *client) do_certificate_key() error {
    data, err := os.ReadFile(c.certificate)
    if err != nil {
@@ -84,21 +99,6 @@ func (c *client) do() error {
       return c.do_certificate()
    }
    flag.Usage()
-   return nil
-}
-
-func (c *client) do_certificate() error {
-   data, err := os.ReadFile(c.certificate)
-   if err != nil {
-      return err
-   }
-   chain, err := playReady.ParseChain(data)
-   if err != nil {
-      return err
-   }
-   for _, certificate := range chain.Certificates {
-      fmt.Printf("%+v\n", certificate.ManufacturerInfo)
-   }
    return nil
 }
 
