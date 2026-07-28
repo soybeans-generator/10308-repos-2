@@ -2,7 +2,8 @@
 
 > Every second counts
 >
-> [Clairo](//youtube.com/watch?v=CeA92xqw-QI) (2019)
+> Clairo (2019)
+> https://youtube.com/watch?v=CeA92xqw-QI
 
 documentation generator
 
