@@ -1,4 +1,3 @@
-// parser.go
 package claire
 
 import (
@@ -178,3 +177,5 @@ func (p *PackageDoc) Render(outputPath string) error {
    defer file.Close()
    return tmpl.Execute(file, p)
 }
+
+// parser.go

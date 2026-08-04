@@ -1,4 +1,3 @@
-// types.go
 package claire
 
 import (
@@ -35,3 +34,5 @@ type VarDoc struct {
    Doc        string
    Definition template.HTML
 }
+
+// types.go

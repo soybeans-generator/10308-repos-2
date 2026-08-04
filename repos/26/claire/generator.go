@@ -1,4 +1,3 @@
-// generator.go
 package claire
 
 import (
@@ -117,3 +116,5 @@ func findAllPackageDirs(root string) ([]string, error) {
 
    return packages, err
 }
+
+// generator.go
