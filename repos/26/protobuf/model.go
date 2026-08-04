@@ -1,4 +1,3 @@
-// model.go
 package protobuf
 
 // Field represents a single, decoded field in a protobuf message.
@@ -131,3 +130,5 @@ type Tag struct {
    Number uint32
    Type   Type
 }
+
+// model.go

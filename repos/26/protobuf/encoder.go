@@ -1,4 +1,3 @@
-// encoder.go
 package protobuf
 
 import (
@@ -154,3 +153,5 @@ func (m Message) Encode() ([]byte, error) {
    }
    return buffer.Bytes(), nil
 }
+
+// encoder.go

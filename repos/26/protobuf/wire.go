@@ -1,4 +1,3 @@
-// wire.go
 package protobuf
 
 import (
@@ -81,3 +80,5 @@ const (
    WireEndGroup   Type = 4 // Deprecated
    WireFixed32    Type = 5
 )
+
+// wire.go
