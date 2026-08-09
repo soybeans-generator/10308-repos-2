@@ -102,7 +102,10 @@ func findAllPackageDirs(root string) ([]string, error) {
          strings.HasSuffix(name, ".go") &&
          !strings.HasSuffix(name, "_test.go") {
          dir := filepath.Dir(path)
-         relDir, _ := filepath.Rel(root, dir)
+         relDir, err := filepath.Rel(root, dir)
+         if err != nil {
+            return err
+         }
          packageSet[relDir] = struct{}{}
       }
 
