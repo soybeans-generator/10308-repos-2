@@ -94,7 +94,11 @@ func (it *Iterator) Field() *Field {
 // when there are no more matching fields.
 func (it *Iterator) Next() bool {
    for i := it.cursor + 1; i < len(it.message); i++ {
-      if it.message[i].Tag.Number == it.fieldNum {
+      field := it.message[i]
+      if field == nil || field.Tag == nil {
+         continue
+      }
+      if field.Tag.Number == it.fieldNum {
          it.cursor = i
          return true
       }
