@@ -96,10 +96,15 @@ func findAllPackageDirs(root string) ([]string, error) {
          return err
       }
 
-      name := d.Name()
+      if d.IsDir() {
+         if path != root && d.Name() == "vendor" {
+            return filepath.SkipDir
+         }
+         return nil
+      }
 
-      if !d.IsDir() &&
-         strings.HasSuffix(name, ".go") &&
+      name := d.Name()
+      if strings.HasSuffix(name, ".go") &&
          !strings.HasSuffix(name, "_test.go") {
          dir := filepath.Dir(path)
          relDir, err := filepath.Rel(root, dir)
