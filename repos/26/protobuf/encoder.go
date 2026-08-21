@@ -114,6 +114,10 @@ func (m Message) Encode() ([]byte, error) {
    var scratch [binary.MaxVarintLen64]byte
 
    for _, field := range m {
+      if field == nil || field.Tag == nil {
+         return nil, fmt.Errorf("cannot encode field: nil field or nil tag")
+      }
+
       var valueBytes []byte
 
       if field.Tag.Type == WireBytes {
