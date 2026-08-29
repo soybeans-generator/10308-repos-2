@@ -96,7 +96,7 @@ func (c *client) do_dash_id() error {
    return maya.DownloadDash(string(c.dash_id), &manifest, &maya.Options{
       Device:  string(c.Widevine),
       Drm:     maya.DrmWidevine,
-      License: media.License,
+      License: media.LicenseWidevine,
    })
 }
 
@@ -110,7 +110,7 @@ func (c *client) do_program_id() error {
    if err != nil {
       return err
    }
-   media, err := session.FetchMedia(int(c.program_id), string(c.quality))
+   media, err := session.FetchMedia(int(c.program_id), string(c.quality), "widevine")
    if err != nil {
       return err
    }
