@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Documentation for {{.Name}}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="{{.StyleSheetPath}}">
+    <meta charset="utf-8">
     {{if and .ImportPath .RepositoryUrl}}
     <meta name="go-import" content="{{.ImportPath}} git {{.RepositoryUrl}}">
     {{end}}
-    <link rel="stylesheet" href="{{.StyleSheetPath}}">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Documentation for {{.Name}}</title>
 </head>
 <body>
     <h1>
