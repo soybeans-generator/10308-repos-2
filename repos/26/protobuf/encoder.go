@@ -108,6 +108,11 @@ func DecodeTag(buffer []byte) (*Tag, int, error) {
 }
 
 // Encode serializes the message into the protobuf wire format.
+//
+// For WireBytes fields, Bytes takes precedence: if it is non-nil, it is
+// written verbatim. Message is only encoded when Bytes is nil (i.e.,
+// fields built via Embed). An empty-but-non-nil Bytes ([]byte{} or
+// []byte("")) encodes as a zero-length field, same as an empty Message.
 func (m Message) Encode() ([]byte, error) {
    var buffer bytes.Buffer
    // Allocate a small buffer on the stack to prevent heap allocations inside the loop
@@ -121,7 +126,10 @@ func (m Message) Encode() ([]byte, error) {
       var valueBytes []byte
 
       if field.Tag.Type == WireBytes {
-         if field.Message != nil {
+         if field.Bytes == nil {
+            // No raw bytes: treat the field as an embedded message.
+            // Note: Encode on a nil Message is safe and yields no bytes,
+            // so Embed(1) with no sub-fields encodes as a zero-length field.
             encoded, err := field.Message.Encode()
             if err != nil {
                return nil, fmt.Errorf("failed to encode embedded message for field %d: %w", field.Tag.Number, err)
