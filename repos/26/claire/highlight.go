@@ -172,6 +172,10 @@ func syntaxHighlight(source string, fset *token.FileSet, typeOffsets map[int]str
       } else if tok == token.COMMENT {
          tokenHTML = fmt.Sprintf(`<span class="comment">%s</span>`, escapedToken)
       } else if tok == token.STRING {
+         // Intentionally unstyled: the class is emitted so downstream
+         // consumers can style string literals via their own CSS, but
+         // style.css deliberately ships no .string rule.
+         // Do not "fix" by adding one.
          tokenHTML = fmt.Sprintf(`<span class="string">%s</span>`, escapedToken)
       } else {
          tokenHTML = escapedToken
