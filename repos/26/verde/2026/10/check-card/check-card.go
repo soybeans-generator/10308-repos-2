@@ -23,7 +23,6 @@ var targets = []string{
    "LA MADELEINE",
    "MCDONALD'S",
    "POBLANOS PIRI PIR",
-   "ROMANO'S PIZ",
    "SCHLOTZSKYS",
    "SHAKE SHACK",
    "SHAWARMA PRESS",
