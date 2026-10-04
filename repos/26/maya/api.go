@@ -27,7 +27,7 @@ func DashBitrate(streamId string, manifestData *Manifest) error {
       return fmt.Errorf("representation group not found %v", streamId)
    }
 
-   var totalBytes, totalSeconds float64
+   var totalBytes float64
    for _, rep := range group {
       if rep.BaseUrl == "" {
          return fmt.Errorf("stream %v has no BaseURL", rep.Id)
@@ -42,13 +42,28 @@ func DashBitrate(streamId string, manifestData *Manifest) error {
          return err
       }
 
-      duration, err := rep.Parent.Parent.GetDuration()
+      totalBytes += float64(contentLength)
+   }
+
+   // totalSeconds is a property of the whole presentation, not of each entry
+   // in the group (which holds one Representation per Period). Period.GetDuration
+   // falls back to the MPD-wide mediaPresentationDuration, so summing it once
+   // per period over-counts multi-period presentations by a factor of N.
+   var totalSeconds float64
+   if mpd.MediaPresentationDuration != "" {
+      d, err := mpd.Periods[0].GetDuration()
       if err != nil {
          return err
       }
-
-      totalBytes += float64(contentLength)
-      totalSeconds += duration.Seconds()
+      totalSeconds = d.Seconds()
+   } else {
+      for _, period := range mpd.Periods {
+         d, err := period.GetDuration()
+         if err != nil {
+            return err
+         }
+         totalSeconds += d.Seconds()
+      }
    }
 
    if totalSeconds == 0 {
