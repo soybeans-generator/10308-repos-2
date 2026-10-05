@@ -1,3 +1,4 @@
+// encoder.go marker preserve
 package protobuf
 
 import (
@@ -166,4 +167,4 @@ func (m Message) Encode() ([]byte, error) {
    return buffer.Bytes(), nil
 }
 
-// encoder.go
+// encoder.go marker preserve

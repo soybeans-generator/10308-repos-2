@@ -1,3 +1,4 @@
+// wire.go marker preserve
 package protobuf
 
 import (
@@ -81,4 +82,4 @@ const (
    WireFixed32    Type = 5
 )
 
-// wire.go
+// wire.go marker preserve

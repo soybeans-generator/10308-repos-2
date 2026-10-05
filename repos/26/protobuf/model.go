@@ -1,3 +1,4 @@
+// model.go marker preserve
 package protobuf
 
 // Field represents a single, decoded field in a protobuf message.
@@ -135,4 +136,4 @@ type Tag struct {
    Type   Type
 }
 
-// model.go
+// model.go marker preserve
