@@ -86,6 +86,10 @@ async function main() {
    const response = await fetch('/umber/umber.json');
    let records = await response.json();
 
+   // `d` is measured from the oldest D in the whole JSON, so fix that
+   // first, before any `?t=` filtering changes the list
+   const oldest = records.reduce((min, row) => Math.min(min, row.D), Infinity);
+
    if (query.has('t')) {
       const needle = query.get('t');
       records = records.filter(row => label(row).toLowerCase().includes(needle));
@@ -93,8 +97,12 @@ async function main() {
 
    records.sort((x, y) => y.D - x.D);
 
-   const timeParam = query.get('d');
-   const start = timeParam === null ? 0 : records.findIndex(row => row.D <= Number(timeParam));
+   // `d` is now the difference between the first D on the page and the
+   // oldest D in the JSON, i.e. records[start].D - oldest
+   const offset = query.get('d');
+   const start = offset === null
+      ? 0
+      : records.findIndex(row => row.D <= oldest + Number(offset));
 
    if (start === -1) {
       return;
@@ -103,28 +111,12 @@ async function main() {
    const chunk = records.slice(start, start + limit);
    document.getElementById('figures').append(...chunk.map(build));
 
-   // the roundest timestamp that still opens the page starting at `index`:
-   // any value in [records[index].D, records[index - 1].D) does, so take the
-   // one with the most trailing zeroes that fits below the previous record
-   const landmark = index => {
-      const target = records[index].D;
-      const before = index === 0 ? Infinity : records[index - 1].D;
-
-      for (let digits = 9; digits > 0; digits--) {
-         const power = 10 ** digits;
-         const remainder = target % power;
-         const round = remainder ? target - remainder + power : target;
-         if (round < before) {
-            return round;
-         }
-      }
-
-      return target; // neighbours too close to round at all
-   };
+   // the value for the page whose first row is `records[index]`
+   const stamp = index => String(records[index].D - oldest);
 
    const older = document.getElementById('older');
    if (start + limit < records.length) {
-      query.set('d', String(landmark(start + limit)));
+      query.set('d', stamp(start + limit));
       older.href = '?' + query.toString();
    } else {
       older.remove();
@@ -134,9 +126,9 @@ async function main() {
    if (start > 0) {
       const target = Math.max(0, start - limit);
       if (target === 0) {
-         query.delete('d'); // rounder than any round number: no d at all
+         query.delete('d'); // the natural default: start at the newest page
       } else {
-         query.set('d', String(landmark(target)));
+         query.set('d', stamp(target));
       }
       newer.href = '?' + query.toString();
    } else {
