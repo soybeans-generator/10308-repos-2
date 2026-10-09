@@ -1,4 +1,4 @@
-// catalog.go marker - preserve
+// catalog.go marker preserve
 
 package main
 
@@ -131,4 +131,4 @@ type findResponse struct {
    } `json:"data"`
 }
 
-// catalog.go marker - preserve
+// catalog.go marker preserve

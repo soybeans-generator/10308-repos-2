@@ -1,4 +1,4 @@
-// main.go marker - preserve
+// main.go marker preserve
 
 package main
 
@@ -21,28 +21,36 @@ import (
 const outputFile = "output.txt"
 
 // topPct is how much of the ranked field the output carries, as a
-// percentage of all provider rows: every row is ordered by GPQA Diamond
-// descending, the first topPct% are kept, and those are re-sorted by
-// throughput before printing. The -top flag has no default: it must be
-// given on the command line. The percentage is printed in the output
-// header and the resolved row count in the run log, so the cut is never
-// implicit.
+// percentage of the distinct GPQA Diamond score values: rows are ordered by
+// GPQA Diamond descending, the top topPct% of distinct scores (each value
+// counted once, however many rows carry it) are kept, and those rows are
+// re-sorted by throughput before printing. Counting distinct values means a
+// score many providers tie on cannot crowd the score below it out of the
+// cut. The -top flag has no default: it must be given on the command line.
+// The percentage is printed in the output header and the resolved counts in
+// the run log, so the cut is never implicit.
 var topPct = &topFlag{}
 
 func init() {
-   flag.Var(topPct, "top", "percentage of provider rows kept after ranking by GPQA Diamond (required, no default)")
+   flag.Var(topPct, "top", "percentage of distinct GPQA Diamond score values kept after ranking (required, no default)")
 }
 
-// keptRows resolves the topPct cut against a field of totalRows rows:
-// ceil(totalRows * topPct/100), but never fewer than 1 — a nonempty field
-// always keeps its best row — and never more than totalRows itself. A
-// nonpositive totalRows keeps 0; the caller's empty-field guard handles
-// that case, so the truncating slice never overruns.
-func keptRows(totalRows int) int {
-   if totalRows <= 0 {
-      return 0
+// keptValues resolves the topPct cut against a field's distinct score
+// values, sorted descending. It returns the lowest value that stays (the
+// cutoff) and how many distinct values that is, both in whatever integral
+// unit the caller supplies (main passes tenths of a percent). The
+// percentage is taken over the distinct values — a score many rows tie on
+// counts once — so a crowded top score cannot consume the whole quota and
+// crowd the next score down out of the cut. ceil(count * topPct/100) values
+// are kept, never fewer than one (a nonempty field keeps its best value)
+// and never more than the number of values itself. A nonpositive count
+// keeps 0; the caller's empty-field guard handles that case.
+func keptValues(sorted []int) (cutoff int, kept int) {
+   if len(sorted) == 0 {
+      return 0, 0
    }
-   return min(totalRows, max(1, int(math.Ceil(float64(totalRows)*topPct.value/100))))
+   kept = min(len(sorted), max(1, int(math.Ceil(float64(len(sorted))*topPct.value/100))))
+   return sorted[kept-1], kept
 }
 
 func main() {
@@ -127,31 +135,54 @@ func run() error {
       rows = append(rows, rs...)
    }
 
-   // --- 3. Rank by score, then cut: order every provider row by GPQA
-   // Diamond descending and keep the first topPct% of them — keptRows
-   // resolves the percentage to a row count, rounded up.
+   // --- 3. Rank by score, then cut. The percentage is applied to the
+   // distinct score values — each value counts once, however many rows carry
+   // it — not to the rows, so a top score many providers tie on cannot crowd
+   // the next score down out of the cut. Every row at or above the cutoff
+   // value stays, so a value is never split partway.
    totalRows := len(rows)
    slices.SortFunc(rows, func(a, b *row) int {
       return cmp.Compare(b.GPQA, a.GPQA)
    })
-   if keep := keptRows(totalRows); keep < len(rows) {
-      rows = rows[:keep]
+
+   // Distinct scores, descending, in tenths of a percent — the unit the
+   // report prints (%.1f%%). rows is now score-ordered, so equal scores are
+   // adjacent and each value enters once. Rounding to the printed unit is
+   // what makes "same value" well-defined: an interpolated median is not
+   // always bit-identical to a stored score (median of 92 and 94 is
+   // 93.00000000000001, not 93), and an exact `!=` would split that tie.
+   values := make([]int, 0, len(rows))
+   for _, r := range rows {
+      v := int(math.Round(r.GPQA * 1000))
+      if len(values) == 0 || v != values[len(values)-1] {
+         values = append(values, v)
+      }
    }
 
+   cutoff, valuesKept := keptValues(values)
+   kept := 0
+   for kept < len(rows) && int(math.Round(rows[kept].GPQA*1000)) >= cutoff {
+      kept++
+   }
+   rows = rows[:kept]
+
    // A run that ranks nothing is a misconfiguration, not a result: say so
-   // rather than printing a bare header. (Delete this block if an empty
-   // list should exit 0.)
+   // rather than printing a bare header. With any row above, keptValues
+   // never returns fewer than one value, so this can only fire on an empty
+   // field; kept anyway.
    if len(rows) == 0 {
       return fmt.Errorf("no provider rows to rank: %d candidates, %d skipped for absent data, %d rows",
          len(cands), skipped, totalRows)
    }
 
-   // The cut's size and bounds: how many rows topPct% resolved to, and the
-   // highest and lowest GPQA Diamond score among them. rows is still
-   // score-ordered here, so the first row carries the highest and the last
-   // row the lowest — all of it must be read before the throughput
-   // re-order below, which scrambles the positions.
-   fmt.Fprintf(os.Stderr, "\ntop %.0f%% of %d provider rows: kept %d\n", topPct.value, totalRows, len(rows))
+   // The cut's size and bounds: the distinct-value and kept-row counts that
+   // topPct% resolved to, and the highest and lowest GPQA Diamond score
+   // among the kept rows. rows is still score-ordered here, so the first row
+   // carries the highest and the last row the lowest — all of it must be
+   // read before the throughput re-order below, which scrambles the
+   // positions.
+   fmt.Fprintf(os.Stderr, "\ntop %.0f%% of %d distinct scores: kept %d rows across %d value(s)\n",
+      topPct.value, len(values), len(rows), valuesKept)
    fmt.Fprintf(os.Stderr, "highest gpqa diamond in top %.0f%%: %.1f%%\n", topPct.value, rows[0].GPQA*100)
    fmt.Fprintf(os.Stderr, "lowest gpqa diamond in top %.0f%%: %.1f%%\n", topPct.value, rows[len(rows)-1].GPQA*100)
 
@@ -162,7 +193,7 @@ func run() error {
    })
 
    // The header stays on the console; only the row items go to the file.
-   fmt.Printf("top %.0f%% by gpqa diamond score, sorted by: throughput, descending\n\n", topPct.value)
+   fmt.Printf("top %.0f%% of distinct gpqa diamond scores, sorted by: throughput, descending\n\n", topPct.value)
 
    f, err := os.Create(outputFile)
    if err != nil {
@@ -202,4 +233,4 @@ func (f *topFlag) String() string {
    return strconv.FormatFloat(f.value, 'g', -1, 64)
 }
 
-// main.go marker - preserve
+// main.go marker preserve

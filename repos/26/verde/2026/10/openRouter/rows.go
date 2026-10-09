@@ -1,4 +1,4 @@
-// rows.go marker - preserve
+// rows.go marker preserve
 
 package main
 
@@ -132,4 +132,4 @@ func rowsFromScores(cd *candidate, scores []scoreEntry, throughputByEndpoint map
    return rows, len(gpqaByProvider), nil
 }
 
-// rows.go marker - preserve
+// rows.go marker preserve
