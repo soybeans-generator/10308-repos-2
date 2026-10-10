@@ -15,11 +15,9 @@ adb shell getprop ro.product.cpu.abilist64
 ## Step 3: Download the Magisk APK and the Go script, then run the patch script
 Download the Magisk APK from the official releases page: <https://github.com/topjohnwu/magisk/releases>
 
-Download the Go patch script from: <https://github.com/3052/verde/tree/main/2026/7/magisk>
-
 With the emulator running, execute the script (replace `Magisk-v30.7.apk` with your downloaded filename):
 ```bash
-go run patch.go -apk Magisk-v30.7.apk -img ramdisk.img -init-bits 32
+go run magisk.go -apk Magisk-v30.7.apk -img ramdisk.img -init-bits 32
 ```
 
 ## Step 4: Replace the ramdisk in your system images directory
