@@ -3,14 +3,14 @@ module 41.neocities.org/maya
 go 1.27.0
 
 require (
-	41.neocities.org/diana v1.10.3
-	41.neocities.org/luna v1.35.0
-	41.neocities.org/sofia v1.15.9
+	41.neocities.org/diana v1.10.7
+	41.neocities.org/luna v1.35.4
+	41.neocities.org/sofia v1.16.0
 )
 
 require (
-	41.neocities.org/protobuf v1.7.6 // indirect
+	41.neocities.org/protobuf v1.7.8 // indirect
 	filippo.io/nistec v0.0.4 // indirect
 	github.com/emmansun/gmsm v0.45.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )

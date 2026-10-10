@@ -91,7 +91,7 @@ func DashDownload(streamId string, manifestData *Manifest, optionsData *Options)
    return downloadDash(mpd, streamId, kFetcher)
 }
 
-func HlsDownload(streamId string, manifestData *Manifest, optionsData *Options) error {
+func HlsDownload(streamId int, manifestData *Manifest, optionsData *Options) error {
    if optionsData == nil {
       optionsData = &Options{}
    }

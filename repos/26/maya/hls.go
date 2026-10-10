@@ -8,10 +8,11 @@ import (
    "net/url"
    "path"
    "slices"
+   "strconv"
 )
 
 // downloadHls parses an HLS manifest, extracts all necessary data, and passes it to the central orchestrator.
-func downloadHls(playlist *hls.MasterPlaylist, streamId string, fetchKey keyFetcher) error {
+func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher) error {
    targetUri, err := getHlsStreamUrl(playlist, streamId)
    if err != nil {
       return err
@@ -42,7 +43,7 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId string, fetchKey keyFetc
       }
    }
    job := &downloadJob{
-      outputFileNameBase: streamId,
+      outputFileNameBase: strconv.Itoa(streamId),
       info:               info,
       allRequests:        allRequests,
       initSegmentData:    initData,
@@ -67,7 +68,7 @@ func fetchMediaPlaylist(mediaUrl *url.URL) (*hls.MediaPlaylist, error) {
 }
 
 // getHlsStreamUrl finds the correct stream in an HLS playlist by its ID and returns its URI.
-func getHlsStreamUrl(playlist *hls.MasterPlaylist, streamId string) (*url.URL, error) {
+func getHlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, error) {
    for _, variant := range playlist.StreamInfs {
       if variant.Id == streamId {
          return variant.Uri, nil
@@ -78,7 +79,7 @@ func getHlsStreamUrl(playlist *hls.MasterPlaylist, streamId string) (*url.URL, e
          return rendition.Uri, nil
       }
    }
-   return nil, fmt.Errorf("stream with ID not found: %s", streamId)
+   return nil, fmt.Errorf("stream with ID not found: %d", streamId)
 }
 
 // listStreamsHls is an internal helper to print streams from a parsed playlist
