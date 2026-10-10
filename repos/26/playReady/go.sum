@@ -1,8 +1,8 @@
-41.neocities.org/protobuf v1.7.6 h1:+WvXOR8dZDLzN1PUYU7UoS+rXeTbk4mSVjtZd0dZMK0=
-41.neocities.org/protobuf v1.7.6/go.mod h1:rodstWMPJn6uy7G5afSR2GCz4v4Q8rBbiFn9hOd/k5o=
+41.neocities.org/protobuf v1.7.7 h1:WBlJdjKkDyecCER2IWo88WEfkeGaTMWlcQhIHZqD7yc=
+41.neocities.org/protobuf v1.7.7/go.mod h1:oxOLuB0urSf6Tt1GaEXVMJBS1SIvyY23ax4It1o3iNQ=
 filippo.io/nistec v0.0.4 h1:F14ZHT5htWlMnQVPndX9ro9arf56cBhQxq4LnDI491s=
 filippo.io/nistec v0.0.4/go.mod h1:PK/lw8I1gQT4hUML4QGaqljwdDaFcMyFKSXN7kjrtKI=
-github.com/emmansun/gmsm v0.44.1 h1:zDTkdtLWFG0vCbhPV+k9pte14tix/eK71At9Iai9fP4=
-github.com/emmansun/gmsm v0.44.1/go.mod h1:p6RIUta0/KboFHrOxr1x8q+pd8RZtdaTO7XNp0RmMQM=
-golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
-golang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+github.com/emmansun/gmsm v0.45.0 h1:PU/6ObyR3g05YN3jn1L5GZDowzyAi8Xhkq4svzYNyiA=
+github.com/emmansun/gmsm v0.45.0/go.mod h1:HgLSvmdePGLo+Fo2PNgdTQU6lqAepSyriSQJRpECY6w=
+golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
+golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
