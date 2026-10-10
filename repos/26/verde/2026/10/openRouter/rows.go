@@ -1,5 +1,4 @@
 // rows.go marker preserve
-
 package main
 
 import (

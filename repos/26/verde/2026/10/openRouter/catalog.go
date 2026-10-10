@@ -1,5 +1,4 @@
 // catalog.go marker preserve
-
 package main
 
 import (

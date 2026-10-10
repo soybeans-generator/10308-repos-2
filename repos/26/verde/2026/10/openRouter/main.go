@@ -6,7 +6,6 @@ import (
    "cmp"
    "flag"
    "fmt"
-   "math"
    "net/http"
    "os"
    "slices"
@@ -20,42 +19,25 @@ import (
 // stays on the console.
 const outputFile = "output.txt"
 
-// topPct is how much of the ranked field the output carries, as a
-// percentage of the distinct GPQA Diamond score values: rows are ordered by
-// GPQA Diamond descending, the top topPct% of distinct scores (each value
-// counted once, however many rows carry it) are kept, and those rows are
-// re-sorted by throughput before printing. Counting distinct values means a
-// score many providers tie on cannot crowd the score below it out of the
-// cut. The -top flag has no default: it must be given on the command line.
-// The percentage is printed in the output header and the resolved counts in
-// the run log, so the cut is never implicit.
-var topPct = &topFlag{}
+// topN is how many models the output carries. Every model/provider
+// combination is ordered by GPQA Diamond descending, then the minimum
+// number of combinations is taken from the top of that ranking that
+// contains topN distinct models. A model is counted once, however many
+// combinations it contributes, and the walk stops at the first combination
+// whose model would exceed the quota — nothing below that point is kept.
+// The kept rows are then re-sorted by throughput before printing. The -top
+// flag has no default: it must be given on the command line. The requested
+// count and the count it resolved to are both logged, so the cut is never
+// implicit.
+var topN = &topFlag{}
 
 func init() {
-   flag.Var(topPct, "top", "percentage of distinct GPQA Diamond score values kept after ranking (required, no default)")
-}
-
-// keptValues resolves the topPct cut against a field's distinct score
-// values, sorted descending. It returns the lowest value that stays (the
-// cutoff) and how many distinct values that is, both in whatever integral
-// unit the caller supplies (main passes tenths of a percent). The
-// percentage is taken over the distinct values — a score many rows tie on
-// counts once — so a crowded top score cannot consume the whole quota and
-// crowd the next score down out of the cut. ceil(count * topPct/100) values
-// are kept, never fewer than one (a nonempty field keeps its best value)
-// and never more than the number of values itself. A nonpositive count
-// keeps 0; the caller's empty-field guard handles that case.
-func keptValues(sorted []int) (cutoff int, kept int) {
-   if len(sorted) == 0 {
-      return 0, 0
-   }
-   kept = min(len(sorted), max(1, int(math.Ceil(float64(len(sorted))*topPct.value/100))))
-   return sorted[kept-1], kept
+   flag.Var(topN, "top", "number of models kept (required, no default)")
 }
 
 func main() {
    flag.Parse()
-   if !topPct.set {
+   if !topN.set {
       flag.Usage()
       return
    }
@@ -135,56 +117,61 @@ func run() error {
       rows = append(rows, rs...)
    }
 
-   // --- 3. Rank by score, then cut. The percentage is applied to the
-   // distinct score values — each value counts once, however many rows carry
-   // it — not to the rows, so a top score many providers tie on cannot crowd
-   // the next score down out of the cut. Every row at or above the cutoff
-   // value stays, so a value is never split partway.
+   // --- 3. Rank by score, then cut. Every combination is ordered by GPQA
+   // Diamond descending and walked from the top; combinations are kept
+   // until topN distinct models have been seen, and the walk stops at the
+   // first combination whose model would exceed that quota. That is the
+   // minimum number of combinations from the top of the ranking that
+   // contains topN models: a model is counted once however many
+   // combinations it contributes, and no combination below the stopping
+   // point is kept. GPQA is not truncated or bucketed during selection,
+   // only rounded at print time.
    totalRows := len(rows)
+   scoredModels := make(map[string]bool)
+   for _, r := range rows {
+      scoredModels[r.Model] = true
+   }
+   distinctModels := len(scoredModels)
+
    slices.SortFunc(rows, func(a, b *row) int {
       return cmp.Compare(b.GPQA, a.GPQA)
    })
 
-   // Distinct scores, descending, in tenths of a percent — the unit the
-   // report prints (%.1f%%). rows is now score-ordered, so equal scores are
-   // adjacent and each value enters once. Rounding to the printed unit is
-   // what makes "same value" well-defined: an interpolated median is not
-   // always bit-identical to a stored score (median of 92 and 94 is
-   // 93.00000000000001, not 93), and an exact `!=` would split that tie.
-   values := make([]int, 0, len(rows))
-   for _, r := range rows {
-      v := int(math.Round(r.GPQA * 1000))
-      if len(values) == 0 || v != values[len(values)-1] {
-         values = append(values, v)
-      }
-   }
-
-   cutoff, valuesKept := keptValues(values)
    kept := 0
-   for kept < len(rows) && int(math.Round(rows[kept].GPQA*1000)) >= cutoff {
+   models := make(map[string]bool)
+   var keptModels []string
+   for _, r := range rows {
+      if len(models) >= topN.value && !models[r.Model] {
+         break // a new model past the quota -> the cut ends here
+      }
+      if !models[r.Model] {
+         models[r.Model] = true
+         keptModels = append(keptModels, r.Model)
+      }
       kept++
    }
    rows = rows[:kept]
 
-   // A run that ranks nothing is a misconfiguration, not a result: say so
-   // rather than printing a bare header. With any row above, keptValues
-   // never returns fewer than one value, so this can only fire on an empty
-   // field; kept anyway.
+   // A run that keeps nothing is a misconfiguration, not a result: say so
+   // rather than printing a bare header. The flag rejects a nonpositive
+   // count, so this can only fire on an empty field; kept anyway.
    if len(rows) == 0 {
       return fmt.Errorf("no provider rows to rank: %d candidates, %d skipped for absent data, %d rows",
          len(cands), skipped, totalRows)
    }
 
-   // The cut's size and bounds: the distinct-value and kept-row counts that
-   // topPct% resolved to, and the highest and lowest GPQA Diamond score
-   // among the kept rows. rows is still score-ordered here, so the first row
-   // carries the highest and the last row the lowest — all of it must be
-   // read before the throughput re-order below, which scrambles the
-   // positions.
-   fmt.Fprintf(os.Stderr, "\ntop %.0f%% of %d distinct scores: kept %d rows across %d value(s)\n",
-      topPct.value, len(values), len(rows), valuesKept)
-   fmt.Fprintf(os.Stderr, "highest gpqa diamond in top %.0f%%: %.1f%%\n", topPct.value, rows[0].GPQA*100)
-   fmt.Fprintf(os.Stderr, "lowest gpqa diamond in top %.0f%%: %.1f%%\n", topPct.value, rows[len(rows)-1].GPQA*100)
+   // The cut's result: how many models were requested, whether the catalog
+   // held enough, and how many combinations that resolved to — followed by
+   // the kept models in the order their best combinations ranked.
+   if len(models) < topN.value {
+      fmt.Fprintf(os.Stderr, "\ntop %d models requested but only %d distinct models scored: kept all %d combinations\n",
+         topN.value, distinctModels, kept)
+   } else {
+      fmt.Fprintf(os.Stderr, "\ntop %d models by gpqa diamond: kept %d combinations\n", topN.value, kept)
+   }
+   for _, m := range keptModels {
+      fmt.Fprintf(os.Stderr, "  %s\n", m)
+   }
 
    // --- 4. Order the kept rows by throughput, descending: the selection
    // above was by score; the printed order is by speed.
@@ -193,7 +180,7 @@ func run() error {
    })
 
    // The header stays on the console; only the row items go to the file.
-   fmt.Printf("top %.0f%% of distinct gpqa diamond scores, sorted by: throughput, descending\n\n", topPct.value)
+   fmt.Printf("sorted by: throughput, descending\n\n")
 
    f, err := os.Create(outputFile)
    if err != nil {
@@ -215,14 +202,17 @@ func run() error {
 // topFlag is a flag.Value that remembers whether it was set, so an absent
 // -top (distinct from -top 0, say) can be told apart from a supplied one.
 type topFlag struct {
-   value float64
+   value int
    set   bool
 }
 
 func (f *topFlag) Set(s string) error {
-   v, err := strconv.ParseFloat(s, 64)
+   v, err := strconv.Atoi(s)
    if err != nil {
       return err
+   }
+   if v <= 0 {
+      return fmt.Errorf("must be a positive count")
    }
    f.value = v
    f.set = true
@@ -230,7 +220,7 @@ func (f *topFlag) Set(s string) error {
 }
 
 func (f *topFlag) String() string {
-   return strconv.FormatFloat(f.value, 'g', -1, 64)
+   return strconv.Itoa(f.value)
 }
 
 // main.go marker preserve
