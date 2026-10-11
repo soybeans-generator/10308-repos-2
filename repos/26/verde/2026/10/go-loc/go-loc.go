@@ -4,11 +4,11 @@
 // how many lines of Go code live directly in that directory. Subdirectories are
 // visited, but their lines are never rolled up into a parent.
 //
-// Only directories holding at least one file whose package clause is
-// "package main" are reported. A line is counted only when it holds at least
-// one character that is neither whitespace nor part of a comment.
+// Only directories that declare package main and import net/http in at least one
+// of their own .go files are reported. A line is counted only when it holds at
+// least one character that is neither whitespace nor part of a comment.
 //
-// The line counting and package-clause detection live in count.go.
+// The line counting, package clause and import detection live in count.go.
 //
 // Usage:
 //
@@ -26,6 +26,9 @@ import (
    "strconv"
    "strings"
 )
+
+// targetImport is the import path a directory must contain to be reported.
+const targetImport = "net/http"
 
 // targetPackage is the package clause a directory must contain to be reported.
 const targetPackage = "main"
@@ -118,19 +121,20 @@ func writeTable(rows []*dirStat, scanned int) error {
       widthFiles, strings.Repeat("-", widthFiles),
       "---------")
 
-   _, err := fmt.Printf("%*d  %*d  total package %s lines in %d directories (%d scanned)\n",
-      widthLOC, totalLOC, widthFiles, totalFiles, targetPackage, len(rows), scanned)
+   _, err := fmt.Printf("%*d  %*d  total package %s lines importing %s in %d directories (%d scanned)\n",
+      widthLOC, totalLOC, widthFiles, totalFiles, targetPackage, targetImport, len(rows), scanned)
 
    return err
 }
 
 // dirStat holds the tally for a single directory: its own files only.
 type dirStat struct {
-   path  string         // absolute
-   rel   string         // relative to the scanned root, forward slashes
-   loc   int            // counted code lines
-   files int            // counted .go files
-   pkgs  map[string]int // package clause -> number of files declaring it
+   path    string // absolute
+   rel     string // relative to the scanned root, forward slashes
+   loc     int    // counted code lines
+   files   int    // counted .go files
+   mainPkg bool   // a file in it declares package main
+   httpImp bool   // a file in it imports targetImport
 }
 
 // scanTree walks the tree and records one dirStat per directory, counting only
@@ -150,10 +154,7 @@ func scanTree(root string) ([]*dirStat, error) {
 
       if entry.IsDir() {
          index[path] = len(stats)
-         stats = append(stats, &dirStat{
-            path: path,
-            pkgs: make(map[string]int),
-         })
+         stats = append(stats, &dirStat{path: path})
 
          return nil
       }
@@ -167,15 +168,22 @@ func scanTree(root string) ([]*dirStat, error) {
          return nil
       }
 
-      loc, pkg, err := scanFile(path)
+      file, err := scanFile(path)
       if err != nil {
          log.Printf("%s: %v", path, err)
          return nil
       }
 
-      stats[i].pkgs[pkg]++
-      stats[i].loc += loc
-      stats[i].files++
+      stat := stats[i]
+      stat.files++
+      stat.loc += file.loc
+
+      if file.pkg == targetPackage {
+         stat.mainPkg = true
+      }
+      if file.imports[targetImport] {
+         stat.httpImp = true
+      }
 
       return nil
    })
@@ -187,7 +195,7 @@ func scanTree(root string) ([]*dirStat, error) {
 }
 
 // selectRows resolves the display paths, drops every directory that is not a
-// main package, and sorts largest first.
+// target, and sorts largest first.
 func selectRows(stats []*dirStat, root string) []*dirStat {
    rows := make([]*dirStat, 0, len(stats))
 
@@ -212,10 +220,10 @@ func selectRows(stats []*dirStat, root string) []*dirStat {
    return rows
 }
 
-// isTarget reports whether the directory holds at least one file whose package
-// clause is targetPackage.
+// isTarget reports whether the directory declares targetPackage and imports
+// targetImport in at least one of its own files.
 func (d *dirStat) isTarget() bool {
-   return d.pkgs[targetPackage] > 0
+   return d.mainPkg && d.httpImp
 }
 
 // goloc.go

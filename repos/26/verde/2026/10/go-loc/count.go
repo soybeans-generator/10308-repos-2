@@ -7,56 +7,47 @@ import (
    "io"
    "os"
    "strings"
-   "unicode"
-   "unicode/utf8"
 )
 
-// parsePkg returns the identifier that follows the first "package" token in s,
-// or an empty string when there is none. s holds code only: comments and
-// literal text have already been stripped by scan.
-func parsePkg(s string) string {
-   isStart := func(r rune) bool {
-      return r == '_' || unicode.IsLetter(r)
-   }
-   isPart := func(r rune) bool {
-      return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
-   }
+// declKeyword marks the end of a file's import section: the spec requires every
+// import to come before any other declaration.
+var declKeyword = map[string]bool{
+   "const": true,
+   "func":  true,
+   "type":  true,
+   "var":   true,
+}
 
-   seenPackage := false
-
-   for i := 0; i < len(s); {
-      r, size := utf8.DecodeRuneInString(s[i:])
-      if !isStart(r) {
-         i += size
-         continue
-      }
-
-      start := i
-      for i < len(s) {
-         r, size := utf8.DecodeRuneInString(s[i:])
-         if !isPart(r) {
-            break
-         }
-         i += size
-      }
-
-      token := s[start:i]
-      if !seenPackage {
-         if token == "package" {
-            seenPackage = true
-         }
-         continue
-      }
-
-      return token
+// isIdentByte reports whether b can be part of a Go identifier. Bytes at or
+// above 0x80 are accepted wholesale, which covers the multi-byte letters Go
+// allows in identifiers.
+func isIdentByte(b byte) bool {
+   switch {
+   case b >= 0x80:
+      return true
+   case b == '_':
+      return true
+   case b >= '0' && b <= '9':
+      return true
+   case b >= 'a' && b <= 'z':
+      return true
+   case b >= 'A' && b <= 'Z':
+      return true
    }
 
-   return ""
+   return false
+}
+
+// fileStat describes one scanned Go file.
+type fileStat struct {
+   loc     int             // counted code lines
+   pkg     string          // package clause, empty when the file has none
+   imports map[string]bool // import paths, gathered in the import section only
 }
 
 // scan counts lines that contain something other than whitespace and comments,
-// and reports the package name. It is a byte-level state machine, so it copes
-// with:
+// and reports the package name and the imported paths. It is a byte-level state
+// machine, so it copes with:
 //
 //   - // line comments and /* block */ comments spanning any number of lines
 //   - trailing comments:   x := 1 // done       -> counted, it has code
@@ -65,7 +56,12 @@ func parsePkg(s string) string {
 //   - literals:            s := "http://a/*b*/" -> counted, no comment started
 //   - raw strings:         `...multi line...`   -> each non-blank line counted
 //   - build tags:          //go:build linux     -> a comment, not counted
-func scan(r io.Reader) (int, string, error) {
+//
+// Import paths are the interpreted string literals that appear between the
+// package clause and the first const, func, type or var token, so a literal
+// later in the file can never be mistaken for an import. Named and blank
+// imports record the path, not the local name.
+func scan(r io.Reader) (*fileStat, error) {
    const (
       stCode = iota
       stLineComment
@@ -75,36 +71,49 @@ func scan(r io.Reader) (int, string, error) {
       stRune   // '...'
    )
 
-   const maxCapture = 64 << 10 // stop buffering once the clause is nowhere near
-
    br := bufio.NewReader(r)
+   out := &fileStat{
+      imports: make(map[string]bool),
+   }
 
-   var buf strings.Builder // code bytes seen so far, used to find the clause
    state := stCode
-   lines := 0
-   code := false // does the current line carry any code character?
-   pkg := ""     // found package name, empty until identified
+   code := false        // does the current line carry any code character?
+   inImports := false   // inside the import section, so literals are paths
+   seenPackage := false // the "package" keyword has been passed
+
+   var word strings.Builder // the identifier being read in stCode
+   var lit strings.Builder  // the string literal being read while inImports
 
    flush := func() {
       if code {
-         lines++
+         out.loc++
       }
       code = false
    }
 
-   capture := func(b byte) {
-      if pkg == "" && buf.Len() < maxCapture {
-         buf.WriteByte(b)
-      }
-   }
-
-   tryPkg := func() {
-      if pkg != "" || buf.Len() == 0 {
+   flushWord := func() {
+      if word.Len() == 0 {
          return
       }
-      if name := parsePkg(buf.String()); name != "" {
-         pkg = name
-         buf.Reset()
+
+      token := word.String()
+      word.Reset()
+
+      if !seenPackage {
+         if token == "package" {
+            seenPackage = true
+         }
+         return
+      }
+
+      if out.pkg == "" {
+         out.pkg = token
+         inImports = true
+         return
+      }
+
+      if declKeyword[token] {
+         inImports = false
       }
    }
 
@@ -114,19 +123,25 @@ func scan(r io.Reader) (int, string, error) {
          break
       }
       if err != nil {
-         return 0, "", err
+         return nil, err
       }
 
       switch state {
       case stCode:
+         if isIdentByte(c) {
+            word.WriteByte(c)
+            code = true
+            continue
+         }
+
+         flushWord()
+
          switch c {
          case '\n':
             flush()
-            capture(c)
-            tryPkg()
 
          case ' ', '\t', '\r', '\v', '\f':
-            capture(c) // a token separator, not code
+            // whitespace
 
          case '/':
             next, peekErr := br.Peek(1)
@@ -139,12 +154,12 @@ func scan(r io.Reader) (int, string, error) {
                state = stBlockComment
             default:
                code = true // division or a stray slash is still code
-               capture(c)
             }
 
          case '"':
             code = true
-            state = stInterp // literal text is not captured
+            lit.Reset()
+            state = stInterp
 
          case '`':
             code = true
@@ -156,15 +171,12 @@ func scan(r io.Reader) (int, string, error) {
 
          default:
             code = true
-            capture(c)
          }
 
       case stLineComment:
          if c == '\n' {
             state = stCode
             flush()
-            capture(c)
-            tryPkg()
          }
 
       case stBlockComment:
@@ -180,16 +192,26 @@ func scan(r io.Reader) (int, string, error) {
       case stInterp:
          switch c {
          case '\\':
-            br.ReadByte() // consume the escaped character
+            next, readErr := br.ReadByte()
+            if readErr == nil {
+               lit.WriteByte(c)
+               lit.WriteByte(next)
+            }
             code = true
          case '"':
+            if inImports {
+               out.imports[lit.String()] = true
+               lit.Reset()
+            }
             state = stCode
          case '\n':
             state = stCode // unterminated literal, recover on the next line
+            lit.Reset()
             flush()
-            capture(c)
-            tryPkg()
          default:
+            if inImports {
+               lit.WriteByte(c)
+            }
             code = true
          }
 
@@ -199,8 +221,6 @@ func scan(r io.Reader) (int, string, error) {
             state = stCode
          case '\n':
             flush() // a blank line inside a raw literal is not counted
-            capture(c)
-            tryPkg()
          case ' ', '\t', '\r':
             // whitespace inside a raw literal
          default:
@@ -217,25 +237,24 @@ func scan(r io.Reader) (int, string, error) {
          case '\n':
             state = stCode
             flush()
-            capture(c)
-            tryPkg()
          default:
             code = true
          }
       }
    }
 
-   flush() // last line without a trailing newline
-   tryPkg()
+   flush()     // last line without a trailing newline
+   flushWord() // identifier still open at EOF
 
-   return lines, pkg, nil
+   return out, nil
 }
 
-// scanFile returns the code-line count and package clause of one file.
-func scanFile(path string) (int, string, error) {
+// scanFile reads the file at path and reports its code lines, package clause
+// and import paths.
+func scanFile(path string) (*fileStat, error) {
    f, err := os.Open(path)
    if err != nil {
-      return 0, "", err
+      return nil, err
    }
    defer f.Close()
 
