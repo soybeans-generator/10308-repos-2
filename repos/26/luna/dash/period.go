@@ -1,3 +1,4 @@
+// period.go marker preserve
 package dash
 
 import (
@@ -43,3 +44,5 @@ func (p *Period) link() {
       currentSet.link()
    }
 }
+
+// period.go marker preserve

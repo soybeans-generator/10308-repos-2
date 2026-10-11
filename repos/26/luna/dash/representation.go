@@ -1,34 +1,26 @@
+// representation.go marker preserve
 package dash
 
 import (
-   "cmp"
    "fmt"
    "net/url"
    "strings"
 )
-
-func Bandwidth(r1, r2 *Representation) int {
-   return cmp.Or(
-      r1.MedianBandwidth-r2.MedianBandwidth,
-      r1.Bandwidth-r2.Bandwidth,
-   )
-}
 
 // Representation describes a version of the media content.
 type Representation struct {
    Bandwidth         int                  `xml:"bandwidth,attr"`
    BaseUrl           string               `xml:"BaseURL"`
    Codecs            string               `xml:"codecs,attr"`
-   ContentProtection []*ContentProtection `xml:"ContentProtection"`
    Height            int                  `xml:"height,attr"`
    Id                string               `xml:"id,attr"`
-   MedianBandwidth   int                  `xml:"-"`
    MimeType          string               `xml:"mimeType,attr"`
-   Parent            *AdaptationSet       `xml:"-"`
-   SegmentBase       *SegmentBase         `xml:"SegmentBase"`
    SegmentList       *SegmentList         `xml:"SegmentList"`
    SegmentTemplate   *SegmentTemplate     `xml:"SegmentTemplate"`
    Width             int                  `xml:"width,attr"`
+   SegmentBase       *SegmentBase         `xml:"SegmentBase"`
+   ContentProtection []*ContentProtection `xml:"ContentProtection"`
+   Parent            *AdaptationSet       `xml:"-"`
 }
 
 func (r *Representation) GetCodecs() string {
@@ -138,9 +130,6 @@ func (r *Representation) ResolveBaseUrl() (*url.URL, error) {
 // String returns a multi-line summary of the Representation.
 func (r *Representation) String() string {
    data := &strings.Builder{}
-   if r.MedianBandwidth >= 1 {
-      fmt.Fprintln(data, "median bandwidth:", r.MedianBandwidth)
-   }
    fmt.Fprintln(data, "bandwidth:", r.Bandwidth)
    if width := r.GetWidth(); width != 0 {
       fmt.Fprintln(data, "width:", width)
@@ -186,3 +175,5 @@ func (r *Representation) requiresOriginalId() bool {
    }
    return strings.Contains(currentTemplate.Media, "$RepresentationID$")
 }
+
+// representation.go marker preserve

@@ -1,3 +1,4 @@
+// segment_base.go marker preserve
 package dash
 
 import (
@@ -55,3 +56,5 @@ type SegmentBase struct {
    IndexRange     string          `xml:"indexRange,attr"`
    Initialization *Initialization `xml:"Initialization"`
 }
+
+// segment_base.go marker preserve

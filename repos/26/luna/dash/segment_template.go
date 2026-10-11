@@ -1,3 +1,4 @@
+// segment_template.go marker preserve
 package dash
 
 import (
@@ -233,3 +234,5 @@ func (st *SegmentTemplate) prepareTemplateString(rep *Representation, templateSt
 type SegmentTimeline struct {
    S []*S `xml:"S"`
 }
+
+// segment_template.go marker preserve

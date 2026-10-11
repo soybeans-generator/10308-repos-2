@@ -1,3 +1,4 @@
+// master_playlist.go marker preserve
 package hls
 
 import (
@@ -49,10 +50,20 @@ type MasterPlaylist struct {
    StreamInfs []*StreamInf
 }
 
-// DecodeMaster parses a Master Playlist.
-func DecodeMaster(content string) (*MasterPlaylist, error) {
+// DecodeMaster parses a Master Playlist. If base is provided, it resolves
+// relative URIs
+func DecodeMaster(content string, base *url.URL) (*MasterPlaylist, error) {
    lines := splitLines(content)
-   return parseMaster(lines)
+   master, err := parseMaster(lines)
+   if err != nil {
+      return nil, err
+   }
+
+   if base != nil {
+      master.ResolveUris(base)
+   }
+
+   return master, nil
 }
 
 func parseMaster(lines []string) (*MasterPlaylist, error) {
@@ -67,9 +78,11 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
          if err != nil {
             return nil, err
          }
+
          media.Id = streamCounter
          streamCounter++
          masterPlaylist.Medias = append(masterPlaylist.Medias, media)
+
       } else if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
          attrs := parseAttributes(line, "#EXT-X-STREAM-INF:")
 
@@ -81,14 +94,18 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
 
          stream, exists := streamMap[uriLine]
          if !exists {
-            // First time seeing this URI, create a new StreamInf
-            stream = &StreamInf{Id: streamCounter}
-            streamCounter++
             parsedUrl, err := url.Parse(uriLine)
             if err != nil {
                return nil, fmt.Errorf("invalid URI in EXT-X-STREAM-INF: %w", err)
             }
-            stream.Uri = parsedUrl
+
+            // First time seeing this URI, create a new StreamInf
+            stream = &StreamInf{
+               Id:  streamCounter,
+               Uri: parsedUrl,
+            }
+            streamCounter++
+
             streamMap[uriLine] = stream
             masterPlaylist.StreamInfs = append(masterPlaylist.StreamInfs, stream)
 
@@ -120,8 +137,6 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
    }
    return masterPlaylist, nil
 }
-
-///
 
 func (mp *MasterPlaylist) ResolveUris(base *url.URL) {
    for _, streamItem := range mp.StreamInfs {
@@ -217,3 +232,5 @@ func (s *StreamInf) String() string {
    fmt.Fprint(data, "id: ", s.Id)
    return data.String()
 }
+
+// master_playlist.go marker preserve
