@@ -43,5 +43,3 @@ func (p *Period) link() {
       currentSet.link()
    }
 }
-
-// period.go

@@ -34,8 +34,7 @@ func (sl *SegmentList) link() {
 
 // SegmentUrl defines a specific media segment source.
 type SegmentUrl struct {
-   Media      string `xml:"media,attr"`
-   MediaRange string `xml:"mediaRange,attr"` // Add this to capture the byte range
+   Media string `xml:"media,attr"`
    // Navigation
    Parent *SegmentList `xml:"-"`
 }
@@ -48,5 +47,3 @@ func (su *SegmentUrl) ResolveMedia() (*url.URL, error) {
    }
    return resolveRef(base, su.Media)
 }
-
-// segment_list.go

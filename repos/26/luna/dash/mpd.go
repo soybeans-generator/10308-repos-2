@@ -2,9 +2,8 @@ package dash
 
 import (
    "encoding/xml"
-   "fmt"
-   "hash/fnv"
    "net/url"
+   "strconv"
 )
 
 func resolveRef(base *url.URL, relStr string) (*url.URL, error) {
@@ -26,39 +25,28 @@ type Mpd struct {
    MediaPresentationDuration string    `xml:"mediaPresentationDuration,attr"`
    BaseUrl                   string    `xml:"BaseURL"`
    Periods                   []*Period `xml:"Period"`
-   mpdUrl                    *url.URL
+   MpdUrl                    *url.URL  `xml:"-"`
 }
 
 // Parse takes a byte slice of an MPD file, unmarshals it,
 // links navigation parents, and normalizes Representation IDs.
-func Parse(data []byte, mpdUrl *url.URL) (*Mpd, error) {
+func Parse(data []byte) (*Mpd, error) {
    var manifest Mpd
    err := xml.Unmarshal(data, &manifest)
    if err != nil {
       return nil, err
    }
-   manifest.mpdUrl = mpdUrl
    manifest.link()
    manifest.normalizeIds()
    return &manifest, nil
 }
 
 // GetRepresentations returns a map of all Representations keyed by their Id.
-// It automatically deduplicates identical Representations within the same Period.
 func (m *Mpd) GetRepresentations() map[string][]*Representation {
    grouped := make(map[string][]*Representation)
    for _, manifestPeriod := range m.Periods {
       for _, currentSet := range manifestPeriod.AdaptationSets {
          for _, mediaRep := range currentSet.Representations {
-
-            reps := grouped[mediaRep.Id]
-
-            // If the last added representation belongs to the current Period,
-            // we've already captured this track for this period. Skip the duplicate.
-            if len(reps) > 0 && reps[len(reps)-1].Parent.Parent == manifestPeriod {
-               continue
-            }
-
             grouped[mediaRep.Id] = append(grouped[mediaRep.Id], mediaRep)
          }
       }
@@ -66,9 +54,9 @@ func (m *Mpd) GetRepresentations() map[string][]*Representation {
    return grouped
 }
 
-// ResolveBaseUrl resolves the MPD's BaseURL against the mpdUrl.
+// ResolveBaseUrl resolves the MPD's BaseURL against the MpdUrl.
 func (m *Mpd) ResolveBaseUrl() (*url.URL, error) {
-   return resolveRef(m.mpdUrl, m.BaseUrl)
+   return resolveRef(m.MpdUrl, m.BaseUrl)
 }
 
 func (m *Mpd) link() {
@@ -78,8 +66,20 @@ func (m *Mpd) link() {
    }
 }
 
-// normalizeIds iterates through the MPD and rewrites Representation IDs using a 32-bit hash.
+// normalizeIds iterates through the MPD and rewrites Representation IDs.
 func (m *Mpd) normalizeIds() {
+   reservedIds := make(map[string]bool)
+   for _, manifestPeriod := range m.Periods {
+      for _, currentSet := range manifestPeriod.AdaptationSets {
+         for _, mediaRep := range currentSet.Representations {
+            if mediaRep.requiresOriginalId() {
+               reservedIds[mediaRep.Id] = true
+            }
+         }
+      }
+   }
+   counter := 0
+   patternToId := make(map[string]string)
    for _, manifestPeriod := range m.Periods {
       for _, currentSet := range manifestPeriod.AdaptationSets {
          for _, mediaRep := range currentSet.Representations {
@@ -90,16 +90,22 @@ func (m *Mpd) normalizeIds() {
             if currentTemplate == nil {
                continue
             }
-
-            // We use FNV-1a (New32a) instead of FNV-1 (New32) because the FNV-1a XOR-then-multiply
-            // approach provides significantly better avalanche properties. This drastically reduces
-            // collisions for DASH Media templates, which often share long identical URL prefixes.
-            hasher := fnv.New32a()
-            fmt.Fprint(hasher, currentTemplate.Media)
-            mediaRep.Id = fmt.Sprintf("%x", hasher.Sum32())
+            pattern := currentTemplate.Media
+            if existingId, ok := patternToId[pattern]; ok {
+               mediaRep.Id = existingId
+               continue
+            }
+            var newId string
+            for {
+               newId = strconv.Itoa(counter)
+               counter++
+               if !reservedIds[newId] {
+                  break
+               }
+            }
+            patternToId[pattern] = newId
+            mediaRep.Id = newId
          }
       }
    }
 }
-
-// mpd.go

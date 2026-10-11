@@ -41,5 +41,3 @@ func (as *AdaptationSet) link() {
 type Role struct {
    Value string `xml:"value,attr"`
 }
-
-// adaptation_set.go

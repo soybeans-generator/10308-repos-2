@@ -3,7 +3,6 @@ package hls
 import (
    "cmp"
    "fmt"
-   "hash/fnv"
    "net/url"
    "strconv"
    "strings"
@@ -18,15 +17,6 @@ func Bandwidth(s1, s2 *StreamInf) int {
 
 func GroupId(m1, m2 *Media) int {
    return cmp.Compare(m1.GroupId, m2.GroupId)
-}
-
-// generateHashId creates a fast 32-bit hash for the given URL.
-// Using FNV-1a (New32a) over FNV-1 (New32) because it provides better
-// avalanche characteristics, resulting in fewer collisions for highly similar URLs.
-func generateHashId(address *url.URL) string {
-   hasher := fnv.New32a()
-   fmt.Fprint(hasher, address)
-   return fmt.Sprintf("%x", hasher.Sum32())
 }
 
 // populateStreamInfAttributes updates a StreamInf's fields from a map of attributes.
@@ -59,24 +49,15 @@ type MasterPlaylist struct {
    StreamInfs []*StreamInf
 }
 
-// DecodeMaster parses a Master Playlist. If base is provided, it resolves
-// relative URIs
-func DecodeMaster(content string, base *url.URL) (*MasterPlaylist, error) {
+// DecodeMaster parses a Master Playlist.
+func DecodeMaster(content string) (*MasterPlaylist, error) {
    lines := splitLines(content)
-   master, err := parseMaster(lines)
-   if err != nil {
-      return nil, err
-   }
-
-   if base != nil {
-      master.ResolveUris(base)
-   }
-
-   return master, nil
+   return parseMaster(lines)
 }
 
 func parseMaster(lines []string) (*MasterPlaylist, error) {
    masterPlaylist := &MasterPlaylist{}
+   streamCounter := 0
    streamMap := make(map[string]*StreamInf) // Map URL to StreamInf to handle grouping
 
    for i := 0; i < len(lines); i++ {
@@ -86,10 +67,9 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
          if err != nil {
             return nil, err
          }
-
-         media.Id = generateHashId(media.Uri)
+         media.Id = streamCounter
+         streamCounter++
          masterPlaylist.Medias = append(masterPlaylist.Medias, media)
-
       } else if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
          attrs := parseAttributes(line, "#EXT-X-STREAM-INF:")
 
@@ -101,17 +81,14 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
 
          stream, exists := streamMap[uriLine]
          if !exists {
+            // First time seeing this URI, create a new StreamInf
+            stream = &StreamInf{Id: streamCounter}
+            streamCounter++
             parsedUrl, err := url.Parse(uriLine)
             if err != nil {
                return nil, fmt.Errorf("invalid URI in EXT-X-STREAM-INF: %w", err)
             }
-
-            // First time seeing this URI, create a new StreamInf
-            stream = &StreamInf{
-               Id:  generateHashId(parsedUrl),
-               Uri: parsedUrl,
-            }
-
+            stream.Uri = parsedUrl
             streamMap[uriLine] = stream
             masterPlaylist.StreamInfs = append(masterPlaylist.StreamInfs, stream)
 
@@ -144,6 +121,8 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
    return masterPlaylist, nil
 }
 
+///
+
 func (mp *MasterPlaylist) ResolveUris(base *url.URL) {
    for _, streamItem := range mp.StreamInfs {
       if streamItem.Uri != nil {
@@ -162,7 +141,7 @@ type Media struct {
    AutoSelect bool
    Channels   string
    GroupId    string
-   Id         string
+   Id         int
    Language   string
    Name       string
    Type       string
@@ -215,7 +194,7 @@ type StreamInf struct {
    Bandwidth        int
    Codecs           string
    FrameRate        string
-   Id               string
+   Id               int
    Resolution       string
    Subtitles        string // Refers to a Media GROUP-ID for subtitles
    Uri              *url.URL
@@ -238,5 +217,3 @@ func (s *StreamInf) String() string {
    fmt.Fprint(data, "id: ", s.Id)
    return data.String()
 }
-
-// master_playlist.go
