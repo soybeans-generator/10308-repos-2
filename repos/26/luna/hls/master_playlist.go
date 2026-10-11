@@ -2,23 +2,11 @@
 package hls
 
 import (
-   "cmp"
    "fmt"
    "net/url"
    "strconv"
    "strings"
 )
-
-func Bandwidth(s1, s2 *StreamInf) int {
-   return cmp.Or(
-      s1.AverageBandwidth-s2.AverageBandwidth,
-      s1.Bandwidth-s2.Bandwidth,
-   )
-}
-
-func GroupId(m1, m2 *Media) int {
-   return cmp.Compare(m1.GroupId, m2.GroupId)
-}
 
 // populateStreamInfAttributes updates a StreamInf's fields from a map of attributes.
 func populateStreamInfAttributes(stream *StreamInf, attrs map[string]string) error {
