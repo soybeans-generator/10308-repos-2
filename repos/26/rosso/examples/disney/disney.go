@@ -20,7 +20,7 @@ type client struct {
    Email     maya.FlagString
    PlayReady maya.FlagString
    address   maya.FlagString
-   hls       maya.FlagString
+   hls_id    maya.FlagInt
    media     maya.FlagString
    passcode  maya.FlagString
    profile   maya.FlagString
@@ -50,7 +50,7 @@ func (c *client) do() error {
       {Name: "address", Value: &c.address},
       {Name: "season-id", Value: &c.season},
       {Name: "media-id", Value: &c.media},
-      {Name: "hls-id", Value: &c.hls},
+      {Name: "hls-id", Value: &c.hls_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {
       return err
@@ -79,8 +79,8 @@ func (c *client) do() error {
    if c.media != "" {
       return c.do_media()
    }
-   if c.hls != "" {
-      return c.do_hls()
+   if c.hls_id >= 1 {
+      return c.do_hls_id()
    }
    return flags.Usage(os.Stderr, "disney")
 }
@@ -115,7 +115,7 @@ func (c *client) do_email() error {
    return c.cache.Encode(c, token)
 }
 
-func (c *client) do_hls() error {
+func (c *client) do_hls_id() error {
    var (
       manifest maya.Manifest
       token    disney.Token
@@ -124,7 +124,7 @@ func (c *client) do_hls() error {
    if err != nil {
       return err
    }
-   return maya.HlsDownload(string(c.hls), &manifest, &maya.Options{
+   return maya.HlsDownload(int(c.hls_id), &manifest, &maya.Options{
       Device:  string(c.PlayReady),
       Drm:     maya.DrmPlayReady,
       License: token.FetchPlayReady,

@@ -20,7 +20,7 @@ type client struct {
    username maya.FlagString
    password maya.FlagString
    browse   maya.FlagString
-   hls      maya.FlagString
+   hls_id   maya.FlagInt
 
    cache maya.Cache
 }
@@ -33,7 +33,7 @@ func (c *client) do() error {
       {Name: "username", Value: &c.username, Needs: "password"},
       {Name: "password", Value: &c.password, Needs: "username"},
       {Name: "browse-id", Value: &c.browse},
-      {Name: "hls-id", Value: &c.hls},
+      {Name: "hls-id", Value: &c.hls_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {
       return err
@@ -46,8 +46,8 @@ func (c *client) do() error {
    if c.browse != "" {
       return c.do_browse()
    }
-   if c.hls != "" {
-      return c.do_hls()
+   if c.hls_id >= 1 {
+      return c.do_hls_id()
    }
    return flags.Usage(os.Stderr, "oldflix")
 }
@@ -81,13 +81,13 @@ func (c *client) do_browse() error {
    return c.cache.Encode(manifest)
 }
 
-func (c *client) do_hls() error {
+func (c *client) do_hls_id() error {
    var manifest maya.Manifest
    err := c.cache.Decode(&manifest)
    if err != nil {
       return err
    }
-   return maya.HlsDownload(string(c.hls), &manifest, nil)
+   return maya.HlsDownload(int(c.hls_id), &manifest, nil)
 }
 
 func (c *client) do_username_password() error {
