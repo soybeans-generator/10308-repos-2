@@ -91,7 +91,7 @@ async function main() {
    const oldest = records.reduce((min, row) => Math.min(min, row.D), Infinity);
 
    if (query.has('t')) {
-      const needle = query.get('t');
+      const needle = query.get('t').toLowerCase();
       records = records.filter(row => label(row).toLowerCase().includes(needle));
    }
 
