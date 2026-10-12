@@ -63,30 +63,37 @@ func main() {
       return
    }
 
-   videoID, err := videoIDFromURL(*videoURL)
-   if err != nil {
-      log.Fatal(err)
-   }
-
-   if err := reportViews(videoID); err != nil {
+   if err := reportViews(*videoURL); err != nil {
       log.Fatal(err)
    }
 }
 
-// reportViews fetches the player response for videoID and logs its yearly view rate.
-func reportViews(videoID string) error {
+// reportViews resolves rawURL to a video ID, fetches that video's player
+// response, and logs its yearly view rate.
+func reportViews(rawURL string) error {
+   videoID, err := videoIDFromURL(rawURL)
+   if err != nil {
+      return err
+   }
+
    player, err := fetchPlayer(videoID)
    if err != nil {
       return err
    }
 
+   // The response carries both of these as strings, so both get converted here.
    published, err := time.Parse(time.RFC3339, player.Microformat.PlayerMicroformatRenderer.PublishDate)
    if err != nil {
       return fmt.Errorf("publish date: %w", err)
    }
+
+   viewCount, err := strconv.Atoi(player.VideoDetails.ViewCount)
+   if err != nil {
+      return fmt.Errorf("view count: %w", err)
+   }
    log.Println("publish", published)
 
-   views := viewsPerYear(player.VideoDetails.ViewCount, published)
+   views := viewsPerYear(viewCount, published, time.Now())
 
    log.Println("video ID", player.VideoDetails.VideoID)
    log.Println("limit", groupThousands(viewLimit))
@@ -109,8 +116,10 @@ func videoIDFromURL(rawURL string) (string, error) {
    return videoID, nil
 }
 
-func viewsPerYear(views int, published time.Time) int {
-   years := time.Since(published).Hours() / 24 / 365
+// viewsPerYear divides views by the video's age in years, measured from
+// published to now.
+func viewsPerYear(views int, published, now time.Time) int {
+   years := now.Sub(published).Hours() / 24 / 365
    return int(float64(views) / years)
 }
 
@@ -128,10 +137,8 @@ type playerContext struct {
 // playerRequest is the body of a /youtubei/v1/player call. The inner types are
 // named rather than anonymous so the body can be built as one composite literal.
 type playerRequest struct {
-   ContentCheckOk bool          `json:"contentCheckOk,omitempty"`
-   RacyCheckOk    bool          `json:"racyCheckOk,omitempty"`
-   VideoID        string        `json:"videoId"`
-   Context        playerContext `json:"context"`
+   VideoID string        `json:"videoId"`
+   Context playerContext `json:"context"`
 }
 
 func newPlayerRequest(videoID string) *playerRequest {
@@ -148,8 +155,9 @@ func newPlayerRequest(videoID string) *playerRequest {
    }
 }
 
-// playerResponse is the slice of the InnerTube reply we actually read. Only
-// read, never constructed, so the nesting stays anonymous.
+// playerResponse is the slice of the InnerTube reply we actually read. Fields
+// stay raw strings exactly as InnerTube sends them, and reportViews does the
+// converting. Only read, never constructed, so the nesting stays anonymous.
 type playerResponse struct {
    Microformat struct {
       PlayerMicroformatRenderer struct {
@@ -158,7 +166,7 @@ type playerResponse struct {
    }
    VideoDetails struct {
       VideoID   string `json:"videoId"`
-      ViewCount int    `json:",string"`
+      ViewCount string
    }
 }
 
