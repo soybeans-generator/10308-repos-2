@@ -73,20 +73,21 @@ INVALID POSTAL CODE
 ## US paypal
 
 1. paramountplus.com
-2. get started
-3. paramount+ premium
+2. user-agent
+3. get started
+4. paramount+ premium
    - continue
-4. full name
-5. email
-6. password
-7. zip code
-8. birthdate
-9. gender
-10. agree & continue
-11. paypal
-12. continue to paypal
-13. agree and continue
-14. subscribe
-15. paypal.com/myaccount/autopay
-16. paramount
-17. stop paying with paypal
+5. full name
+6. email
+7. password
+8. zip code
+9. birthdate
+10. gender
+11. agree & continue
+12. paypal
+13. continue to paypal
+14. agree and continue
+15. subscribe
+16. paypal.com/myaccount/autopay
+17. paramount
+18. stop paying with paypal
