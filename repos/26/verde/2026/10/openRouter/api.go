@@ -1,101 +1,26 @@
-// api.go marker preserve
+// api.go
 package main
 
 import (
    "encoding/json"
-   "errors"
    "fmt"
    "io"
    "net/http"
    "net/url"
+   "slices"
 )
 
-// Per-permaslug stats, one request each — no HTML, no escaped-JSON brace
-// counting. Both endpoints live in the same /api/frontend/v1/stats
-// namespace the model page's own queries use, are reachable with no cookie
-// and no API key (verified live: identical payload from a clean client),
-// and answer with access-control-allow-origin: *; both are CDN-cached for
-// an hour.
-//
-// The permaslug goes in the query string, so its "/" must be escaped to
-// %2F, exactly as in the captured request. This is the opposite of the
-// model page route, where PathEscape is wrong because the "/" is a path
-// separator.
-const scoresURLTemplate = "https://openrouter.ai/api/frontend/v1/stats/benchmark-scores?permaslug=%s"
-const throughputURLTemplate = "https://openrouter.ai/api/frontend/v1/stats/throughput-comparison?permaslug=%s"
-
 // ---------------------------------------------------------------------------
-// Absent data: 200 responses that mean "skip this candidate", not "stop"
+// Endpoints
 // ---------------------------------------------------------------------------
 
-// These stats endpoints answer 200 with an empty payload for a permaslug
-// that has nothing recorded yet. Captured:
-//
-//   GET benchmark-scores?permaslug=tencent%2Fhy4-preview-20260827
-//   -> {"data":{"scores":[],"lookback_days":32}}
-//
-// Over a whole catalog that is routine — a newly published model has no
-// benchmark runs and no traffic — so it must not abort the run. These
-// sentinels mark it, and skippable is the single place that decides which
-// errors mean "drop this candidate" rather than "stop".
-//
-// The line each fetcher draws is between a server that says it has no data
-// (an empty array -> sentinel) and a server that no longer answers in the
-// documented shape (a missing or null data object -> ordinary error). A
-// genuine API change therefore still aborts loudly, instead of quietly
-// emptying the output.
-//
-// errNoThroughput covers a throughput series that yields no measurement at
-// all. It is deliberately distinct from a series that does carry
-// measurements but not for any of the endpoints GPQA was scored on: the
-// first is "nothing recorded", the second is a join that came up empty, and
-// the per-candidate log reports them differently.
-var (
-   errNoScores     = errors.New("no benchmark scores")
-   errNoGPQA       = errors.New("no gpqa_diamond scores")
-   errNoThroughput = errors.New("no throughput stats")
-)
+// One request for the whole catalog (confirmed by capture).
+const catalogURL = "https://openrouter.ai/api/frontend/v1/models/find?active=true"
 
-// fetchThroughput returns, per endpoint id, the tokens/sec of the most
-// recent day that endpoint was measured on. The ids parameter the endpoint
-// also accepts is ignored server-side (verified: byte-identical payload
-// with and without it), so one request covers every endpoint of the model.
-//
-// A payload that yields no measurement at all — an empty series, or points
-// whose y maps are all empty — returns errNoThroughput, which the caller
-// treats as a skip rather than letting the candidate collapse silently to
-// zero rows.
-func fetchThroughput(c *http.Client, permaslug string) (map[string]float64, error) {
-   body, err := httpGet(c, fmt.Sprintf(throughputURLTemplate, url.PathEscape(permaslug)))
-   if err != nil {
-      return nil, err
-   }
-   var resp throughputResponse
-   if err := json.Unmarshal(body, &resp); err != nil {
-      return nil, fmt.Errorf("decoding throughput stats: %w", err)
-   }
-   if resp.Data == nil {
-      return nil, fmt.Errorf("no data array in throughput payload for %s", permaslug)
-   }
-   latest := make(map[string]string) // endpoint id -> day of the value kept
-   throughput := make(map[string]float64)
-   for _, p := range *resp.Data {
-      for id, tps := range p.Y {
-         if p.X >= latest[id] { // ties keep the later entry
-            throughput[id] = tps
-            latest[id] = p.X
-         }
-      }
-   }
-   if len(throughput) == 0 {
-      return nil, errNoThroughput
-   }
-   return throughput, nil
-}
-
-// ---------------------------------------------------------------------------
-// Transport and per-model stats endpoints
-// ---------------------------------------------------------------------------
+// Per-model request for provider throughput stats (confirmed by capture).
+// Response is {"data": [ {provider_name, stats: {p50_throughput, ...}}, ... ]}.
+const statsURLTemplate = "https://openrouter.ai/api/frontend/v1/stats/endpoint" +
+   "?latencyMetric=latency&perfWorkload=text_generation&variant=standard&permaslug=%s"
 
 func httpGet(c *http.Client, url string) ([]byte, error) {
    req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -114,86 +39,199 @@ func httpGet(c *http.Client, url string) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-// skippable reports whether err means "no data for this candidate" — the
-// candidate is dropped and the run continues — rather than a real failure.
-func skippable(err error) bool {
-   return errors.Is(err, errNoScores) ||
-      errors.Is(err, errNoGPQA) ||
-      errors.Is(err, errNoThroughput)
+// ---------------------------------------------------------------------------
+// Math / HTTP helpers
+// ---------------------------------------------------------------------------
+
+// percentile returns the p-th percentile of ascending-sorted data with
+// linear interpolation (numpy's default method): fractional index
+// i = (p/100) * (n-1), interpolate between neighbors.
+func percentile(sorted []float64, p float64) float64 {
+   n := len(sorted)
+   if n == 0 {
+      return 0
+   }
+   if n == 1 {
+      return sorted[0]
+   }
+   i := p / 100 * float64(n-1)
+   lo := int(i)
+   if lo+1 >= n {
+      return sorted[n-1]
+   }
+   frac := i - float64(lo)
+   return sorted[lo] + frac*(sorted[lo+1]-sorted[lo])
+}
+
+// quantBits returns the bit width encoded in a quantization label
+// (e.g. "fp8" -> 8, "bf16" -> 16). It returns -1 when the label carries
+// no width, such as "unknown".
+func quantBits(q string) int {
+   i := len(q)
+   for i > 0 && q[i-1] >= '0' && q[i-1] <= '9' {
+      i--
+   }
+   if i == len(q) {
+      return -1
+   }
+   n := 0
+   for _, c := range q[i:] {
+      n = n*10 + int(c-'0')
+   }
+   return n
+}
+
+type benchmarks struct {
+   AA *struct {
+      IntelligenceIndex float64 `json:"intelligence_index"`
+   } `json:"aa"`
 }
 
 // ---------------------------------------------------------------------------
-// Scores: one per-permaslug request -> AutoExacto entries
+// Working types
 // ---------------------------------------------------------------------------
 
-// scoreEntry is one entry of the benchmark-scores array (confirmed by
-// capture). endpoint_id is null for the auto-routing pseudo-provider and
-// decodes to the empty string.
-type scoreEntry struct {
-   ProviderName  string  `json:"provider_name"`
-   BenchmarkType string  `json:"benchmark_type"`
-   Score         float64 `json:"score"`
-   RunCount      int     `json:"run_count"`
-   EndpointID    string  `json:"endpoint_id"`
+type candidate struct {
+   slug         string
+   name         string
+   intelligence float64
 }
 
-// fetchScores returns one permaslug's AutoExacto score entries, all
-// benchmark types. The request is made once, and every real failure
-// (transport, HTTP status, decoding, a payload without a data object)
-// aborts the run; a 200 that simply carries no scores returns errNoScores,
-// which the caller treats as a skip.
-func fetchScores(c *http.Client, permaslug string) ([]scoreEntry, error) {
-   body, err := httpGet(c, fmt.Sprintf(scoresURLTemplate, url.PathEscape(permaslug)))
+// ---------------------------------------------------------------------------
+// Catalog: single request -> open-weights candidates
+// ---------------------------------------------------------------------------
+
+func fetchCandidates(c *http.Client, minIntelligence float64) ([]candidate, int, error) {
+   body, err := httpGet(c, catalogURL)
    if err != nil {
-      return nil, err
+      return nil, 0, err
    }
-   var resp scoresResponse
+   var resp findResponse
    if err := json.Unmarshal(body, &resp); err != nil {
-      return nil, fmt.Errorf("decoding benchmark scores: %w", err)
+      return nil, 0, fmt.Errorf("decoding catalog: %w", err)
    }
-   if resp.Data == nil {
-      return nil, fmt.Errorf("no data object in benchmark scores payload for %s", permaslug)
+
+   total := len(resp.Data.Models)
+   seen := make(map[string]bool)
+   var cands []candidate
+   for _, m := range resp.Data.Models {
+      // Open weights = weights published on Hugging Face.
+      if m.Permaslug == "" || m.HfSlug == "" {
+         continue
+      }
+      // The catalog can contain duplicate entries per permaslug.
+      if seen[m.Permaslug] {
+         continue
+      }
+      seen[m.Permaslug] = true
+
+      cd := candidate{slug: m.Permaslug, name: m.Name}
+      if b, ok := resp.Data.Benchmarks[m.Permaslug]; ok && b.AA != nil {
+         cd.intelligence = b.AA.IntelligenceIndex
+      }
+      if minIntelligence > 0 && cd.intelligence < minIntelligence {
+         continue
+      }
+      cands = append(cands, cd)
    }
-   if len(resp.Data.Scores) == 0 {
-      return nil, errNoScores
-   }
-   return resp.Data.Scores, nil
+   return cands, total, nil
 }
 
-// scoresResponse is the benchmark-scores payload. It carries every
-// benchmark type for the permaslug (gpqa_diamond and
-// tau_bench_verified_airline both arrive in one response); the caller
-// filters.
-//
-// Data is a pointer so that the two empty-looking payloads stay
-// distinguishable: no data object at all is a shape change and an ordinary
-// error, while a data object with an empty scores array is the server
-// reporting that it has nothing for this permaslug (the tencent case).
-type scoresResponse struct {
-   Data *struct {
-      Scores []scoreEntry `json:"scores"`
+type catalogModel struct {
+   Permaslug string `json:"permaslug"`
+   Name      string `json:"name"`
+   HfSlug    string `json:"hf_slug"` // non-empty == open weights
+}
+
+// ---------------------------------------------------------------------------
+// Catalog types (from the models/find payload)
+// ---------------------------------------------------------------------------
+
+type findResponse struct {
+   Data struct {
+      Models     []catalogModel        `json:"models"`
+      Benchmarks map[string]benchmarks `json:"benchmarks"`
    } `json:"data"`
 }
 
-// ---------------------------------------------------------------------------
-// Throughput: one per-permaslug request -> tokens/sec per endpoint
-// ---------------------------------------------------------------------------
-
-// throughputPoint is one day of the series. x is the day, kept as a string
-// so the latest point is picked by date rather than by payload order (the
-// observed payload is ascending, but nothing documents that).
-type throughputPoint struct {
-   X string             `json:"x"`
-   Y map[string]float64 `json:"y"`
+// Per-provider p50 throughput, tokens/sec.
+type providerStat struct {
+   Provider string  `json:"provider"`
+   P50      float64 `json:"p50_throughput"`
 }
 
-// throughputResponse is the throughput-comparison payload: a daily series,
-// one point per day, each point's y mapping endpoint id -> tokens/sec. Data
-// is a pointer so that a payload without a data key at all (a shape change)
-// is distinguishable from one carrying an empty series (a model with no
-// traffic yet): the former is an error, the latter is not.
-type throughputResponse struct {
-   Data *[]throughputPoint `json:"data"`
+type score struct {
+   Model        string  `json:"model"`
+   Name         string  `json:"name"`
+   Intelligence float64 `json:"intelligence"`
+   // MedianP50 is the median across providers of p50 throughput,
+   // tokens/sec.
+   MedianP50 float64        `json:"median_p50_tps"`
+   Providers []providerStat `json:"providers"`
+   // Combined is assigned after all scores are fetched: a 0-100 blend of
+   // intelligence, median p50 throughput, and provider count. Higher is
+   // better.
+   Combined float64 `json:"combined,omitempty"`
+   Error    string  `json:"error,omitempty"`
 }
 
-// api.go marker preserve
+// ---------------------------------------------------------------------------
+// Providers: one request per candidate, sequential, no retry
+// ---------------------------------------------------------------------------
+
+func fetchScore(c *http.Client, cd candidate) score {
+   s := score{Model: cd.slug, Name: cd.name, Intelligence: cd.intelligence}
+
+   u := fmt.Sprintf(statsURLTemplate, url.QueryEscape(cd.slug))
+   body, err := httpGet(c, u)
+   if err != nil {
+      s.Error = err.Error()
+      return s
+   }
+
+   var sr statsResponse
+   if err := json.Unmarshal(body, &sr); err != nil {
+      s.Error = "decode: " + err.Error()
+      return s
+   }
+
+   // One p50 throughput value per provider.
+   var p50s []float64
+   for _, ep := range sr.Data {
+      if ep.Stats == nil {
+         continue // no stats -> no data -> excluded
+      }
+      // Keep only known quantizations at 8 bits or more; unknown and
+      // lower precision are excluded because they trade quality for
+      // throughput.
+      if quantBits(ep.Quantization) < 8 {
+         continue
+      }
+      s.Providers = append(s.Providers, providerStat{Provider: ep.ProviderName, P50: ep.Stats.P50Throughput})
+      p50s = append(p50s, ep.Stats.P50Throughput)
+   }
+   slices.Sort(p50s)
+   s.MedianP50 = percentile(p50s, 50)
+   return s
+}
+
+// Per-provider p50 throughput, tokens/sec.
+type statDetails struct {
+   P50Throughput float64 `json:"p50_throughput"`
+}
+
+type statEndpoint struct {
+   ProviderName string       `json:"provider_name"`
+   Quantization string       `json:"quantization"`
+   Stats        *statDetails `json:"stats"`
+}
+
+// ---------------------------------------------------------------------------
+// Stats types (from the stats/endpoint payload, confirmed by capture)
+// ---------------------------------------------------------------------------
+
+type statsResponse struct {
+   Data []statEndpoint `json:"data"`
+}
+
+// api.go
