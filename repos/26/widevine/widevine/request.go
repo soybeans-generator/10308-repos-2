@@ -1,3 +1,4 @@
+// request.go marker preserve
 package widevine
 
 import (
@@ -37,4 +38,4 @@ func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
    return message.Encode()
 }
 
-// request.go
+// request.go marker preserve

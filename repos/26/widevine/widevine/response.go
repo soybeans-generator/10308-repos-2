@@ -1,3 +1,4 @@
+// response.go marker preserve
 package widevine
 
 import (
@@ -126,4 +127,4 @@ func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sess
    return keys, nil
 }
 
-// response.go
+// response.go marker preserve
