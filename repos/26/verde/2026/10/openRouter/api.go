@@ -63,24 +63,6 @@ func percentile(sorted []float64, p float64) float64 {
    return sorted[lo] + frac*(sorted[lo+1]-sorted[lo])
 }
 
-// quantBits returns the bit width encoded in a quantization label
-// (e.g. "fp8" -> 8, "bf16" -> 16). It returns -1 when the label carries
-// no width, such as "unknown".
-func quantBits(q string) int {
-   i := len(q)
-   for i > 0 && q[i-1] >= '0' && q[i-1] <= '9' {
-      i--
-   }
-   if i == len(q) {
-      return -1
-   }
-   n := 0
-   for _, c := range q[i:] {
-      n = n*10 + int(c-'0')
-   }
-   return n
-}
-
 type benchmarks struct {
    AA *struct {
       IntelligenceIndex float64 `json:"intelligence_index"`
@@ -168,11 +150,7 @@ type score struct {
    // tokens/sec.
    MedianP50 float64        `json:"median_p50_tps"`
    Providers []providerStat `json:"providers"`
-   // Combined is assigned after all scores are fetched: a 0-100 blend of
-   // intelligence, median p50 throughput, and provider count. Higher is
-   // better.
-   Combined float64 `json:"combined,omitempty"`
-   Error    string  `json:"error,omitempty"`
+   Error     string         `json:"error,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -200,12 +178,6 @@ func fetchScore(c *http.Client, cd candidate) score {
    for _, ep := range sr.Data {
       if ep.Stats == nil {
          continue // no stats -> no data -> excluded
-      }
-      // Keep only known quantizations at 8 bits or more; unknown and
-      // lower precision are excluded because they trade quality for
-      // throughput.
-      if quantBits(ep.Quantization) < 8 {
-         continue
       }
       s.Providers = append(s.Providers, providerStat{Provider: ep.ProviderName, P50: ep.Stats.P50Throughput})
       p50s = append(p50s, ep.Stats.P50Throughput)
