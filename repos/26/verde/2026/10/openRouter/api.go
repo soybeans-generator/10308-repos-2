@@ -2,6 +2,7 @@
 package main
 
 import (
+   "cmp"
    "encoding/json"
    "fmt"
    "io"
@@ -37,6 +38,15 @@ func httpGet(c *http.Client, url string) ([]byte, error) {
       return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
    }
    return io.ReadAll(resp.Body)
+}
+
+// lowestP50 returns the slowest p50 in the kept provider set. Providers are
+// kept fastest-first, so it is the last entry. Zero when there are none.
+func lowestP50(s *score) float64 {
+   if len(s.Providers) == 0 {
+      return 0
+   }
+   return s.Providers[len(s.Providers)-1].P50
 }
 
 // ---------------------------------------------------------------------------
@@ -80,10 +90,10 @@ type candidate struct {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog: single request -> open-weights candidates
+// Catalog: single request -> all models -> open-weights 1M+ context candidates
 // ---------------------------------------------------------------------------
 
-func fetchCandidates(c *http.Client, minIntelligence float64) ([]candidate, int, error) {
+func fetchCandidates(c *http.Client) ([]*candidate, int, error) {
    body, err := httpGet(c, catalogURL)
    if err != nil {
       return nil, 0, err
@@ -95,10 +105,14 @@ func fetchCandidates(c *http.Client, minIntelligence float64) ([]candidate, int,
 
    total := len(resp.Data.Models)
    seen := make(map[string]bool)
-   var cands []candidate
+   var cands []*candidate
    for _, m := range resp.Data.Models {
       // Open weights = weights published on Hugging Face.
       if m.Permaslug == "" || m.HfSlug == "" {
+         continue
+      }
+      // Long context only: 1M tokens or more.
+      if m.ContextLength < 1_000_000 {
          continue
       }
       // The catalog can contain duplicate entries per permaslug.
@@ -107,12 +121,9 @@ func fetchCandidates(c *http.Client, minIntelligence float64) ([]candidate, int,
       }
       seen[m.Permaslug] = true
 
-      cd := candidate{slug: m.Permaslug, name: m.Name}
+      cd := &candidate{slug: m.Permaslug, name: m.Name}
       if b, ok := resp.Data.Benchmarks[m.Permaslug]; ok && b.AA != nil {
          cd.intelligence = b.AA.IntelligenceIndex
-      }
-      if minIntelligence > 0 && cd.intelligence < minIntelligence {
-         continue
       }
       cands = append(cands, cd)
    }
@@ -120,9 +131,10 @@ func fetchCandidates(c *http.Client, minIntelligence float64) ([]candidate, int,
 }
 
 type catalogModel struct {
-   Permaslug string `json:"permaslug"`
-   Name      string `json:"name"`
-   HfSlug    string `json:"hf_slug"` // non-empty == open weights
+   Permaslug     string `json:"permaslug"`
+   Name          string `json:"name"`
+   HfSlug        string `json:"hf_slug"` // non-empty == open weights
+   ContextLength int    `json:"context_length"`
 }
 
 // ---------------------------------------------------------------------------
@@ -148,17 +160,17 @@ type score struct {
    Intelligence float64 `json:"intelligence"`
    // MedianP50 is the median across providers of p50 throughput,
    // tokens/sec.
-   MedianP50 float64        `json:"median_p50_tps"`
-   Providers []providerStat `json:"providers"`
-   Error     string         `json:"error,omitempty"`
+   MedianP50 float64         `json:"median_p50_tps"`
+   Providers []*providerStat `json:"providers"`
+   Error     string          `json:"error,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
 // Providers: one request per candidate, sequential, no retry
 // ---------------------------------------------------------------------------
 
-func fetchScore(c *http.Client, cd candidate) score {
-   s := score{Model: cd.slug, Name: cd.name, Intelligence: cd.intelligence}
+func fetchScore(c *http.Client, cd *candidate, maxProviders int) *score {
+   s := &score{Model: cd.slug, Name: cd.name, Intelligence: cd.intelligence}
 
    u := fmt.Sprintf(statsURLTemplate, url.QueryEscape(cd.slug))
    body, err := httpGet(c, u)
@@ -173,14 +185,39 @@ func fetchScore(c *http.Client, cd candidate) score {
       return s
    }
 
-   // One p50 throughput value per provider.
-   var p50s []float64
+   // One p50 throughput value per provider. The stats endpoint returns
+   // several rows for the same provider, while the web client shows a
+   // single option per provider, so duplicates collapse to the slowest —
+   // that is what you actually get.
+   idx := make(map[string]int)
    for _, ep := range sr.Data {
       if ep.Stats == nil {
          continue // no stats -> no data -> excluded
       }
-      s.Providers = append(s.Providers, providerStat{Provider: ep.ProviderName, P50: ep.Stats.P50Throughput})
-      p50s = append(p50s, ep.Stats.P50Throughput)
+      if i, ok := idx[ep.ProviderName]; ok {
+         if ep.Stats.P50Throughput < s.Providers[i].P50 {
+            s.Providers[i].P50 = ep.Stats.P50Throughput
+         }
+         continue
+      }
+      idx[ep.ProviderName] = len(s.Providers)
+      s.Providers = append(s.Providers, &providerStat{Provider: ep.ProviderName, P50: ep.Stats.P50Throughput})
+   }
+
+   // Providers are listed fastest first.
+   slices.SortFunc(s.Providers, func(a, b *providerStat) int {
+      return cmp.Compare(b.P50, a.P50)
+   })
+   // Only the fastest maxProviders providers are kept, so the median
+   // covers the same set that gets printed.
+   if maxProviders > 0 && maxProviders < len(s.Providers) {
+      s.Providers = s.Providers[:maxProviders]
+   }
+
+   // The median needs ascending order.
+   p50s := make([]float64, len(s.Providers))
+   for i, p := range s.Providers {
+      p50s[i] = p.P50
    }
    slices.Sort(p50s)
    s.MedianP50 = percentile(p50s, 50)

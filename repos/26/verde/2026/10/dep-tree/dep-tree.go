@@ -1,9 +1,9 @@
-// deptree.go
 package main
 
 import (
    "bufio"
    "bytes"
+   "encoding/json"
    "fmt"
    "os"
    "os/exec"
@@ -12,6 +12,25 @@ import (
 )
 
 func main() {
+   // 1. Which requirements are direct?
+   var modFile goModFile
+   editJSON, err := exec.Command("go", "mod", "edit", "-json").Output()
+   if err != nil {
+      fmt.Fprintln(os.Stderr, "go mod edit -json failed:", err)
+      os.Exit(1)
+   }
+   if err := json.Unmarshal(editJSON, &modFile); err != nil {
+      fmt.Fprintln(os.Stderr, "parsing go.mod JSON:", err)
+      os.Exit(1)
+   }
+   direct := make(map[string]bool)
+   for _, r := range modFile.Require {
+      if !r.Indirect {
+         direct[r.Path] = true
+      }
+   }
+
+   // 2. Build the graph from `go mod graph`.
    cmd := exec.Command("go", "mod", "graph")
    var stderr bytes.Buffer
    cmd.Stderr = &stderr
@@ -27,17 +46,14 @@ func main() {
 
    sc := bufio.NewScanner(bytes.NewReader(out))
    for sc.Scan() {
-      line := sc.Text()
-      if line == "" {
-         continue
-      }
-      parts := strings.Fields(line)
+      parts := strings.Fields(sc.Text())
       if len(parts) != 2 {
          continue
       }
       a, b := parts[0], parts[1]
-      if root == "" {
-         root = a // first line's left side is the main module
+      // The main module is the only vertex without a version.
+      if root == "" && !strings.Contains(a, "@") {
+         root = a
       }
       children[a] = append(children[a], b)
    }
@@ -58,13 +74,33 @@ func main() {
       seen[m] = true
       inStack[m] = true
       fmt.Println(indent + m)
+
       deps := children[m]
       slices.Sort(deps)
       for _, d := range deps {
+         // Only follow the root's *direct* requirements.
+         if depth == 0 {
+            path, _, _ := strings.Cut(d, "@")
+            if !direct[path] {
+               continue
+            }
+         }
          walk(d, depth+1)
       }
       delete(inStack, m)
    }
 
+   if root == "" {
+      fmt.Fprintln(os.Stderr, "could not identify main module")
+      os.Exit(1)
+   }
    walk(root, 0)
+}
+
+type goModFile struct {
+   Require []struct {
+      Path     string
+      Version  string
+      Indirect bool
+   } `json:"Require"`
 }
