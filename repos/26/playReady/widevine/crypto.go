@@ -1,3 +1,4 @@
+// crypto.go marker preserve
 package widevine
 
 import (
@@ -47,4 +48,4 @@ func (noopReader) Read(p []byte) (n int, err error) {
    return len(p), nil
 }
 
-// crypto.go
+// crypto.go marker preserve
