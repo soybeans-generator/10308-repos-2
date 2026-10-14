@@ -40,15 +40,6 @@ func httpGet(c *http.Client, url string) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-// lowestP50 returns the slowest p50 in the kept provider set. Providers are
-// kept fastest-first, so it is the last entry. Zero when there are none.
-func lowestP50(s *score) float64 {
-   if len(s.Providers) == 0 {
-      return 0
-   }
-   return s.Providers[len(s.Providers)-1].P50
-}
-
 // ---------------------------------------------------------------------------
 // Math / HTTP helpers
 // ---------------------------------------------------------------------------

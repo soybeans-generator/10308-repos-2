@@ -67,22 +67,25 @@ func run(n, maxProviders int) error {
    }
    fmt.Fprintf(os.Stderr, "keeping %d models by intelligence\n", len(scored))
 
-   // --- 4. Sort the survivors by the slowest kept provider's p50,
-   // descending.
+   // --- 4. Sort the survivors by the median p50 across the kept
+   // providers, descending. A model with fewer providers than the flag
+   // is ranked on the median of whatever it has, so a small provider
+   // pool isn't an automatic penalty.
    slices.SortFunc(scored, func(a, b *score) int {
-      return cmp.Compare(lowestP50(b), lowestP50(a))
+      return cmp.Compare(b.MedianP50, a.MedianP50)
    })
 
    // Say how the list was ordered.
-   scope := fmt.Sprintf("fastest %d providers", maxProviders)
+   scope := fmt.Sprintf("fastest %d providers (or all if fewer)", maxProviders)
    if maxProviders <= 0 {
       scope = "all providers"
    }
-   fmt.Printf("sorted by: lowest p50 tps across the %s, descending\n\n", scope)
+   fmt.Printf("sorted by: median p50 tps across the %s, descending\n\n", scope)
 
    for _, s := range scored {
       fmt.Printf("model: %s\n", s.Model)
       fmt.Printf("intelligence: %.1f\n", s.Intelligence)
+      fmt.Printf("median p50 tps: %.1f (%d providers)\n", s.MedianP50, len(s.Providers))
       fmt.Printf("P50 TPS:\n")
       for _, p := range s.Providers {
          fmt.Printf("  %s: %.1f\n", p.Provider, p.P50)
