@@ -1,9 +1,8 @@
-// response.go marker preserve
+// protobuf.go marker preserve
 package widevine
 
 import (
    "41.neocities.org/protobuf"
-   "bytes"
    "crypto/aes"
    "crypto/cipher"
    "crypto/rsa"
@@ -20,16 +19,18 @@ const (
    kWrappingKeySizeBits = 128
 )
 
-// GetKey searches for a key by its ID in a slice of KeyContainers.
-// If the key is found, it returns the key and a nil error.
-// If the key is not found, it returns nil and an error.
-func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
-   for _, key := range keys {
-      if bytes.Equal(key.Id, id) {
-         return key.Key, nil
-      }
+// EncodeSignedMessage envelopes the request with an RSA signature.
+func EncodeSignedMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
+   signature, err := signMessage(requestData, privateKey)
+   if err != nil {
+      return nil, err
    }
-   return nil, errors.New("key not found")
+   message := protobuf.Message{
+      protobuf.Varint(1, 1), // LICENSE_REQUEST
+      protobuf.Bytes(2, requestData),
+      protobuf.Bytes(3, signature),
+   }
+   return message.Encode()
 }
 
 func decodeErrorFromMessage(message protobuf.Message) error {
@@ -38,12 +39,6 @@ func decodeErrorFromMessage(message protobuf.Message) error {
       return errors.New("widevine license error: unknown code")
    }
    return fmt.Errorf("widevine license error: code %v", errorCode.Numeric)
-}
-
-type KeyContainer struct {
-   Id  []byte
-   Iv  []byte
-   Key []byte
 }
 
 func DecodeLicenseResponse(responseData []byte, requestData []byte, privateKey *rsa.PrivateKey) ([]*KeyContainer, error) {
@@ -127,4 +122,62 @@ func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sess
    return keys, nil
 }
 
-// response.go marker preserve
+// PsshData represents the Widevine-specific protobuf message.
+type PsshData struct {
+   KeyIds    [][]byte
+   ContentId []byte
+}
+
+// DecodePsshData parses the protobuf wire format into a PsshData struct.
+func DecodePsshData(data []byte) (*PsshData, error) {
+   message, err := protobuf.DecodeMessage(data)
+   if err != nil {
+      return nil, err
+   }
+
+   p := &PsshData{}
+   it := message.Iterator(2)
+   for it.Next() {
+      if field := it.Field(); field != nil {
+         p.KeyIds = append(p.KeyIds, field.Bytes)
+      }
+   }
+   if field, ok := message.Field(4); ok {
+      p.ContentId = field.Bytes
+   }
+   return p, nil
+}
+
+// Encode serializes the PsshData struct into the protobuf wire format.
+func (p *PsshData) Encode() ([]byte, error) {
+   var message protobuf.Message
+   for _, keyId := range p.KeyIds {
+      if len(keyId) > 0 {
+         message = append(message, protobuf.Bytes(2, keyId))
+      }
+   }
+   if len(p.ContentId) > 0 {
+      message = append(message, protobuf.Bytes(4, p.ContentId))
+   }
+   return message.Encode()
+}
+
+// EncodeLicenseRequest creates and serializes a LicenseRequest protobuf message.
+func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
+   psshBytes, err := p.Encode()
+   if err != nil {
+      return nil, err
+   }
+   psshDataField := protobuf.Bytes(1, psshBytes)
+   widevinePsshData := protobuf.Embed(1, psshDataField)
+   contentIdentification := protobuf.Embed(2, widevinePsshData)
+
+   message := protobuf.Message{
+      protobuf.Bytes(1, clientId),
+      contentIdentification,
+      protobuf.Varint(3, 1), // NEW
+   }
+   return message.Encode()
+}
+
+// protobuf.go marker preserve

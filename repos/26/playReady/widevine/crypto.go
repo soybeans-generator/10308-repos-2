@@ -2,6 +2,7 @@
 package widevine
 
 import (
+   "bytes"
    "crypto"
    "crypto/rsa"
    "crypto/sha1"
@@ -31,6 +32,18 @@ func DecodePrivateKey(pemData []byte) (*rsa.PrivateKey, error) {
    return rsaKey, nil
 }
 
+// GetKey searches for a key by its ID in a slice of KeyContainers.
+// If the key is found, it returns the key and a nil error.
+// If the key is not found, it returns nil and an error.
+func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
+   for _, key := range keys {
+      if bytes.Equal(key.Id, id) {
+         return key.Key, nil
+      }
+   }
+   return nil, errors.New("key not found")
+}
+
 func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
    hash := sha1.New()
    hash.Write(requestData)
@@ -40,6 +53,12 @@ func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error)
       Hash:       crypto.SHA1,
    }
    return rsa.SignPSS(noopReader{}, privateKey, crypto.SHA1, hashed, opts)
+}
+
+type KeyContainer struct {
+   Id  []byte
+   Iv  []byte
+   Key []byte
 }
 
 type noopReader struct{}
