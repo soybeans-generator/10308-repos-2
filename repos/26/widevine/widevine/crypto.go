@@ -3,9 +3,7 @@ package widevine
 
 import (
    "bytes"
-   "crypto"
    "crypto/rsa"
-   "crypto/sha1"
    "crypto/x509"
    "encoding/pem"
    "errors"
@@ -42,29 +40,6 @@ func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
       }
    }
    return nil, errors.New("key not found")
-}
-
-func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
-   hash := sha1.New()
-   hash.Write(requestData)
-   hashed := hash.Sum(nil)
-   opts := &rsa.PSSOptions{
-      SaltLength: rsa.PSSSaltLengthEqualsHash,
-      Hash:       crypto.SHA1,
-   }
-   return rsa.SignPSS(noopReader{}, privateKey, crypto.SHA1, hashed, opts)
-}
-
-type KeyContainer struct {
-   Id  []byte
-   Iv  []byte
-   Key []byte
-}
-
-type noopReader struct{}
-
-func (noopReader) Read(p []byte) (n int, err error) {
-   return len(p), nil
 }
 
 // crypto.go marker preserve

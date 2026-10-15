@@ -3,6 +3,7 @@ package widevine
 
 import (
    "41.neocities.org/protobuf"
+   "crypto"
    "crypto/aes"
    "crypto/cipher"
    "crypto/rsa"
@@ -12,11 +13,6 @@ import (
    "fmt"
    "github.com/emmansun/gmsm/cbcmac"
    "github.com/emmansun/gmsm/padding"
-)
-
-const (
-   kWrappingKeyLabel    = "ENCRYPTION"
-   kWrappingKeySizeBits = 128
 )
 
 // EncodeSignedMessage envelopes the request with an RSA signature.
@@ -122,32 +118,6 @@ func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sess
    return keys, nil
 }
 
-// PsshData represents the Widevine-specific protobuf message.
-type PsshData struct {
-   KeyIds    [][]byte
-   ContentId []byte
-}
-
-// DecodePsshData parses the protobuf wire format into a PsshData struct.
-func DecodePsshData(data []byte) (*PsshData, error) {
-   message, err := protobuf.DecodeMessage(data)
-   if err != nil {
-      return nil, err
-   }
-
-   p := &PsshData{}
-   it := message.Iterator(2)
-   for it.Next() {
-      if field := it.Field(); field != nil {
-         p.KeyIds = append(p.KeyIds, field.Bytes)
-      }
-   }
-   if field, ok := message.Field(4); ok {
-      p.ContentId = field.Bytes
-   }
-   return p, nil
-}
-
 // Encode serializes the PsshData struct into the protobuf wire format.
 func (p *PsshData) Encode() ([]byte, error) {
    var message protobuf.Message
@@ -178,6 +148,60 @@ func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
       protobuf.Varint(3, 1), // NEW
    }
    return message.Encode()
+}
+
+// DecodePsshData parses the protobuf wire format into a PsshData struct.
+func DecodePsshData(data []byte) (*PsshData, error) {
+   message, err := protobuf.DecodeMessage(data)
+   if err != nil {
+      return nil, err
+   }
+
+   p := &PsshData{}
+   it := message.Iterator(2)
+   for it.Next() {
+      if field := it.Field(); field != nil {
+         p.KeyIds = append(p.KeyIds, field.Bytes)
+      }
+   }
+   if field, ok := message.Field(4); ok {
+      p.ContentId = field.Bytes
+   }
+   return p, nil
+}
+
+const (
+   kWrappingKeyLabel    = "ENCRYPTION"
+   kWrappingKeySizeBits = 128
+)
+
+func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
+   hash := sha1.New()
+   hash.Write(requestData)
+   hashed := hash.Sum(nil)
+   opts := &rsa.PSSOptions{
+      SaltLength: rsa.PSSSaltLengthEqualsHash,
+      Hash:       crypto.SHA1,
+   }
+   return rsa.SignPSS(noopReader{}, privateKey, crypto.SHA1, hashed, opts)
+}
+
+type KeyContainer struct {
+   Id  []byte
+   Iv  []byte
+   Key []byte
+}
+
+// PsshData represents the Widevine-specific protobuf message.
+type PsshData struct {
+   KeyIds    [][]byte
+   ContentId []byte
+}
+
+type noopReader struct{}
+
+func (noopReader) Read(p []byte) (n int, err error) {
+   return len(p), nil
 }
 
 // protobuf.go marker preserve
