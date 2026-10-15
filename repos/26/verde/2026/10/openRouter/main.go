@@ -14,7 +14,7 @@ import (
 func main() {
    n := flag.Int("n", 0,
       "number of models to output (top N by intelligence; 0 = all)")
-   providers := flag.Int("p", 10,
+   providers := flag.Int("p", 9,
       "providers per model, fastest first (also the median's window; 0 = all)")
    flag.Parse()
 
