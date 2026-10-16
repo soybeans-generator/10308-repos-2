@@ -1,4 +1,4 @@
-// transactions.go
+// transaction.go marker preserve
 
 package main
 
@@ -121,4 +121,4 @@ func extractRecentTransactions(filename string, today time.Time, lookbackDays in
    return validTransactions, nil
 }
 
-// transactions.go
+// transaction.go marker preserve

@@ -1,4 +1,4 @@
-// main.go
+// main.go marker preserve
 
 package main
 
@@ -22,7 +22,6 @@ var targets = []Target{
    {Name: "JASON'S DELI"},
    {Name: "LA MADELEINE"},
    {Name: "MCDONALD'S"},
-   {Name: "POBLANOS PIRI PIR", Distance: "3.2 mi"},
    {Name: "SCHLOTZSKYS"},
    {Name: "SHAKE SHACK"},
    {Name: "SHAWARMA PRESS", Distance: "4.5 mi"},
@@ -43,14 +42,21 @@ func main() {
       os.Exit(1)
    }
 
+   if err := run(*inputFile); err != nil {
+      fmt.Fprintf(os.Stderr, "Fatal error: %v\n", err)
+      os.Exit(1)
+   }
+}
+
+// run executes the full pipeline: extract transactions, match targets, sort, and write CSV.
+func run(filename string) error {
    now := time.Now()
    today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
    // 1. Extract fallible reading logic
-   validTransactions, err := extractRecentTransactions(*inputFile, today, 7)
+   validTransactions, err := extractRecentTransactions(filename, today, 7)
    if err != nil {
-      fmt.Fprintf(os.Stderr, "Fatal error reading descriptions: %v\n", err)
-      os.Exit(1)
+      return fmt.Errorf("reading descriptions: %w", err)
    }
 
    // 2. Count occurrences and track the latest date
@@ -89,9 +95,10 @@ func main() {
 
    // 4. Extract fallible writing logic
    if err := writeCSV(results); err != nil {
-      fmt.Fprintf(os.Stderr, "Fatal error writing CSV: %v\n", err)
-      os.Exit(1)
+      return fmt.Errorf("writing CSV: %w", err)
    }
+
+   return nil
 }
 
 // writeCSV safely writes the sorted results to standard output, returning any encoding errors.
@@ -141,4 +148,4 @@ type Target struct {
    Distance string
 }
 
-// main.go
+// main.go marker preserve
