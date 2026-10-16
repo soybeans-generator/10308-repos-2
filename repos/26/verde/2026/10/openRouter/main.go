@@ -1,4 +1,4 @@
-// main.go
+// main.go marker preserve
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
    "net/url"
    "os"
    "slices"
+   "strings"
    "time"
 )
 
@@ -52,19 +53,18 @@ func run(maxProviders int, f filters) error {
    if err != nil {
       return fmt.Errorf("catalog: %w", err)
    }
-   fmt.Fprintf(os.Stderr, "%d models in catalog, %d open-weights 1M+ context candidates\n",
-      total, len(cands))
    if len(cands) == 0 {
-      return fmt.Errorf("no candidates matched")
+      return fmt.Errorf("no candidates matched (%d models in catalog)", total)
    }
 
    // --- 2. Providers: sequential, one request per candidate. A failed
-   // request is reported and skipped — no retries.
+   // request is reported as a log line — like the GET lines — and
+   // skipped; no retries. All log output (stderr) happens here.
    var scored []*score
    for _, cd := range cands {
       s := fetchScore(client, cd, maxProviders)
       if s.Error != "" {
-         fmt.Fprintf(os.Stderr, "error: %s: %s\n", cd.slug, s.Error)
+         log.Printf("error: %s: %s", s.Model, s.Error)
          continue
       }
       scored = append(scored, s)
@@ -78,26 +78,48 @@ func run(maxProviders int, f filters) error {
       return cmp.Compare(b.MedianP50, a.MedianP50)
    })
 
-   // Say how the list was ordered.
+   // Everything from here on is buffered and written to stdout in a
+   // single shot at the end, so the report lands strictly after the
+   // last log line regardless of stream buffering.
+   var out strings.Builder
+
+   // Header, wrapped so no line runs long. The catalog count is after
+   // the server-side filters; the candidate count is after the
+   // open-weights narrowing on top of those. The filter list beneath
+   // spells out every filter that produced the candidate count.
+   fmt.Fprintf(&out, "%d models in catalog after server-side filters\n", total)
+   fmt.Fprintf(&out, "%d open-weights candidates after all filters:\n", len(cands))
+   fmt.Fprintf(&out, "context at least 1M\n")
+   if f.minIntelligenceIndex > 0 {
+      fmt.Fprintf(&out, "minimum intelligence index %.4g\n", f.minIntelligenceIndex)
+   }
+   if f.maxOutputPrice > 0 {
+      fmt.Fprintf(&out, "maximum output price $%.4g per Mtok\n", f.maxOutputPrice)
+   }
+   fmt.Fprintln(&out)
+
+   // Say how the list was ordered, wrapped too.
    scope := fmt.Sprintf("fastest %d providers (or all if fewer)", maxProviders)
    if maxProviders <= 0 {
       scope = "all providers"
    }
-   fmt.Printf("sorted by: median p50 tps across the %s, descending\n\n", scope)
+   fmt.Fprintf(&out, "sorted by: median p50 tps across the\n%s, descending\n\n", scope)
 
    for _, s := range scored {
-      fmt.Printf("model: %s\n", s.Model)
-      fmt.Printf("intelligence: %.1f\n", s.Intelligence)
-      fmt.Printf("context: %d\n", s.Context)
-      fmt.Printf("price: $%.2f in / $%.2f out per Mtok\n", s.InputPrice, s.OutputPrice)
-      fmt.Printf("median p50 tps: %.1f (%d providers)\n", s.MedianP50, len(s.Providers))
-      fmt.Printf("P50 TPS:\n")
+      fmt.Fprintf(&out, "model: %s\n", s.Model)
+      fmt.Fprintf(&out, "intelligence: %.1f\n", s.Intelligence)
+      fmt.Fprintf(&out, "context: %d\n", s.Context)
+      fmt.Fprintf(&out, "price: $%.2f in / $%.2f out per Mtok\n", s.InputPrice, s.OutputPrice)
+      fmt.Fprintf(&out, "median p50 tps: %.1f (%d providers)\n", s.MedianP50, len(s.Providers))
+      fmt.Fprintf(&out, "P50 TPS:\n")
       for _, p := range s.Providers {
-         fmt.Printf("  %s: %.1f\n", p.Provider, p.P50)
+         fmt.Fprintf(&out, "  %s: %.1f\n", p.Provider, p.P50)
       }
-      fmt.Println()
+      fmt.Fprintln(&out)
    }
 
+   // Single flush: the whole report follows the log lines.
+   fmt.Fprint(os.Stdout, out.String())
    return nil
 }
 
@@ -206,4 +228,4 @@ type statsResponse struct {
    Data []statEndpoint `json:"data"`
 }
 
-// main.go
+// main.go marker preserve

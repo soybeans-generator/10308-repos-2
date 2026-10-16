@@ -1,4 +1,4 @@
-// openrouter.go
+// openrouter.go marker preserve
 package main
 
 import (
@@ -203,4 +203,4 @@ type findResponse struct {
    } `json:"data"`
 }
 
-// openrouter.go
+// openrouter.go marker preserve
