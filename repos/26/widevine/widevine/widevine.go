@@ -18,6 +18,24 @@ import (
    "github.com/emmansun/gmsm/padding"
 )
 
+// EncodeLicenseRequest creates and serializes a LicenseRequest protobuf message.
+func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
+   psshBytes, err := p.Encode()
+   if err != nil {
+      return nil, err
+   }
+   psshDataField := protobuf.Bytes(1, psshBytes)
+   widevinePsshData := protobuf.Embed(1, psshDataField)
+   contentIdentification := protobuf.Embed(2, widevinePsshData)
+
+   message := protobuf.Message{
+      protobuf.Bytes(1, clientId),
+      contentIdentification,
+      protobuf.Varint(3, 1), // NEW
+   }
+   return message.Encode()
+}
+
 // EncodeSignedMessage envelopes the request with an RSA signature.
 func EncodeSignedMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
    signature, err := signMessage(requestData, privateKey)
@@ -131,24 +149,6 @@ func (p *PsshData) Encode() ([]byte, error) {
    }
    if len(p.ContentId) > 0 {
       message = append(message, protobuf.Bytes(4, p.ContentId))
-   }
-   return message.Encode()
-}
-
-// EncodeLicenseRequest creates and serializes a LicenseRequest protobuf message.
-func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
-   psshBytes, err := p.Encode()
-   if err != nil {
-      return nil, err
-   }
-   psshDataField := protobuf.Bytes(1, psshBytes)
-   widevinePsshData := protobuf.Embed(1, psshDataField)
-   contentIdentification := protobuf.Embed(2, widevinePsshData)
-
-   message := protobuf.Message{
-      protobuf.Bytes(1, clientId),
-      contentIdentification,
-      protobuf.Varint(3, 1), // NEW
    }
    return message.Encode()
 }
