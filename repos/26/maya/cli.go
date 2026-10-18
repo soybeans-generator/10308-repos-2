@@ -1,4 +1,4 @@
-// cli.go
+// cli.go marker preserve
 package maya
 
 import (
@@ -282,4 +282,4 @@ type FlagValue interface {
    Example() string
 }
 
-// cli.go
+// cli.go marker preserve

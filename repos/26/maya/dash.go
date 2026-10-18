@@ -1,4 +1,4 @@
-// dash.go
+// dash.go marker preserve
 package maya
 
 import (
@@ -219,4 +219,4 @@ func getDashMediaRequests(group []*dash.Representation) ([]segment, error) {
    return requests, nil
 }
 
-// dash.go
+// dash.go marker preserve

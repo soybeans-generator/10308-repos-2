@@ -1,4 +1,4 @@
-// resume.go
+// resume.go marker preserve
 package maya
 
 import (
@@ -80,4 +80,4 @@ func readResume(path string) (*resumeState, error) {
    return &state, nil
 }
 
-// resume.go
+// resume.go marker preserve
