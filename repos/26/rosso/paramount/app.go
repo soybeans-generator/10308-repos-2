@@ -2,11 +2,14 @@
 package paramount
 
 import (
+   "bytes"
    "encoding/json"
    "errors"
    "fmt"
    "io"
+   "net/http"
    "net/url"
+   "strings"
 )
 
 var Apps = []App{
@@ -63,25 +66,27 @@ func (a *App) FetchCbsCom(username, password string) (*Cookie, error) {
       Path:     "/apps-api/v2.0/androidphone/auth/login.json",
       RawQuery: url.Values{"at": {at}}.Encode(),
    }
-   req, err := newPostRequest(
-      target.String(),
-      map[string]string{
-         "content-type": "application/x-www-form-urlencoded",
-         "user-agent":   "!", // randomly fails if this is missing
-      },
-      []byte(body),
-   )
+   req, err := http.NewRequest("POST", target.String(), strings.NewReader(body))
    if err != nil {
       return nil, err
    }
+   req.Header.Set("content-type", "application/x-www-form-urlencoded")
+   req.Header.Set("user-agent", "!") // randomly fails if this is missing
    resp, err := doRequest(req)
    if err != nil {
       return nil, err
    }
    defer resp.Body.Close()
-   _, err = io.Copy(io.Discard, resp.Body)
-   if err != nil {
+   // 403 comes back with an empty body, so check the status before decoding
+   if resp.StatusCode != http.StatusOK {
+      return nil, errors.New(resp.Status)
+   }
+   var result LoginResult
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
       return nil, err
+   }
+   if result.Message != "" {
+      return nil, errors.New(result.Message)
    }
    for _, each := range resp.Cookies() {
       if each.Name == "CBS_COM" {
@@ -89,6 +94,11 @@ func (a *App) FetchCbsCom(username, password string) (*Cookie, error) {
       }
    }
    return nil, errors.New("CBS_COM cookie not present")
+}
+
+type LoginResult struct {
+   Message string
+   Success bool
 }
 
 func (a *App) FetchPlayReady(contentId string, cbsCom *Cookie) (*Session, error) {
@@ -130,15 +140,21 @@ func (a *App) fetch_session(platform, contentId string, cbs_com *Cookie) (*Sessi
          "contentId": {contentId},
       }.Encode(),
    }
-   req, err := newGetRequest(target.String(), header)
+   req, err := http.NewRequest("GET", target.String(), nil)
    if err != nil {
       return nil, err
+   }
+   for key, val := range header {
+      req.Header.Set(key, val)
    }
    resp, err := doRequest(req)
    if err != nil {
       return nil, err
    }
    defer resp.Body.Close()
+   if resp.StatusCode != http.StatusOK {
+      return nil, errors.New(resp.Status)
+   }
    var result Session
    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
       return nil, err
@@ -170,12 +186,11 @@ type Session struct {
 }
 
 func (s *Session) Fetch(body []byte) ([]byte, error) {
-   req, err := newPostRequest(
-      s.Url, map[string]string{"authorization": "Bearer " + s.LsSession}, body,
-   )
+   req, err := http.NewRequest("POST", s.Url, bytes.NewReader(body))
    if err != nil {
       return nil, err
    }
+   req.Header.Set("authorization", "Bearer "+s.LsSession)
    resp, err := doRequest(req)
    if err != nil {
       return nil, err

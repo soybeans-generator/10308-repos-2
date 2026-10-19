@@ -9,7 +9,6 @@ package paramount
 
 import (
    "archive/zip"
-   "bytes"
    "crypto/aes"
    "crypto/cipher"
    "encoding/base64"
@@ -93,30 +92,6 @@ func get_at(app_secret string) (string, error) {
    data = append(append(size, iv[:]...), data...)
    // 9. Return result base64 encoded
    return base64.StdEncoding.EncodeToString(data), nil
-}
-
-// newGetRequest builds a GET request with the given headers.
-func newGetRequest(target string, header map[string]string) (*http.Request, error) {
-   req, err := http.NewRequest("GET", target, nil)
-   if err != nil {
-      return nil, err
-   }
-   for key, val := range header {
-      req.Header.Set(key, val)
-   }
-   return req, nil
-}
-
-// newPostRequest builds a POST request with the given headers and body.
-func newPostRequest(target string, header map[string]string, body []byte) (*http.Request, error) {
-   req, err := http.NewRequest("POST", target, bytes.NewReader(body))
-   if err != nil {
-      return nil, err
-   }
-   for key, val := range header {
-      req.Header.Set(key, val)
-   }
-   return req, nil
 }
 
 func pkcs7_pad(data []byte, block_size int) []byte {
