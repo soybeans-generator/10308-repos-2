@@ -9,8 +9,6 @@ var videos = []struct {
    height    int
 }{
    {
-      //1080 pass
-      //1440 fail
       cookie:    true,
       height:    2160,
       justWatch: "https://justwatch.com/us/movie/zodiac",

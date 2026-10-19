@@ -45,8 +45,8 @@ func (c *client) do() error {
       {Name: "username", Value: &c.username, Needs: []string{"password"}},
       {Name: "password", Value: &c.password, Needs: []string{"username"}},
       {Name: "content-id", Value: &c.ContentId},
-      {Name: "use-cookie", Value: &c.cookie, Needs: []string{"content-id"}},
       {Name: "dash-id", Value: &c.dash_id},
+      {Name: "use-cookie", Value: &c.cookie, Needs: []string{"content-id", "dash-id"}},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {
       return err
@@ -72,6 +72,10 @@ func (c *client) do() error {
 }
 
 func (c *client) do_content_id() error {
+   err := c.cache.Encode(c)
+   if err != nil {
+      return err
+   }
    app, err := paramount.GetApp(string(c.App))
    if err != nil {
       return err
@@ -96,7 +100,7 @@ func (c *client) do_content_id() error {
    if err != nil {
       return err
    }
-   return c.cache.Encode(c, manifest)
+   return c.cache.Encode(manifest)
 }
 
 func (c *client) do_dash_id() error {
