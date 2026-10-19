@@ -74,7 +74,7 @@ type Flag struct {
    Name  string
    Usage string
    Value FlagValue
-   Needs string
+   Needs []string
    isSet bool
 }
 
@@ -231,16 +231,44 @@ func (set FlagSet) Usage(w io.Writer, name string) error {
       return prefix
    }
 
+   // A flag with any needs never prints standalone —
+   // it attaches to each needed flag's example instead.
+   standalone := func(f *Flag) bool {
+      return len(f.Needs) == 0
+   }
+
    for _, item := range set {
-      fmt.Fprintf(data, "     %s", name)
-      if item.Needs != "" {
-         needed := set.lookup(item.Needs)
-         if needed == nil {
-            return fmt.Errorf("flag %q needs undefined flag %q", item.Name, item.Needs)
+      if standalone(item) {
+         fmt.Fprintf(data, "     %s %s\n", name, formatFlag(item))
+
+         // After a standalone example, print one extra line for each
+         // flag that lists it in Needs.
+         for _, dep := range set {
+            if standalone(dep) {
+               continue
+            }
+            for _, need := range dep.Needs {
+               if need == item.Name {
+                  fmt.Fprintf(data, "     %s %s %s\n",
+                     name, formatFlag(item), formatFlag(dep))
+                  break
+               }
+            }
          }
-         fmt.Fprintf(data, " %s", formatFlag(needed))
+      } else {
+         for _, need := range item.Needs {
+            needed := set.lookup(need)
+            if needed == nil {
+               return fmt.Errorf("flag %q needs undefined flag %q", item.Name, need)
+            }
+            // the needed flag already printed this example
+            // below its own standalone example
+            if !standalone(needed) {
+               fmt.Fprintf(data, "     %s %s %s\n",
+                  name, formatFlag(needed), formatFlag(item))
+            }
+         }
       }
-      fmt.Fprintf(data, " %s\n", formatFlag(item))
    }
 
    _, err := fmt.Fprint(w, data)

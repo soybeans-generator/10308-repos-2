@@ -7,7 +7,6 @@ import (
    "fmt"
    "net/url"
    "path"
-   "slices"
    "strconv"
 )
 
@@ -82,11 +81,10 @@ func getHlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, erro
    return nil, fmt.Errorf("stream with ID not found: %d", streamId)
 }
 
-// listStreamsHls is an internal helper to print streams from a parsed playlist
+// listStreamsHls is an internal helper to print streams from a parsed playlist.
+// Streams print in manifest order; sorting was dropped when the hls package
+// removed its comparators.
 func listStreamsHls(playlist *hls.MasterPlaylist) error {
-   slices.SortFunc(playlist.Medias, hls.GroupId)
-   slices.SortFunc(playlist.StreamInfs, hls.Bandwidth)
-
    var firstItemPrinted bool
    for _, rendition := range playlist.Medias {
       if firstItemPrinted {
