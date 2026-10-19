@@ -21,11 +21,10 @@ type client struct {
    Widevine           maya.FlagString
    account_activation maya.FlagBool
    activation_status  maya.FlagBool
+   cache              maya.Cache
    dash_id            maya.FlagString
    roku_id            maya.FlagString
    use_account        maya.FlagBool
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -44,7 +43,7 @@ func (c *client) do() error {
       {Name: "account-activation", Value: &c.account_activation},
       {Name: "activation-status", Value: &c.activation_status},
       {Name: "roku-id", Value: &c.roku_id},
-      {Name: "use-account", Value: &c.use_account, Needs: "roku-id"},
+      {Name: "use-account", Value: &c.use_account, Needs: []string{"roku-id"}},
       {Name: "dash-id", Value: &c.dash_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {

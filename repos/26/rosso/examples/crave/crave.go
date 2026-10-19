@@ -19,12 +19,11 @@ func main() {
 type client struct {
    PlayReady maya.FlagString
    address   maya.FlagString
+   cache     maya.Cache
    dash_id   maya.FlagString
    password  maya.FlagString
    profile   maya.FlagString
    username  maya.FlagString
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -40,8 +39,8 @@ func (c *client) do() error {
    }
    flags := maya.FlagSet{
       {Name: "playReady-folder", Value: &c.PlayReady},
-      {Name: "username", Value: &c.username, Needs: "password"},
-      {Name: "password", Value: &c.password, Needs: "username"},
+      {Name: "username", Value: &c.username, Needs: []string{"password"}},
+      {Name: "password", Value: &c.password, Needs: []string{"username"}},
       {Name: "profile-id", Value: &c.profile},
       {Name: "address", Value: &c.address},
       {Name: "dash-id", Value: &c.dash_id},

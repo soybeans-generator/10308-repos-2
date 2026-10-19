@@ -19,13 +19,12 @@ func main() {
 type client struct {
    PlayReady  maya.FlagString
    activation maya.FlagBool
-   token      maya.FlagBool
-   program_id maya.FlagInt
-   uhd        maya.FlagBool
-   hdr        maya.FlagBool
+   cache      maya.Cache
    dash_id    maya.FlagString
-
-   cache maya.Cache
+   hdr        maya.FlagBool
+   program_id maya.FlagInt
+   token      maya.FlagBool
+   uhd        maya.FlagBool
 }
 
 func (*client) CachePath() string {
@@ -44,8 +43,8 @@ func (c *client) do() error {
       {Name: "activation", Value: &c.activation},
       {Name: "token", Value: &c.token},
       {Name: "program-id", Value: &c.program_id},
-      {Name: "uhd", Value: &c.uhd, Needs: "program-id"},
-      {Name: "hdr", Value: &c.hdr, Needs: "program-id"},
+      {Name: "uhd", Value: &c.uhd, Needs: []string{"program-id"}},
+      {Name: "hdr", Value: &c.hdr, Needs: []string{"program-id"}},
       {Name: "dash-id", Value: &c.dash_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {

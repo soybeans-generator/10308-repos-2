@@ -42,10 +42,10 @@ func (c *client) do() error {
    flags := maya.FlagSet{
       {Name: "app", Value: &c.App, Usage: paramount.AppIds()},
       {Name: "playReady-folder", Value: &c.PlayReady},
-      {Name: "username", Value: &c.username, Needs: "password"},
-      {Name: "password", Value: &c.password, Needs: "username"},
+      {Name: "username", Value: &c.username, Needs: []string{"password"}},
+      {Name: "password", Value: &c.password, Needs: []string{"username"}},
       {Name: "content-id", Value: &c.ContentId},
-      {Name: "use-cookie", Value: &c.cookie, Needs: "content-id"},
+      {Name: "use-cookie", Value: &c.cookie, Needs: []string{"content-id"}},
       {Name: "dash-id", Value: &c.dash_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {

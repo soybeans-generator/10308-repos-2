@@ -18,11 +18,10 @@ func main() {
 
 type client struct {
    Widevine   maya.FlagString
+   bitrate    maya.FlagBool
+   cache      maya.Cache
    content_id maya.FlagInt
    dash_id    maya.FlagString
-   bitrate    maya.FlagBool
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -40,7 +39,7 @@ func (c *client) do() error {
       {Name: "widevine-folder", Value: &c.Widevine},
       {Name: "content-id", Value: &c.content_id},
       {Name: "dash-id", Value: &c.dash_id},
-      {Name: "bitrate", Value: &c.bitrate, Needs: "dash-id"},
+      {Name: "bitrate", Value: &c.bitrate, Needs: []string{"dash-id"}},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {
       return err

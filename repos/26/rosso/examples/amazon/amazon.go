@@ -21,14 +21,13 @@ type client struct {
    PlayReady          maya.FlagString
    TitleId            maya.FlagString
    bitrate_adaptation maya.FlagString
+   cache              maya.Cache
    complete_login     maya.FlagBool
    dash_id            maya.FlagString
    dynamic_range      maya.FlagString
    initiate_login     maya.FlagBool
    playback           maya.FlagBool
    video_codec        maya.FlagString
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -58,19 +57,19 @@ func (c *client) do() error {
          Name:  "bitrate-adaptation",
          Value: &c.bitrate_adaptation,
          Usage: "CVBR CBR",
-         Needs: "playback",
+         Needs: []string{"playback"},
       },
       {
          Name:  "dynamic-range",
          Value: &c.dynamic_range,
          Usage: "None HDR10 DolbyVision",
-         Needs: "playback",
+         Needs: []string{"playback"},
       },
       {
          Name:  "video-codec",
          Value: &c.video_codec,
          Usage: "H264 H265",
-         Needs: "playback",
+         Needs: []string{"playback"},
       },
       {Name: "dash-id", Value: &c.dash_id},
    }

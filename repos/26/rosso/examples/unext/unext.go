@@ -41,12 +41,12 @@ func (c *client) do() error {
    }
    flags := maya.FlagSet{
       {Name: "widevine-folder", Value: &c.Widevine},
-      {Name: "email", Value: &c.email, Needs: "password"},
-      {Name: "password", Value: &c.password, Needs: "email"},
+      {Name: "email", Value: &c.email, Needs: []string{"password"}},
+      {Name: "password", Value: &c.password, Needs: []string{"email"}},
       {Name: "refresh", Value: &c.refresh},
       {Name: "title-code", Value: &c.title_code},
-      {Name: "episode-code", Value: &c.episode_code, Needs: "play-mode"},
-      {Name: "play-mode", Value: &c.play_mode, Needs: "episode-code", Usage: "caption dub"},
+      {Name: "episode-code", Value: &c.episode_code, Needs: []string{"play-mode"}},
+      {Name: "play-mode", Value: &c.play_mode, Usage: "caption dub", Needs: []string{"episode-code"}},
       {Name: "dash-id", Value: &c.dash_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {

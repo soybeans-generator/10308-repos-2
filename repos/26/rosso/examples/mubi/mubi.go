@@ -20,13 +20,12 @@ func main() {
 type client struct {
    Widevine  maya.FlagString
    address   maya.FlagString
+   cache     maya.Cache
    dash_id   maya.FlagString
    link_code maya.FlagBool
    mubi_id   maya.FlagInt
    season    maya.FlagInt
    session   maya.FlagBool
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -45,7 +44,7 @@ func (c *client) do() error {
       {Name: "link-code", Value: &c.link_code},
       {Name: "session", Value: &c.session},
       {Name: "address", Value: &c.address, Usage: "film or series URL"},
-      {Name: "season", Value: &c.season, Needs: "address"},
+      {Name: "season", Value: &c.season, Needs: []string{"address"}},
       {Name: "mubi-id", Value: &c.mubi_id},
       {Name: "dash-id", Value: &c.dash_id},
    }

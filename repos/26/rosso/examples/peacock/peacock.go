@@ -18,15 +18,14 @@ func main() {
 
 type client struct {
    Widevine     maya.FlagString
+   address      maya.FlagString
+   cache        maya.Cache
+   colour_space maya.FlagString
+   dash_id      maya.FlagString
    email        maya.FlagString
    password     maya.FlagString
    token        maya.FlagBool
-   address      maya.FlagString
    vcodec       maya.FlagString
-   colour_space maya.FlagString
-   dash_id      maya.FlagString
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -42,16 +41,21 @@ func (c *client) do() error {
    }
    flags := maya.FlagSet{
       {Name: "widevine-folder", Value: &c.Widevine},
-      {Name: "email", Value: &c.email, Needs: "password"},
-      {Name: "password", Value: &c.password, Needs: "email"},
+      {Name: "email", Value: &c.email, Needs: []string{"password"}},
+      {Name: "password", Value: &c.password, Needs: []string{"email"}},
       {Name: "token", Value: &c.token},
-      {Name: "address", Value: &c.address, Needs: "vcodec"},
-      {Name: "vcodec", Value: &c.vcodec, Needs: "address", Usage: "H264 H265"},
+      {Name: "address", Value: &c.address, Needs: []string{"vcodec"}},
+      {
+         Name:  "vcodec",
+         Value: &c.vcodec,
+         Usage: "H264 H265",
+         Needs: []string{"address"},
+      },
       {
          Name:  "colour-space",
          Value: &c.colour_space,
-         Needs: "address",
          Usage: "HDR10 DolbyVision",
+         Needs: []string{"address"},
       },
       {Name: "dash-id", Value: &c.dash_id},
    }

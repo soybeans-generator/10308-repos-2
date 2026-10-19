@@ -17,12 +17,11 @@ func main() {
 }
 
 type client struct {
-   username maya.FlagString
-   password maya.FlagString
    browse   maya.FlagString
+   cache    maya.Cache
    hls_id   maya.FlagInt
-
-   cache maya.Cache
+   password maya.FlagString
+   username maya.FlagString
 }
 
 func (c *client) do() error {
@@ -30,8 +29,8 @@ func (c *client) do() error {
       return err
    }
    flags := maya.FlagSet{
-      {Name: "username", Value: &c.username, Needs: "password"},
-      {Name: "password", Value: &c.password, Needs: "username"},
+      {Name: "username", Value: &c.username, Needs: []string{"password"}},
+      {Name: "password", Value: &c.password, Needs: []string{"username"}},
       {Name: "browse-id", Value: &c.browse},
       {Name: "hls-id", Value: &c.hls_id},
    }

@@ -17,16 +17,16 @@ func main() {
 }
 
 type client struct {
-   cache     maya.Cache
    PlayReady maya.FlagString
+   cache     maya.Cache
+   dash_id   maya.FlagString
+   edit_id   maya.FlagString
    initiate  maya.FlagString
    login     maya.FlagBool
-   search    maya.FlagString
    movie     maya.FlagString
-   show      maya.FlagString
+   search    maya.FlagString
    season    maya.FlagInt
-   edit_id   maya.FlagString
-   dash_id   maya.FlagString
+   show      maya.FlagString
 }
 
 func (*client) CachePath() string {
@@ -46,8 +46,8 @@ func (c *client) do() error {
       {Name: "login", Value: &c.login},
       {Name: "search", Value: &c.search},
       {Name: "movie-id", Value: &c.movie},
-      {Name: "show-id", Value: &c.show, Needs: "season"},
-      {Name: "season", Value: &c.season, Needs: "show-id"},
+      {Name: "show-id", Value: &c.show, Needs: []string{"season"}},
+      {Name: "season", Value: &c.season, Needs: []string{"show-id"}},
       {Name: "edit-id", Value: &c.edit_id},
       {Name: "dash-id", Value: &c.dash_id},
    }

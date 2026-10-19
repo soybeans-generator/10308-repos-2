@@ -36,6 +36,7 @@ func main() {
 
 type client struct {
    Widevine  maya.FlagString
+   cache     maya.Cache
    dash_id   maya.FlagString
    email     maya.FlagString
    password  maya.FlagString
@@ -44,8 +45,6 @@ type client struct {
    season    maya.FlagInt
    subtitles maya.FlagBool
    tracking  maya.FlagString
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -61,12 +60,12 @@ func (c *client) do() error {
    }
    flags := maya.FlagSet{
       {Name: "widevine-folder", Value: &c.Widevine},
-      {Name: "email", Value: &c.email, Needs: "password"},
-      {Name: "password", Value: &c.password, Needs: "email"},
+      {Name: "email", Value: &c.email, Needs: []string{"password"}},
+      {Name: "password", Value: &c.password, Needs: []string{"email"}},
       {Name: "refresh", Value: &c.refresh},
       {Name: "query", Value: &c.query},
       {Name: "tracking", Value: &c.tracking},
-      {Name: "season", Value: &c.season, Needs: "tracking"},
+      {Name: "season", Value: &c.season, Needs: []string{"tracking"}},
       {Name: "subtitles", Value: &c.subtitles},
       {Name: "dash-id", Value: &c.dash_id},
    }

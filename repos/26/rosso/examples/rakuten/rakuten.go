@@ -20,11 +20,10 @@ type client struct {
    PlayReady maya.FlagString
    address   maya.FlagString
    audio     maya.FlagString
+   cache     maya.Cache
    dash_id   maya.FlagString
    episode   maya.FlagString
    season    maya.FlagString
-
-   cache maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -43,7 +42,7 @@ func (c *client) do() error {
       {Name: "address", Value: &c.address},
       {Name: "season-id", Value: &c.season},
       {Name: "audio-language", Value: &c.audio},
-      {Name: "episode-id", Value: &c.episode, Needs: "audio-language"},
+      {Name: "episode-id", Value: &c.episode, Needs: []string{"audio-language"}},
       {Name: "dash-id", Value: &c.dash_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {

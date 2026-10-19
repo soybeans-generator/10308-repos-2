@@ -27,14 +27,12 @@ var videos = []struct {
       height:    1080,
       justWatch: "https://justwatch.com/us/tv-show/60-minutes",
       paramount: "https://cbs.com/shows/video/ALVE01M37SHC34E1FBDZBEMTB4R6JQ",
-      
    },
    {
       cookie:    true,
       height:    1080,
       justWatch: "https://justwatch.com/us/tv-show/the-price-is-right",
       paramount: "https://paramountplus.com/shows/video/ALVE01M46GTPGKEY1TQKSW4347HN48",
-      
    },
 }
 

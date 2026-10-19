@@ -96,11 +96,6 @@ func (a *App) FetchCbsCom(username, password string) (*Cookie, error) {
    return nil, errors.New("CBS_COM cookie not present")
 }
 
-type LoginResult struct {
-   Message string
-   Success bool
-}
-
 func (a *App) FetchPlayReady(contentId string, cbsCom *Cookie) (*Session, error) {
    return a.fetch_session("xboxone", contentId, cbsCom)
 }
@@ -176,6 +171,11 @@ func (*Cookie) CachePath() string {
 
 func (c *Cookie) String() string {
    return fmt.Sprintf("%v=%v", c.Name, c.Value)
+}
+
+type LoginResult struct {
+   Message string
+   Success bool
 }
 
 type Session struct {
