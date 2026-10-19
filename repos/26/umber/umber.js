@@ -95,8 +95,6 @@ async function main() {
       records = records.filter(row => label(row).toLowerCase().includes(needle));
    }
 
-   records.sort((x, y) => y.D - x.D);
-
    // `d` is now the difference between the first D on the page and the
    // oldest D in the JSON, i.e. records[start].D - oldest
    const offset = query.get('d');
