@@ -1,6 +1,8 @@
 package claire
 
 import (
+   _ "embed"
+   "html/template"
    "io/fs"
    "log"
    "os"
@@ -10,6 +12,13 @@ import (
    "strings"
 )
 
+//go:embed package.tmpl
+var packageTemplateFile string
+
+//go:embed style.css
+var styleFile string
+
+// types.go
 // Generate creates HTML documentation for all packages within a Go module
 func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
    if err := os.MkdirAll(outputDir, 0o755); err != nil {
@@ -123,6 +132,30 @@ func findAllPackageDirs(root string) ([]string, error) {
    }
 
    return packages, err
+}
+
+// FuncDoc holds documentation for a single function or method.
+type FuncDoc struct {
+   Name      string
+   Doc       string
+   Signature template.HTML
+}
+
+// TypeDoc holds documentation for a type definition and its methods.
+type TypeDoc struct {
+   Constants  []VarDoc // Constants grouped under this type
+   Definition template.HTML
+   Doc        string
+   Functions  []FuncDoc // Constructors/factory functions associated with this type.
+   Methods    []FuncDoc
+   Name       string
+   Variables  []VarDoc // Variables grouped under this type
+}
+
+// VarDoc holds documentation for a variable or constant declaration.
+type VarDoc struct {
+   Doc        string
+   Definition template.HTML
 }
 
 // generator.go
