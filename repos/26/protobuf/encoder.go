@@ -97,13 +97,16 @@ func DecodeTag(buffer []byte) (*Tag, int, error) {
       return nil, 0, ErrMalformedVarint
    }
 
-   fieldNum := uint32(tagValue >> 3)
-   if fieldNum == 0 {
+   // Keep tagValue as uint64 until validated so the range check is exact.
+   // Valid field numbers are 1 through 2^29-1 (536870911) per the protobuf
+   // spec; anything larger would be silently truncated by the uint32 cast.
+   fieldNum := tagValue >> 3
+   if fieldNum == 0 || fieldNum > 536_870_911 {
       return nil, 0, ErrInvalidFieldNumber
    }
 
    return &Tag{
-      Number: fieldNum,
+      Number: uint32(fieldNum),
       Type:   Type(tagValue & 0x7),
    }, bytesRead, nil
 }
