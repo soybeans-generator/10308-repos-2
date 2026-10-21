@@ -1,77 +1,28 @@
 # criterion
 
-## wise.com
-
-1. criterionchannel.com/checkout
-   - 7-day free trial
-2. monthly
-3. email
-   - mail.tm
-4. confirm email
-5. password
-6. name on card
-7. CARD NUMBER (MUST USE NEW CARD EACH TIME)
-8. expiration
-9. security code
-10. zip code
-11. automatic renewal details
-12. start subscription
-
-WORKS
-
 ## privacy.com
 
-1. criterionchannel.com/checkout
+7-DAY FREE TRIAL
+
+1. criterionchannel.com/subscribe
 2. monthly
-3. email
+3. continue
+4. email
    - mail.tm
-4. confirm email
-5. password
-6. name on card
-7. CARD NUMBER (MUST USE NEW CARD EACH TIME)
-8. expiration
-9. security code
-10. zip code
-11. automatic renewal details
-12. start subscription
-
-~~~
-Subject: criterionchannel.com
-Date: 2026-01-21 06:50
-To: support@privacy.com
-
-just got the below decline, even though the card has $1 limit - please
-fix
-
- Merchant Name
-vhx dba vimeo ott
-$0
-DECLINED
-    Authorized
-    Jan 21 2026, 6:48 AM
-~~~
-
-## bankofamerica.com
-
-1. criterionchannel.com/checkout
-2. monthly
-3. email
-4. confirm email
-5. password
-6. name on card
-7. card number
-8. expiration
-9. CVC
-10. zip
-11. automatic renewal details
-12. start subscription
-
-You've already had a free trial. By proceeding, your subscription will begin
-immediately
-
-## paypal.com
-
-no payPal option
+5. continue
+6. password
+7. continue
+8. first name
+9. last name
+10. I want to receive the latest news, offers, and more from Criterion
+   - no
+11. agree and continue
+12. CARD NUMBER (MUST USE NEW CARD EACH TIME)
+13. expiration
+14. security code
+15. name on card
+16. zip code
+17. start subscription
 
 ## android
 

@@ -7,11 +7,11 @@ var videos = []struct {
    url     string
 }{
    {
-      url: "https://criterionchannel.com/121280-ritual",
-   },
-   {
       segment: "SegmentList",
       url:     "https://criterionchannel.com/wildcat",
+   },
+   {
+      url: "https://criterionchannel.com/121280-ritual",
    },
    {
       segment: "SegmentTemplate",

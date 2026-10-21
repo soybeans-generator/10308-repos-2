@@ -116,8 +116,10 @@ func (f *File) FetchWidevine(body []byte) ([]byte, error) {
 }
 
 type Token struct {
-   AccessToken  string `json:"access_token"`
-   RefreshToken string `json:"refresh_token"`
+   AccessToken      string `json:"access_token"`
+   RefreshToken     string `json:"refresh_token"`
+   Error            string `json:"error"`
+   ErrorDescription string `json:"error_description"`
 }
 
 func FetchToken(username, password string) (*Token, error) {
@@ -146,6 +148,9 @@ func FetchToken(username, password string) (*Token, error) {
    if err != nil {
       return nil, err
    }
+   if result.Error != "" {
+      return nil, fmt.Errorf("%s: %s", result.Error, result.ErrorDescription)
+   }
    return &result, nil
 }
 
@@ -173,7 +178,11 @@ func (t *Token) Refresh() error {
       return err
    }
    defer resp.Body.Close()
-   return json.NewDecoder(resp.Body).Decode(t)
+   if err := json.NewDecoder(resp.Body).Decode(t); err != nil {
+      return err
+   }
+   if t.Error != "" {
+      return fmt.Errorf("%s: %s", t.Error, t.ErrorDescription)
+   }
+   return nil
 }
-
-// criterion.go
