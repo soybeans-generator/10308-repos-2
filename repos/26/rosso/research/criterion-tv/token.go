@@ -2,123 +2,120 @@
 package criterion
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
-	"time"
+   "context"
+   "encoding/json"
+   "errors"
+   "fmt"
+   "io"
+   "net/http"
+   "net/url"
+   "strings"
+   "time"
 )
 
-// TokenSet is the body of POST /oauth/token. On failure the OAuth error fields
-// are filled instead of the tokens.
-type TokenSet struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	IDToken      string `json:"id_token"`
-	Scope        string `json:"scope"`
-	ExpiresIn    int    `json:"expires_in"`
-	TokenType    string `json:"token_type"`
+// Sentinel errors for the OAuth error codes of the device grant. Anything else
+// comes back as a plain error, so callers can match with errors.Is.
+var (
+   ErrAuthorizationPending = errors.New("criterion: authorization pending")
+   ErrSlowDown             = errors.New("criterion: slow down")
+   ErrAccessDenied         = errors.New("criterion: authorization denied by user")
+   ErrExpiredToken         = errors.New("criterion: device code expired")
+)
 
-	Error            string `json:"error,omitempty"`
-	ErrorDescription string `json:"error_description,omitempty"`
+// oauthError maps an OAuth error code to a wrapped sentinel.
+func oauthError(t *TokenSet) error {
+   var base error
+   switch t.Error {
+   case "authorization_pending":
+      base = ErrAuthorizationPending
+   case "slow_down":
+      base = ErrSlowDown
+   case "access_denied":
+      base = ErrAccessDenied
+   case "expired_token":
+      base = ErrExpiredToken
+   default:
+      return fmt.Errorf("token: %s: %s", t.Error, t.ErrorDescription)
+   }
+   if t.ErrorDescription == "" {
+      return base
+   }
+   return fmt.Errorf("%w: %s", base, t.ErrorDescription)
 }
 
-// Expiry is when AccessToken stops being valid.
-func (t *TokenSet) Expiry() time.Time {
-	return time.Now().Add(time.Duration(t.ExpiresIn) * time.Second)
+// TokenSet is the body of POST /oauth/token. On a non-200 answer the OAuth
+// error fields are filled instead of the tokens.
+type TokenSet struct {
+   AccessToken  string `json:"access_token"`
+   RefreshToken string `json:"refresh_token"`
+   IDToken      string `json:"id_token"`
+   Scope        string `json:"scope"`
+   ExpiresIn    int    `json:"expires_in"`
+   TokenType    string `json:"token_type"`
+
+   Error            string `json:"error,omitempty"`
+   ErrorDescription string `json:"error_description,omitempty"`
 }
 
 // RequestToken performs a single POST https://login.criterion.com/oauth/token
 // with body:
 //
-//	client_id=trliIpKF50NOVoCOBBPWO0Z51xjg1VBd
-//	device_code=<device_code>
-//	grant_type=urn:ietf:params:oauth:grant-type:device_code
+//   client_id=trliIpKF50NOVoCOBBPWO0Z51xjg1VBd
+//   device_code=<device_code>
+//   grant_type=urn:ietf:params:oauth:grant-type:device_code
 //
-// While the user has not approved yet the server answers 400/403 with
-// error=authorization_pending (or slow_down); that is returned here as a
-// *TokenSet with Error set, not as a transport error.
+// Call it once, after the user has entered the code at VerificationURI and
+// approved it. There is no polling here: the client keeps replaying the `did`
+// cookie from /oauth/device/code, so `client` must be the same one (with a
+// cookie jar) that called RequestDeviceCode.
+//
+// On approval it returns the TokenSet with a nil error. Otherwise it returns a
+// nil TokenSet and an error wrapping one of the sentinels above, so a caller
+// that wants to retry can distinguish ErrAuthorizationPending from a real
+// failure without parsing strings.
 func RequestToken(ctx context.Context, client *http.Client, deviceCode string) (*TokenSet, error) {
-	form := url.Values{
-		"client_id":   {ClientID},
-		"device_code": {deviceCode},
-		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
-	}
+   form := url.Values{
+      "client_id":   {ClientID},
+      "device_code": {deviceCode},
+      "grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+   }
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		LoginBaseURL+"/oauth/token", strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", UserAgent)
+   req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+      LoginBaseURL+"/oauth/token", strings.NewReader(form.Encode()))
+   if err != nil {
+      return nil, err
+   }
+   req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+   req.Header.Set("User-Agent", UserAgent)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+   resp, err := client.Do(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+   body, err := io.ReadAll(resp.Body)
+   if err != nil {
+      return nil, err
+   }
 
-	var out TokenSet
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("token: status %d, decode: %w", resp.StatusCode, err)
-	}
-	if resp.StatusCode != http.StatusOK && out.Error == "" {
-		return nil, fmt.Errorf("token: unexpected status %d: %s", resp.StatusCode, body)
-	}
-	return &out, nil
+   var out TokenSet
+   if err := json.Unmarshal(body, &out); err != nil {
+      return nil, fmt.Errorf("token: status %d, decode: %w", resp.StatusCode, err)
+   }
+
+   if out.Error != "" {
+      return nil, oauthError(&out)
+   }
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("token: unexpected status %d: %s", resp.StatusCode, body)
+   }
+   return &out, nil
 }
 
-// PollForToken repeats RequestToken every Interval seconds until the user
-// approves the device (success), or the code expires / is denied.
-// The resulting AccessToken is sent as `Authorization: Bearer <access_token>`
-// to the mw.criterion.com API.
-func PollForToken(ctx context.Context, client *http.Client, code *DeviceCode) (*TokenSet, error) {
-	interval := time.Duration(code.Interval) * time.Second
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	deadline := code.Expiry()
-
-	for {
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("token: device code expired")
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(interval):
-		}
-
-		tok, err := RequestToken(ctx, client, code.DeviceCode)
-		if err != nil {
-			return nil, err
-		}
-
-		switch tok.Error {
-		case "":
-			return tok, nil
-		case "authorization_pending":
-			continue
-		case "slow_down":
-			interval += 5 * time.Second
-			continue
-		case "expired_token":
-			return nil, fmt.Errorf("token: device code expired")
-		case "access_denied":
-			return nil, fmt.Errorf("token: authorization denied by user")
-		default:
-			return nil, fmt.Errorf("token: %s: %s", tok.Error, tok.ErrorDescription)
-		}
-	}
+// Expiry is when AccessToken stops being valid.
+func (t *TokenSet) Expiry() time.Time {
+   return time.Now().Add(time.Duration(t.ExpiresIn) * time.Second)
 }
+
 // token.go
