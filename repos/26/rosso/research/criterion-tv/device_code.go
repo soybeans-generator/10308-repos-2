@@ -9,7 +9,6 @@ import (
    "net/http"
    "net/url"
    "strings"
-   "time"
 )
 
 // DeviceCode is the body of POST /oauth/device/code.
@@ -19,7 +18,6 @@ type DeviceCode struct {
    VerificationURI         string `json:"verification_uri"`
    VerificationURIComplete string `json:"verification_uri_complete"`
    ExpiresIn               int    `json:"expires_in"`
-   Interval                int    `json:"interval"`
 }
 
 // RequestDeviceCode performs POST https://login.criterion.com/oauth/device/code
@@ -29,8 +27,12 @@ type DeviceCode struct {
 //   scope=openid profile email offline_access
 //
 // The user must open VerificationURIComplete (or VerificationURI and type
-// UserCode) and approve the request; meanwhile poll RequestToken every
-// Interval seconds.
+// UserCode) and approve the request. Once they have, call RequestToken once
+// with DeviceCode. There is no polling: ExpiresIn is informational, so the
+// caller can show the user how long the code remains valid.
+//
+// The response sets a `did` cookie that RequestToken must send back, so use
+// the same http.Client (one with a cookie jar, see NewClient) for both calls.
 func RequestDeviceCode(ctx context.Context, client *http.Client) (*DeviceCode, error) {
    form := url.Values{
       "client_id": {ClientID},
@@ -61,11 +63,6 @@ func RequestDeviceCode(ctx context.Context, client *http.Client) (*DeviceCode, e
       return nil, fmt.Errorf("device/code: decode: %w", err)
    }
    return &out, nil
-}
-
-// Expiry is when the device code stops being usable.
-func (d *DeviceCode) Expiry() time.Time {
-   return time.Now().Add(time.Duration(d.ExpiresIn) * time.Second)
 }
 
 // devicecode.go

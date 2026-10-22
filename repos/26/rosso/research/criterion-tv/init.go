@@ -7,7 +7,6 @@ import (
    "fmt"
    "io"
    "net/http"
-   "net/http/cookiejar"
    "time"
 )
 
@@ -24,15 +23,15 @@ const (
    UserAgent = "okhttp/5.3.2"
 )
 
-// NewClient returns a client with a cookie jar. The device flow sets a `did`
-// cookie on the /oauth/device/code response and the /oauth/token poll is
-// expected to send it back, so a plain http.Client will not work.
+// NewClient returns an http.Client for the API and login hosts.
+//
+// No cookie jar: okhttp (the real client) has no cookie store, and the HAR
+// shows both /oauth/device/code and /oauth/token with an empty cookie list.
+// The device grant is keyed on device_code alone; the `did` cookie Auth0 sets
+// is a browser-session artifact (the token response issues a fresh one, which
+// confirms nothing is replayed).
 func NewClient() *http.Client {
-   jar, err := cookiejar.New(nil)
-   if err != nil {
-      panic(err)
-   }
-   return &http.Client{Jar: jar, Timeout: 30 * time.Second}
+   return &http.Client{Timeout: 30 * time.Second}
 }
 
 // InitResponse is the body of GET /api/init.
