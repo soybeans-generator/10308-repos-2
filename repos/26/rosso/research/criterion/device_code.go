@@ -31,8 +31,8 @@ type DeviceCode struct {
 // with DeviceCode. There is no polling: ExpiresIn is informational, so the
 // caller can show the user how long the code remains valid.
 //
-// The response sets a `did` cookie that RequestToken must send back, so use
-// the same http.Client (one with a cookie jar, see NewClient) for both calls.
+// Nothing is carried between this call and RequestToken except the device code
+// itself.
 func RequestDeviceCode(ctx context.Context, client *http.Client) (*DeviceCode, error) {
    form := url.Values{
       "client_id": {ClientID},

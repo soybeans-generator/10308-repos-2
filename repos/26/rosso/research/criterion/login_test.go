@@ -17,26 +17,14 @@ import (
 // exchange succeeds.
 const statePath = "testdata/login-state.json"
 
-// TestLoginBeforeCode runs up to the point where the user has to act: it
-// fetches the anonymous init token, requests a device code, and writes the
-// device code to statePath.
+// TestLoginBeforeCode requests a device code and writes it to statePath.
 func TestLoginBeforeCode(t *testing.T) {
-   ctx := context.Background()
-   client := NewClient()
-
-   init, err := Init(ctx, client)
-   if err != nil {
-      t.Fatalf("init: %v", err)
-   }
-
-   code, err := RequestDeviceCode(ctx, client)
+   code, err := RequestDeviceCode(context.Background(), NewClient())
    if err != nil {
       t.Fatalf("device code: %v", err)
    }
 
    state := loginState{
-      InitToken:               init.Token,
-      APIBaseURL:              init.BaseURL[init.Country],
       DeviceCode:              code.DeviceCode,
       UserCode:                code.UserCode,
       VerificationURI:         code.VerificationURI,
@@ -110,12 +98,9 @@ func TestLoginAfterCode(t *testing.T) {
    }
 }
 
-// loginState is the hand-off between the two tests. No cookies: the device
-// grant is keyed on DeviceCode alone (see the HAR — both POSTs carry an empty
-// cookie list).
+// loginState is the hand-off between the two tests. The device code is the
+// only thing the token request needs.
 type loginState struct {
-   InitToken               string    `json:"init_token"`
-   APIBaseURL              string    `json:"api_base_url"`
    DeviceCode              string    `json:"device_code"`
    UserCode                string    `json:"user_code"`
    VerificationURI         string    `json:"verification_uri"`

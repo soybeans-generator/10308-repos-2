@@ -65,9 +65,7 @@ type TokenSet struct {
 //   grant_type=urn:ietf:params:oauth:grant-type:device_code
 //
 // Call it once, after the user has entered the code at VerificationURI and
-// approved it. There is no polling here: the client keeps replaying the `did`
-// cookie from /oauth/device/code, so `client` must be the same one (with a
-// cookie jar) that called RequestDeviceCode.
+// approved it. There is no polling here.
 //
 // On approval it returns the TokenSet with a nil error. Otherwise it returns a
 // nil TokenSet and an error wrapping one of the sentinels above, so a caller
