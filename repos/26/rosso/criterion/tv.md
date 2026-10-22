@@ -1,6 +1,6 @@
 # tv
 
-https://apkmirror.com/apk/the-criterion-collection/the-criterion-channel
+https://apkmirror.com/apk/the-criterion-collection/the-criterion-channel-android-tv
 
 pixel 5, Android 11
 
