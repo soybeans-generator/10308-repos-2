@@ -2,23 +2,27 @@
 
 I am looking for bicycle please give me one option 
 
-- greater than 3 speed
-- no disc brakes 
-- no drop bars 
-- no Folding 
-- no front Derailleur
-- no Grip shifter
-- no internal hub
-- no Step-Through 
-- north america seller
-- tire less than 2"
+1. greater than 3 speed
+2. no disc brakes 
+3. no drop bars
+4. no folding
+5. no front Derailleur
+6. no Grip shifter
+7. no internal hub
+8. north America seller
+9. tire less than 2"
 
-## public-v9
+## DUTCH EXPRESS 
 
-25 lbs
+dutch express saffire blue
 
-- https://mikesbikes.com/products/public-v9-al
-- https://publicbikes.com/products/public-v9
+<https://bikeshopwarehouse.com/cgi-bin/BSW_STOR20.cgi?Action=Details&ProdID=4161S>
+
+## altore-7
+
+28 lbs
+
+https://linusbike.com/products/altore-7
 
 ## roebling
 
@@ -31,27 +35,3 @@ https://brooklynbicycleco.com/products/roebling
 28.43 lbs
 
 https://shop.fairdalebikes.com/collections/fairdale-lookfar
-
-## urban-high
-
-11.5 kg (25.35 lbs)
-
-https://siech-cycles.com/en/products/urban-high
-
-## ltrain
-
-V Brake: 27 lbs
-
-https://prioritybicycles.com/products/ltrain
-
-## eight
-
-27 lbs
-
-https://prioritybicycles.com/products/eight
-
-## varsity-oxford
-
-12.3 kg (27.12 lbs)
-
-https://quellabicycle.com/products/varsity-oxford-classic-geared-bicycle
