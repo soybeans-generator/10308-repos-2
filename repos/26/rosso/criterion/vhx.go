@@ -1,3 +1,4 @@
+// vhx.go
 package criterion
 
 import (
@@ -6,14 +7,11 @@ import (
    "errors"
    "fmt"
    "io"
-   "log"
    "net/http"
    "net/url"
-   "strings"
 )
 
-const client_id = "9a87f110f79cd25250f6c7f3a6ec8b9851063ca156dae493bf362a7faf146c78"
-
+// FetchFilesHref returns the "files" link of the first item in a collection.
 func FetchFilesHref(accessToken, slug string) (string, error) {
    req, err := http.NewRequest(
       "GET",
@@ -47,11 +45,7 @@ func FetchFilesHref(accessToken, slug string) (string, error) {
    return result.Embedded.Items[0].Links.Files.Href, nil
 }
 
-func do(req *http.Request) (*http.Response, error) {
-   log.Println(req.Method, req.URL)
-   return http.DefaultClient.Do(req)
-}
-
+// File is one playback variant of a video. Source.Href is the MPD.
 type File struct {
    DrmAuthorizationToken string `json:"drm_authorization_token"`
    Links                 struct {
@@ -62,6 +56,7 @@ type File struct {
    Method string
 }
 
+// FetchFiles lists the playback variants behind a files href.
 func FetchFiles(accessToken string, files string) ([]File, error) {
    req, err := http.NewRequest("GET", files, nil)
    if err != nil {
@@ -84,19 +79,23 @@ func FetchFiles(accessToken string, files string) ([]File, error) {
    return result, nil
 }
 
+// GetDash picks the DASH variant, which carries the Widevine token.
 func GetDash(files []File) (*File, error) {
-   for _, file_data := range files {
-      if file_data.Method == "dash" {
-         return &file_data, nil
+   for _, fileData := range files {
+      if fileData.Method == "dash" {
+         return &fileData, nil
       }
    }
    return nil, errors.New("DASH media file not found")
 }
 
+// CachePath reports where the file list is cached.
 func (*File) CachePath() string {
    return "rosso/criterion/File"
 }
 
+// FetchWidevine posts a Widevine challenge to the licence server and returns
+// the raw licence response.
 func (f *File) FetchWidevine(body []byte) ([]byte, error) {
    req, err := http.NewRequest(
       "POST",
@@ -115,74 +114,4 @@ func (f *File) FetchWidevine(body []byte) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-type Token struct {
-   AccessToken      string `json:"access_token"`
-   RefreshToken     string `json:"refresh_token"`
-   Error            string `json:"error"`
-   ErrorDescription string `json:"error_description"`
-}
-
-func FetchToken(username, password string) (*Token, error) {
-   body := url.Values{
-      "client_id":  {client_id},
-      "grant_type": {"password"},
-      "password":   {password},
-      "username":   {username},
-   }.Encode()
-   req, err := http.NewRequest(
-      "POST",
-      "https://auth.vhx.com/v1/oauth/token",
-      strings.NewReader(body),
-   )
-   if err != nil {
-      return nil, err
-   }
-   req.Header.Set("content-type", "application/x-www-form-urlencoded")
-   resp, err := do(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-   var result Token
-   err = json.NewDecoder(resp.Body).Decode(&result)
-   if err != nil {
-      return nil, err
-   }
-   if result.Error != "" {
-      return nil, fmt.Errorf("%s: %s", result.Error, result.ErrorDescription)
-   }
-   return &result, nil
-}
-
-func (*Token) CachePath() string {
-   return "rosso/criterion/Token"
-}
-
-func (t *Token) Refresh() error {
-   body := url.Values{
-      "client_id":     {client_id},
-      "grant_type":    {"refresh_token"},
-      "refresh_token": {t.RefreshToken},
-   }.Encode()
-   req, err := http.NewRequest(
-      "POST",
-      "https://auth.vhx.com/v1/oauth/token",
-      strings.NewReader(body),
-   )
-   if err != nil {
-      return err
-   }
-   req.Header.Set("content-type", "application/x-www-form-urlencoded")
-   resp, err := do(req)
-   if err != nil {
-      return err
-   }
-   defer resp.Body.Close()
-   if err := json.NewDecoder(resp.Body).Decode(t); err != nil {
-      return err
-   }
-   if t.Error != "" {
-      return fmt.Errorf("%s: %s", t.Error, t.ErrorDescription)
-   }
-   return nil
-}
+// vhx.go
