@@ -17,20 +17,10 @@ import (
 // exchange succeeds.
 const statePath = "testdata/login-state.json"
 
-// live skips the test unless it was explicitly asked for, so a plain
-// `go test ./...` never hits the network or blocks on a human.
-func live(t *testing.T) {
-   t.Helper()
-   if os.Getenv("CRITERION_LOGIN_TEST") == "" {
-      t.Skip("live login: set CRITERION_LOGIN_TEST=1 to run")
-   }
-}
-
 // TestLoginBeforeCode runs up to the point where the user has to act: it
 // fetches the anonymous init token, requests a device code, and writes the
 // device code to statePath.
 func TestLoginBeforeCode(t *testing.T) {
-   live(t)
    ctx := context.Background()
    client := NewClient()
 
@@ -70,14 +60,12 @@ func TestLoginBeforeCode(t *testing.T) {
    t.Logf("open %s", state.VerificationURIComplete)
    t.Logf("or go to %s and enter %s", state.VerificationURI, state.UserCode)
    t.Logf("code valid until %s", state.expiresAt().Format(time.RFC3339))
-   t.Log("then run: CRITERION_LOGIN_TEST=1 go test -run TestLoginAfterCode -v")
+   t.Log("then run: go test -run TestLoginAfterCode -v")
 }
 
 // TestLoginAfterCode makes the single token request, assuming the user has
 // meanwhile entered the code from TestLoginBeforeCode.
 func TestLoginAfterCode(t *testing.T) {
-   live(t)
-
    blob, err := os.ReadFile(statePath)
    if err != nil {
       t.Fatalf("read %s: %v (run TestLoginBeforeCode first)", statePath, err)
