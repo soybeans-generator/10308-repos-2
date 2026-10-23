@@ -37,9 +37,6 @@ var (
 // do sends req on http.DefaultClient, logging method and URL. Every call in the
 // package goes through here: the catalogue (VHX) calls and the login calls
 // alike.
-//
-// DefaultClient has no cookie jar, which matches okhttp (the real client): the
-// HAR shows both /oauth/device/code and /oauth/token with an empty cookie list.
 func do(req *http.Request) (*http.Response, error) {
    log.Println(req.Method, req.URL)
    return http.DefaultClient.Do(req)
@@ -131,8 +128,7 @@ func (*DeviceCode) CachePath() string {
 type TokenSet struct {
    AccessToken string `json:"access_token"`
    // RefreshToken is returned because Scope asks for offline_access. Feed it to
-   // RequestRefresh, or call t.Refresh, to get a new AccessToken without
-   // another device flow.
+   // RequestRefresh to get a new AccessToken without another device flow.
    RefreshToken string `json:"refresh_token"`
    IDToken      string `json:"id_token"`
    Scope        string `json:"scope"`
@@ -154,8 +150,8 @@ type TokenSet struct {
 // interaction, just a fresh AccessToken (and normally a fresh IDToken).
 //
 // Auth0 may rotate the refresh token. When the answer carries no refresh_token
-// the old one remains valid, so callers that only keep the returned TokenSet
-// should use (*TokenSet).Refresh, which carries it over. If the token has
+// the old one remains valid, so a caller that keeps only the returned TokenSet
+// should copy the previous RefreshToken onto it before caching. If the token has
 // expired, been revoked, or was already used, Auth0 answers invalid_grant and
 // this returns a plain error (no sentinel): the user has to run the device flow
 // again.
@@ -239,21 +235,6 @@ func (*TokenSet) CachePath() string {
 // is called.
 func (t *TokenSet) Expiry() time.Time {
    return time.Now().Add(time.Duration(t.ExpiresIn) * time.Second)
-}
-
-// Refresh exchanges t's refresh token for a new TokenSet. t is not modified: the
-// caller decides what to cache. When Auth0 rotates the refresh token but leaves
-// it out of the answer, t's token is copied onto the result so the chain does not
-// break.
-func (t *TokenSet) Refresh() (*TokenSet, error) {
-   next, err := RequestRefresh(t.RefreshToken)
-   if err != nil {
-      return nil, err
-   }
-   if next.RefreshToken == "" {
-      next.RefreshToken = t.RefreshToken
-   }
-   return next, nil
 }
 
 // login.go marker preserve

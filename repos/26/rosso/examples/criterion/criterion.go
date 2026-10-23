@@ -96,8 +96,7 @@ func (c *client) do_device_code() error {
 }
 
 // do_media_id goes from a media id to a parsed manifest: refresh for a live
-// access token, media for the record, playback for the signed MPD, then maya
-// reads the manifest.
+// access token, playback for the signed MPD, then maya reads the manifest.
 //
 // The refresh is unconditional because the access token only lasts about an
 // hour and TokenSet.Expiry is measured from the moment it is called, so a cached
@@ -107,24 +106,22 @@ func (c *client) do_media_id() error {
    if err := c.cache.Decode(&token); err != nil {
       return err
    }
-   tokenPtr, err := token.Refresh()
+   next, err := criterion.RequestRefresh(token.RefreshToken)
    if err != nil {
       return fmt.Errorf("%w (run -device-code then -token)", err)
    }
-   // Persist before the network calls: if the fetch below fails the fresh token
-   // is still the one in the cache.
-   if err := c.cache.Encode(tokenPtr); err != nil {
+   // Persist before the network calls: the refresh token rotates on every
+   // exchange, so the old one is already spent by the time this returns.
+   if err := c.cache.Encode(next); err != nil {
       return err
    }
-   session := criterion.Session{Token: tokenPtr.AccessToken}
-   media, err := session.FetchMedia(string(c.media_id))
-   if err != nil {
-      return err
-   }
-   log.Println(media.Title)
+   session := criterion.Session{Token: next.AccessToken}
    playback, err := session.FetchPlayback(string(c.media_id))
    if err != nil {
       return err
+   }
+   for _, item := range playback.Playlist {
+      log.Println(item.Title)
    }
    source, err := playback.GetDash()
    if err != nil {

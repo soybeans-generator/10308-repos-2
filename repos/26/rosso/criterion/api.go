@@ -13,19 +13,6 @@ import (
 // APIBase is the Next.js app that serves the catalogue and playback endpoints.
 const APIBase = "https://www.criterionchannel.com"
 
-// Media is GET /api/media/{media_id}. Its Sources are unsigned and not
-// playable; FetchPlayback returns the signed ones.
-type Media struct {
-   MediaID     string `json:"mediaid"`
-   CriterionID string `json:"criterion_id"`
-   Title       string `json:"title"`
-   Duration    int    `json:"duration"`
-   Paywall     string `json:"paywall"`
-   DRM         bool   `json:"drm"`
-   ContentType string `json:"contentType"`
-   Deeplink    string `json:"deeplink"`
-}
-
 // Playback is GET /api/playback/{media_id}. The signed tokens in it are what
 // make manifest.mpd playable, so this is the request that must follow Media.
 type Playback struct {
@@ -51,27 +38,14 @@ func (p *Playback) GetDash() (*Source, error) {
 }
 
 // Session authenticates the criterionchannel.com API. Token is the Auth0 access
-// token from the device grant, sent as a bearer. Cookie is the web fallback:
-// __session plus criterion_dz_logged_in=1. Whichever is set gets sent; Token
-// wins when both are.
+// token from the device grant, sent as a bearer.
 type Session struct {
-   Token    string `json:"access_token"`
-   LoggedIn string `json:"criterion_dz_logged_in"`
-   Cookie   string `json:"__session"`
+   Token string `json:"access_token"`
 }
 
 // CachePath reports where the session is cached.
 func (*Session) CachePath() string {
    return "rosso/criterion/Session"
-}
-
-// FetchMedia returns the catalogue record for one media id.
-func (s *Session) FetchMedia(mediaID string) (*Media, error) {
-   var media Media
-   if err := s.get("/api/media/"+mediaID, &media); err != nil {
-      return nil, err
-   }
-   return &media, nil
 }
 
 // FetchPlayback returns the signed playback entries for one media id.
@@ -83,19 +57,10 @@ func (s *Session) FetchPlayback(mediaID string) (*Playback, error) {
    return &playback, nil
 }
 
-// authorize attaches whichever credential Session carries.
+// authorize attaches the bearer token.
 func (s *Session) authorize(req *http.Request) {
    if s.Token != "" {
       req.Header.Set("authorization", "Bearer "+s.Token)
-      return
-   }
-   if s.Cookie != "" {
-      loggedIn := s.LoggedIn
-      if loggedIn == "" {
-         loggedIn = "1"
-      }
-      req.AddCookie(&http.Cookie{Name: "criterion_dz_logged_in", Value: loggedIn})
-      req.AddCookie(&http.Cookie{Name: "__session", Value: s.Cookie})
    }
 }
 
