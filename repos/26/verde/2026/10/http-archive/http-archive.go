@@ -44,6 +44,9 @@ var defaultExcludeTypes = []string{
    "text/xml",
    "video/iso.segment",
    "video/mp4",
+  "image/vnd.microsoft.icon",
+  "text/vtt",
+  "text/x-component",
 }
 
 func main() {
