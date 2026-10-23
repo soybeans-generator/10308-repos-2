@@ -1,4 +1,4 @@
-// api.go
+// api.go marker preserve
 package criterion
 
 import (
@@ -7,7 +7,6 @@ import (
    "fmt"
    "io"
    "net/http"
-   "net/url"
    "strings"
 )
 
@@ -69,7 +68,7 @@ func (*Session) CachePath() string {
 // FetchMedia returns the catalogue record for one media id.
 func (s *Session) FetchMedia(mediaID string) (*Media, error) {
    var media Media
-   if err := s.get("/api/media/"+url.PathEscape(mediaID), &media); err != nil {
+   if err := s.get("/api/media/"+mediaID, &media); err != nil {
       return nil, err
    }
    return &media, nil
@@ -78,7 +77,7 @@ func (s *Session) FetchMedia(mediaID string) (*Media, error) {
 // FetchPlayback returns the signed playback entries for one media id.
 func (s *Session) FetchPlayback(mediaID string) (*Playback, error) {
    var playback Playback
-   if err := s.get("/api/playback/"+url.PathEscape(mediaID), &playback); err != nil {
+   if err := s.get("/api/playback/"+mediaID, &playback); err != nil {
       return nil, err
    }
    return &playback, nil
@@ -160,4 +159,4 @@ func (s *Source) FetchWidevine(body []byte) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-// api.go
+// api.go marker preserve

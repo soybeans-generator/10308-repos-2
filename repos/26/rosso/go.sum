@@ -2,10 +2,10 @@
 41.neocities.org/diana v1.10.7/go.mod h1:ybX7/413jIX7Kk7Cu4dgC96TDfczStDYI0m3YNbV2PM=
 41.neocities.org/luna v1.35.5 h1:Eb4tiZM3yykbA+lmyuAxgcMy1pLSNUKA9zShLvunAPU=
 41.neocities.org/luna v1.35.5/go.mod h1:TxOA4MpWQndPX/bneQGPMFGPUl6EpwZ3WJIk0NYtzwk=
-41.neocities.org/maya v1.45.8 h1:1L+ehBUgNfNgkYPG+z4XtUXDpBoz8onubSqZaAmv1hs=
-41.neocities.org/maya v1.45.8/go.mod h1:oOnAsy7kv7DikkO+acQJYBxGFFwnigRE1M0V/bLd4co=
-41.neocities.org/protobuf v1.7.8 h1:eC2hKQ6OhRfOHspcbPPTuN0kBXSMdqfOblw/7312Qgg=
-41.neocities.org/protobuf v1.7.8/go.mod h1:oxOLuB0urSf6Tt1GaEXVMJBS1SIvyY23ax4It1o3iNQ=
+41.neocities.org/maya v1.45.9 h1:AQ2vS5GtDlkwDyboFD7qKz3jXWkArKdAqFQ+JgYko2k=
+41.neocities.org/maya v1.45.9/go.mod h1:ElikliuSZRLDeF8d+DdVBhYqV3nRKNZzAEGTO89piBw=
+41.neocities.org/protobuf v1.7.9 h1:xhBaqywFQlKGd1Qm1mccEL1oUUqCIdeIRL18X9JhAS8=
+41.neocities.org/protobuf v1.7.9/go.mod h1:oxOLuB0urSf6Tt1GaEXVMJBS1SIvyY23ax4It1o3iNQ=
 41.neocities.org/sofia v1.16.0 h1:YyevwyqrcKoKJp97WVt4jOHQTEEt2OrD7cDYKpdX1XQ=
 41.neocities.org/sofia v1.16.0/go.mod h1:TeER5CfANCKu7eieo/3kXY4UYc0biOge/i8OXrDY9Qg=
 filippo.io/nistec v0.0.4 h1:F14ZHT5htWlMnQVPndX9ro9arf56cBhQxq4LnDI491s=

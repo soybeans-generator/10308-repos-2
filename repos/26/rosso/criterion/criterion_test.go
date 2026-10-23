@@ -8,14 +8,14 @@ var videos = []struct {
 }{
    {
       segment: "SegmentList",
-      url:     "https://criterionchannel.com/wildcat",
+      url:     "https://criterionchannel.com/films/cnStYoEF/wildcat",
    },
    {
       segment: "SegmentTemplate",
-      url:     "https://criterionchannel.com/my-dinner-with-andre",
+      url:     "https://criterionchannel.com/films/0mKhMtOJ/my-dinner-with-andre",
    },
    {
-      url: "https://criterionchannel.com/121280-ritual",
+      url: "https://criterionchannel.com/films/INRFb1nI/121280-ritual",
    },
 }
 

@@ -1,6 +1,6 @@
-# criterion
+# android
 
-## android
+## phone
 
 https://apkmirror.com/apk/the-criterion-collection/the-criterion-channel
 
@@ -78,4 +78,26 @@ resources\res\values\strings.xml
 
 <string name="tvOauthClientId">349c8358994e8aa948a72593e2c9707b6b717969b98e98d8548f370096338933</string>
 <string name="tvOauthClientSecret">8bHCsyIErImeOChN75a0+U0HBg01xQSIdfeqVrTfXKn5UQdF+vZ+M4K03/It/avCEfGjoH5DELaId1/1Zp1tAPEZ1Zf4RmynueOiBc42cPY=</string>
+~~~
+
+## tv
+
+https://apkmirror.com/apk/the-criterion-collection/the-criterion-channel-android-tv
+
+pixel 5, Android 11
+
+~~~
+adb install-multiple (Get-ChildItem *.apk)
+~~~
+
+then:
+
+~~~
+emulator -avd Pixel_5 -no-snapshot-load -http-proxy http://127.0.0.1:8080
+~~~
+
+install system certificate
+
+~~~
+adb shell input text HELLO
 ~~~

@@ -8,7 +8,6 @@ import (
    "log"
    "net/url"
    "os"
-   "strings"
 )
 
 func main() {
@@ -19,30 +18,12 @@ func main() {
    }
 }
 
-// mediaID pulls the id out of a deeplink such as
-// https://www.criterionchannel.com/films/rst2RGdS/les-3-boutons, or accepts a
-// bare id.
-func mediaID(address string) (string, error) {
-   parsed, err := url.Parse(address)
-   if err != nil {
-      return "", err
-   }
-   parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-   if len(parts) == 1 && parts[0] != "" {
-      return parts[0], nil
-   }
-   if len(parts) < 2 {
-      return "", fmt.Errorf("%q has no media id", address)
-   }
-   return parts[1], nil
-}
-
 type client struct {
    Widevine    maya.FlagString
-   address     maya.FlagString
    cache       maya.Cache
    dash_id     maya.FlagString
    device_code maya.FlagBool
+   media_id    maya.FlagString
    token       maya.FlagBool
 }
 
@@ -61,7 +42,7 @@ func (c *client) do() error {
       {Name: "widevine-folder", Value: &c.Widevine},
       {Name: "device-code", Value: &c.device_code},
       {Name: "token", Value: &c.token},
-      {Name: "address", Value: &c.address},
+      {Name: "media-id", Value: &c.media_id},
       {Name: "dash-id", Value: &c.dash_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {
@@ -76,49 +57,13 @@ func (c *client) do() error {
    if c.token {
       return c.do_token()
    }
-   if c.address != "" {
-      return c.do_address()
+   if c.media_id != "" {
+      return c.do_media_id()
    }
    if c.dash_id != "" {
       return c.do_dash_id()
    }
    return flags.Usage(os.Stderr, "criterion")
-}
-
-// do_address goes from a deeplink to a parsed manifest: media for the record,
-// playback for the signed MPD, then maya reads the manifest.
-func (c *client) do_address() error {
-   media_id, err := mediaID(string(c.address))
-   if err != nil {
-      return err
-   }
-   var token criterion.TokenSet
-   if err := c.cache.Decode(&token); err != nil {
-      return err
-   }
-   session := criterion.Session{Token: token.AccessToken}
-   media, err := session.FetchMedia(media_id)
-   if err != nil {
-      return err
-   }
-   log.Println(media.Title)
-   playback, err := session.FetchPlayback(media_id)
-   if err != nil {
-      return err
-   }
-   source, err := playback.GetDash()
-   if err != nil {
-      return err
-   }
-   address, err := url.Parse(source.File)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
-   if err != nil {
-      return err
-   }
-   return c.cache.Encode(source, manifest)
 }
 
 func (c *client) do_dash_id() error {
@@ -148,6 +93,52 @@ func (c *client) do_device_code() error {
    fmt.Fprintf(os.Stderr, "or open %v and enter %v\n", code.VerificationURI, code.UserCode)
    fmt.Fprintf(os.Stderr, "then run -token, code expires in %v seconds\n", code.ExpiresIn)
    return c.cache.Encode(code)
+}
+
+// do_media_id goes from a media id to a parsed manifest: refresh for a live
+// access token, media for the record, playback for the signed MPD, then maya
+// reads the manifest.
+//
+// The refresh is unconditional because the access token only lasts about an
+// hour and TokenSet.Expiry is measured from the moment it is called, so a cached
+// set cannot report whether it has already gone stale.
+func (c *client) do_media_id() error {
+   var token criterion.TokenSet
+   if err := c.cache.Decode(&token); err != nil {
+      return err
+   }
+   tokenPtr, err := token.Refresh()
+   if err != nil {
+      return fmt.Errorf("%w (run -device-code then -token)", err)
+   }
+   // Persist before the network calls: if the fetch below fails the fresh token
+   // is still the one in the cache.
+   if err := c.cache.Encode(tokenPtr); err != nil {
+      return err
+   }
+   session := criterion.Session{Token: tokenPtr.AccessToken}
+   media, err := session.FetchMedia(string(c.media_id))
+   if err != nil {
+      return err
+   }
+   log.Println(media.Title)
+   playback, err := session.FetchPlayback(string(c.media_id))
+   if err != nil {
+      return err
+   }
+   source, err := playback.GetDash()
+   if err != nil {
+      return err
+   }
+   address, err := url.Parse(source.File)
+   if err != nil {
+      return err
+   }
+   manifest, err := maya.DashList(address)
+   if err != nil {
+      return err
+   }
+   return c.cache.Encode(source, manifest)
 }
 
 // do_token is step two: one POST with the cached device code, once the request
