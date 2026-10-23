@@ -11,11 +11,11 @@ var videos = []struct {
       url:     "https://criterionchannel.com/wildcat",
    },
    {
-      url: "https://criterionchannel.com/121280-ritual",
-   },
-   {
       segment: "SegmentTemplate",
       url:     "https://criterionchannel.com/my-dinner-with-andre",
+   },
+   {
+      url: "https://criterionchannel.com/121280-ritual",
    },
 }
 

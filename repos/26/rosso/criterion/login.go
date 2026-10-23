@@ -141,4 +141,10 @@ func RequestDeviceCode() (*DeviceCode, error) {
    return &out, nil
 }
 
+// CachePath reports where the pending device code is cached between the two
+// login steps. Same idea as Token and File: one fixed path, no per-value keying.
+func (*DeviceCode) CachePath() string {
+   return "rosso/criterion/DeviceCode"
+}
+
 // login.go

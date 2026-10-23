@@ -1,12 +1,14 @@
+// criterion.go
 package main
 
 import (
    "41.neocities.org/maya"
    "41.neocities.org/rosso/criterion"
+   "fmt"
    "log"
    "net/url"
    "os"
-   "path"
+   "strings"
 )
 
 func main() {
@@ -17,13 +19,31 @@ func main() {
    }
 }
 
+// mediaID pulls the id out of a deeplink such as
+// https://www.criterionchannel.com/films/rst2RGdS/les-3-boutons, or accepts a
+// bare id.
+func mediaID(address string) (string, error) {
+   parsed, err := url.Parse(address)
+   if err != nil {
+      return "", err
+   }
+   parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+   if len(parts) == 1 && parts[0] != "" {
+      return parts[0], nil
+   }
+   if len(parts) < 2 {
+      return "", fmt.Errorf("%q has no media id", address)
+   }
+   return parts[1], nil
+}
+
 type client struct {
-   Widevine maya.FlagString
-   address  maya.FlagString
-   cache    maya.Cache
-   dash_id  maya.FlagString
-   email    maya.FlagString
-   password maya.FlagString
+   Widevine    maya.FlagString
+   address     maya.FlagString
+   cache       maya.Cache
+   dash_id     maya.FlagString
+   device_code maya.FlagBool
+   token       maya.FlagBool
 }
 
 func (*client) CachePath() string {
@@ -39,8 +59,8 @@ func (c *client) do() error {
    }
    flags := maya.FlagSet{
       {Name: "widevine-folder", Value: &c.Widevine},
-      {Name: "email", Value: &c.email, Needs: []string{"password"}},
-      {Name: "password", Value: &c.password, Needs: []string{"email"}},
+      {Name: "device-code", Value: &c.device_code},
+      {Name: "token", Value: &c.token},
       {Name: "address", Value: &c.address},
       {Name: "dash-id", Value: &c.dash_id},
    }
@@ -50,10 +70,11 @@ func (c *client) do() error {
    if flags.IsSet(&c.Widevine) {
       return c.cache.Encode(c)
    }
-   if c.email != "" {
-      if c.password != "" {
-         return c.do_email_password()
-      }
+   if c.device_code {
+      return c.do_device_code()
+   }
+   if c.token {
+      return c.do_token()
    }
    if c.address != "" {
       return c.do_address()
@@ -64,31 +85,32 @@ func (c *client) do() error {
    return flags.Usage(os.Stderr, "criterion")
 }
 
+// do_address goes from a deeplink to a parsed manifest: media for the record,
+// playback for the signed MPD, then maya reads the manifest.
 func (c *client) do_address() error {
-   var token criterion.Token
-   err := c.cache.Decode(&token)
+   media_id, err := mediaID(string(c.address))
    if err != nil {
       return err
    }
-   err = token.Refresh()
+   var token criterion.TokenSet
+   if err := c.cache.Decode(&token); err != nil {
+      return err
+   }
+   session := criterion.Session{Token: token.AccessToken}
+   media, err := session.FetchMedia(media_id)
    if err != nil {
       return err
    }
-   files_href, err := criterion.FetchFilesHref(
-      token.AccessToken, path.Base(string(c.address)),
-   )
+   log.Println(media.Title)
+   playback, err := session.FetchPlayback(media_id)
    if err != nil {
       return err
    }
-   files, err := criterion.FetchFiles(token.AccessToken, files_href)
+   source, err := playback.GetDash()
    if err != nil {
       return err
    }
-   file, err := criterion.GetDash(files)
-   if err != nil {
-      return err
-   }
-   address, err := url.Parse(file.Links.Source.Href)
+   address, err := url.Parse(source.File)
    if err != nil {
       return err
    }
@@ -96,29 +118,50 @@ func (c *client) do_address() error {
    if err != nil {
       return err
    }
-   return c.cache.Encode(file, manifest, &token)
+   return c.cache.Encode(source, manifest)
 }
 
 func (c *client) do_dash_id() error {
    var (
-      file     criterion.File
+      source   criterion.Source
       manifest maya.Manifest
    )
-   err := c.cache.Decode(&file, &manifest)
+   err := c.cache.Decode(&source, &manifest)
    if err != nil {
       return err
    }
    return maya.DashDownload(string(c.dash_id), &manifest, &maya.Options{
       Device:  string(c.Widevine),
       Drm:     maya.DrmWidevine,
-      License: file.FetchWidevine,
+      License: source.FetchWidevine,
    })
 }
 
-func (c *client) do_email_password() error {
-   token, err := criterion.FetchToken(string(c.email), string(c.password))
+// do_device_code is step one of the login: it asks login.criterion.com for a
+// code pair, shows it, and caches the DeviceCode so do_token can pick it up.
+func (c *client) do_device_code() error {
+   code, err := criterion.RequestDeviceCode()
+   if err != nil {
+      return err
+   }
+   fmt.Fprintf(os.Stderr, "open %v\n", code.VerificationURIComplete)
+   fmt.Fprintf(os.Stderr, "or open %v and enter %v\n", code.VerificationURI, code.UserCode)
+   fmt.Fprintf(os.Stderr, "then run -token, code expires in %v seconds\n", code.ExpiresIn)
+   return c.cache.Encode(code)
+}
+
+// do_token is step two: one POST with the cached device code, once the request
+// has been approved.
+func (c *client) do_token() error {
+   var code criterion.DeviceCode
+   if err := c.cache.Decode(&code); err != nil {
+      return err
+   }
+   token, err := criterion.RequestToken(code.DeviceCode)
    if err != nil {
       return err
    }
    return c.cache.Encode(token)
 }
+
+// criterion.go
