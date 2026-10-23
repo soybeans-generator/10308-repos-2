@@ -134,7 +134,20 @@ func fetchContentLength(targetUrl *url.URL) (int64, error) {
    return resp.ContentLength, nil
 }
 
-func fetchData(targetUrl *url.URL, headers map[string]string, logReq bool) ([]byte, error) {
+// fetchData performs a GET and returns the body together with the URL that
+// actually served it. Callers that resolve relative URLs found in the body
+// MUST use the returned URL, not targetUrl.
+//
+// DO NOT drop the second return value, and do not "simplify" this to return
+// targetUrl. http.Client.Do follows redirects and replaces resp.Request on
+// every hop, so resp.Request.URL is the final URL — not the one passed in. A
+// manifest served from a redirected URL resolves its relative BaseURLs and
+// segment URLs against the FINAL URL; using the requested URL instead points
+// every media request at the wrong host or path, and caching Manifest.Url
+// with the requested URL spreads that corruption to later runs. This was lost
+// once already — that is why the warning lives here, not only in a commit
+// message.
+func fetchData(targetUrl *url.URL, headers map[string]string, logReq bool) ([]byte, *url.URL, error) {
    reqHeader := make(http.Header)
    for k, v := range headers {
       reqHeader.Set(k, v)
@@ -151,14 +164,28 @@ func fetchData(targetUrl *url.URL, headers map[string]string, logReq bool) ([]by
    }
    resp, err := http.DefaultClient.Do(req)
    if err != nil {
-      return nil, err
+      return nil, nil, err
    }
    defer resp.Body.Close()
 
    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-      return nil, errors.New(resp.Status)
+      return nil, nil, errors.New(resp.Status)
    }
-   return io.ReadAll(resp.Body)
+   body, err := io.ReadAll(resp.Body)
+   if err != nil {
+      return nil, nil, err
+   }
+
+   // resp.Request is set by Client.Do, but a nil check costs nothing and
+   // keeps this from panicking if that ever stops holding.
+   effectiveUrl := targetUrl
+   if resp.Request != nil && resp.Request.URL != nil {
+      effectiveUrl = resp.Request.URL
+   }
+   if logReq && effectiveUrl.String() != targetUrl.String() {
+      log.Println("redirected to:", effectiveUrl)
+   }
+   return body, effectiveUrl, nil
 }
 
 type DrmSystem int
@@ -175,12 +202,15 @@ type Manifest struct {
 }
 
 func DashList(baseUrl *url.URL) (*Manifest, error) {
-   body, err := fetchData(baseUrl, nil, true)
+   body, effectiveUrl, err := fetchData(baseUrl, nil, true)
    if err != nil {
       return nil, err
    }
 
-   mpd, err := dash.Parse(body, baseUrl)
+   // Parse against the URL that served the manifest, not the one asked for:
+   // after a redirect the MPD's relative BaseURLs resolve against the final
+   // URL. See fetchData.
+   mpd, err := dash.Parse(body, effectiveUrl)
    if err != nil {
       return nil, err
    }
@@ -189,11 +219,14 @@ func DashList(baseUrl *url.URL) (*Manifest, error) {
       return nil, err
    }
 
-   return &Manifest{Url: baseUrl, Body: body}, nil
+   // Store the effective URL too: this Manifest is cached to disk and
+   // re-feeds DashDownload, which re-parses Body with Manifest.Url. A cached
+   // pre-redirect URL would break resolution on every later run.
+   return &Manifest{Url: effectiveUrl, Body: body}, nil
 }
 
 func HlsList(baseUrl *url.URL) (*Manifest, error) {
-   body, err := fetchData(baseUrl, nil, true)
+   body, _, err := fetchData(baseUrl, nil, true)
    if err != nil {
       return nil, err
    }

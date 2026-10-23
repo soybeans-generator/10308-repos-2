@@ -40,7 +40,10 @@ func executeSegments(requests []segment, remux *sofia.Remuxer, dst io.Writer, st
          default:
          }
       }
-      data, err := fetchData(req.url, req.headers, false)
+      // The effective URL is discarded: media segments are fetched by
+      // their already-resolved absolute URL, so a redirect on one of them
+      // changes nothing about the remaining requests.
+      data, _, err := fetchData(req.url, req.headers, false)
       if err != nil {
          return i, err
       }

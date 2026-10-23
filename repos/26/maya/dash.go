@@ -72,7 +72,8 @@ func getDashInitSegment(rep *dash.Representation, info *typeInfo) ([]byte, error
       if err != nil {
          return nil, err
       }
-      return fetchData(baseUrl, map[string]string{"Range": "bytes=" + rep.SegmentBase.Initialization.Range}, true)
+      data, _, err := fetchData(baseUrl, map[string]string{"Range": "bytes=" + rep.SegmentBase.Initialization.Range}, true)
+      return data, err
    }
    // Case 2: Initialization defined in SegmentTemplate
    if template := rep.GetSegmentTemplate(); template != nil && template.Initialization != "" {
@@ -80,7 +81,8 @@ func getDashInitSegment(rep *dash.Representation, info *typeInfo) ([]byte, error
       if err != nil {
          return nil, fmt.Errorf("failed to resolve DASH SegmentTemplate initialization URL: %w", err)
       }
-      return fetchData(initUrl, nil, true)
+      data, _, err := fetchData(initUrl, nil, true)
+      return data, err
    }
    // Case 3: Initialization defined in SegmentList
    if sl := rep.SegmentList; sl != nil && sl.Initialization != nil {
@@ -94,7 +96,8 @@ func getDashInitSegment(rep *dash.Representation, info *typeInfo) ([]byte, error
          headers = map[string]string{"Range": "bytes=" + sl.Initialization.Range}
       }
 
-      return fetchData(initUrl, headers, true)
+      data, _, err := fetchData(initUrl, headers, true)
+      return data, err
    }
    return nil, nil
 }

@@ -9,7 +9,7 @@ require (
 )
 
 require (
-	41.neocities.org/protobuf v1.7.8 // indirect
+	41.neocities.org/protobuf v1.7.9 // indirect
 	filippo.io/nistec v0.0.4 // indirect
 	github.com/emmansun/gmsm v0.45.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect

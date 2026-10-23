@@ -36,7 +36,7 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher
 
    var initData []byte
    if info.IsFmp4 && mediaPl.Map != nil {
-      initData, err = fetchData(mediaPl.Map, nil, true)
+      initData, _, err = fetchData(mediaPl.Map, nil, true)
       if err != nil {
          return fmt.Errorf("failed to get HLS initialization segment: %w", err)
       }
@@ -54,7 +54,7 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher
 
 // fetchMediaPlaylist fetches and parses an HLS media playlist.
 func fetchMediaPlaylist(mediaUrl *url.URL) (*hls.MediaPlaylist, error) {
-   data, err := fetchData(mediaUrl, nil, true)
+   data, _, err := fetchData(mediaUrl, nil, true)
    if err != nil {
       return nil, err
    }
