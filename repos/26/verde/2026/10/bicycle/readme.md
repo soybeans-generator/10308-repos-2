@@ -10,38 +10,45 @@ I am looking for bicycle please give me one option
 6. no hydraulic disc
 7. no step through
 8. north America seller
-9. tire less than 47c
+9. tire less than 45c
 
 ## fairdalebikes.com
 
 629 + 149.16 = $778.16
 
-Frame: 1020 Steel, with Rack and Fender mounts
-Fork: 1020 Steel, 1 1/8” 
+Fairdale Lookfar (42x11) - @90 rpm -> 28.3 mph (cost: Crr approx 0.0072)
 
-https://shop.fairdalebikes.com/collections/fairdale-lookfar
+https://shop.fairdalebikes.com/collections/fairdale-lookfar/products/fairdale-lookfar-matte-coral-red-in-xs-l
 
-## marinbikes.com
+## polygonbikes.com
 
-649 + 135 = $784
+559 + 85 = $644
 
-Frame
-Series 1 City + Sport, 6061 Aluminum, 700C Wheels, Step Through Design, Fender
-and Rack Mounts
+Polygon Path 2 (42x11) - @90 rpm -> 28.3 mph (cost: Crr approx 0.0080)
 
-Fork
-Steel, Moto Blade, Disc Specific, Fender and Rack Eyelets
-
-https://marinbikes.com/products/2024-kentfield-1
+- https://bikesonline.com/products/polygon-path-2-urban-city-bike-new
+- https://www.polygonbikes.com/2026-path-2-city-bike
 
 ## retrospec.com
 
 529.99 + 0 = $529.99
 
-Frame 5 sizes: 45, 49, 53, 57, 61cm. 6061 aluminum with tapered headtube,
-replaceable derailleur hanger, top & seat tube 2x accessory mounts, downtube 3x
-accessory mount, rear & front rack mounts, internal cable routing
-
-Fork High-tensile steel, threadless, tapered 1-1/8"/1 1/4" steerer
+Retrospec Amok (39x11) - @90 rpm -> 26.3 mph (cost: Crr approx 0.0105)
 
 https://retrospec.com/products/amok-8-speed-hybrid-bike
+
+## specialized.com
+
+549.99
+
+Specialized Sirrus X 1.0 (40x12) - @90 rpm -> 24.8 mph (cost: Crr approx 0.0075)
+
+https://specialized.com/us/en/sirrus-x-10/p/4278560
+
+## marinbikes.com
+
+649 + 135 = $784
+
+Marin Kentfield 1 (38x12) - @90 rpm -> 23.5 mph (cost: Crr approx 0.0095)
+
+https://marinbikes.com/products/2024-kentfield-1
