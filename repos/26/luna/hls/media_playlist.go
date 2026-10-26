@@ -2,6 +2,7 @@
 package hls
 
 import (
+   "errors"
    "fmt"
    "net/url"
    "strconv"
@@ -83,22 +84,33 @@ func parseMedia(lines []string) (*MediaPlaylist, error) {
          }
          // The URI may not be on the immediately following line; intermediate
          // tags such as #EXT-X-BYTERANGE are allowed between #EXTINF and the
-         // segment URI. Scan forward, consuming any intervening tags, until
-         // we find the (non-comment) segment URI line.
+         // segment URI. Scan forward for the URI, but stop at the start of the
+         // next entry so a URI-less #EXTINF cannot consume another entry's URI.
+         var uri string
          for j := i + 1; j < len(lines); j++ {
             nextLine := lines[j]
-            if strings.HasPrefix(nextLine, "#") || nextLine == "" {
-               // Skip comments, other tags, and blank lines.
+            if nextLine == "" {
                continue
             }
-            parsedUrl, err := url.Parse(nextLine)
-            if err != nil {
-               return nil, fmt.Errorf("invalid segment URI: %w", err)
+            if strings.HasPrefix(nextLine, "#EXTINF:") ||
+               strings.HasPrefix(nextLine, "#EXT-X-ENDLIST") {
+               break // next entry begins here; this EXTINF has no URI
             }
-            newSegment.Uri = parsedUrl
+            if strings.HasPrefix(nextLine, "#") {
+               continue // comments, BYTERANGE, and similar tags
+            }
+            uri = nextLine
             i = j // advance outer loop past consumed lines
             break
          }
+         if uri == "" {
+            return nil, errors.New("malformed EXTINF: missing segment URI")
+         }
+         parsedUrl, err := url.Parse(uri)
+         if err != nil {
+            return nil, fmt.Errorf("invalid segment URI: %w", err)
+         }
+         newSegment.Uri = parsedUrl
          mediaPlaylist.Segments = append(mediaPlaylist.Segments, newSegment)
       }
    }
