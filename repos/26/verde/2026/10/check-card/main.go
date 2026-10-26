@@ -25,7 +25,6 @@ var targets = []Target{
    {Name: "SCHLOTZSKYS"},
    {Name: "SHAKE SHACK"},
    {Name: "SHAWARMA PRESS", Distance: "4.5 mi"},
-   {Name: "SPRING CREEK"},
    {Name: "STARBUCKS"},
    {Name: "TIFF'S TREATS"},
    {Name: "WHATABURGER"},
