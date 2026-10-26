@@ -1,3 +1,4 @@
+// track.go marker preserve
 package sofia
 
 import (
@@ -625,4 +626,4 @@ func (b *TrakBox) RemoveEdts() {
    b.RawChildren = kept
 }
 
-// track.go
+// track.go marker preserve

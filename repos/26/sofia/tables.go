@@ -1,3 +1,4 @@
+// tables.go marker preserve
 package sofia
 
 import "errors"
@@ -462,4 +463,4 @@ type SttsEntry struct {
    SampleDuration uint32
 }
 
-// tables.go
+// tables.go marker preserve

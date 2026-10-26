@@ -1,3 +1,4 @@
+// encryption.go marker preserve
 package sofia
 
 import (
@@ -188,4 +189,4 @@ func (b *TencBox) Encode() []byte {
    return buffer
 }
 
-// encryption.go
+// encryption.go marker preserve

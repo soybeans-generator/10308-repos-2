@@ -1,3 +1,4 @@
+// box.go marker preserve
 package sofia
 
 import (
@@ -191,4 +192,4 @@ func (w *writer) PutUint64(val uint64) {
    w.offset += 8
 }
 
-// box.go
+// box.go marker preserve

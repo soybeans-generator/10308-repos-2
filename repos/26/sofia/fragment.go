@@ -1,3 +1,4 @@
+// fragment.go marker preserve
 package sofia
 
 import (
@@ -405,4 +406,4 @@ func (r *Remuxer) processFragment(moof *MoofBox, mdat *MdatBox) error {
    return nil
 }
 
-// fragment.go
+// fragment.go marker preserve
