@@ -18,7 +18,6 @@ var packageTemplateFile string
 //go:embed style.css
 var styleFile string
 
-// types.go
 // Generate creates HTML documentation for all packages within a Go module
 func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
    if err := os.MkdirAll(outputDir, 0o755); err != nil {
