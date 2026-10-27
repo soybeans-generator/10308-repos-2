@@ -1,3 +1,4 @@
+// auth.go marker preserve
 package amazon
 
 import (
@@ -292,4 +293,4 @@ func (t *TokenPair) Refresh() error {
    return nil
 }
 
-// auth.go
+// auth.go marker preserve

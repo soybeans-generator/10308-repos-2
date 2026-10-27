@@ -1,3 +1,4 @@
+// types.go marker preserve
 package amazon
 
 import (
@@ -251,4 +252,4 @@ func (*TokenPair) CachePath() string {
    return "rosso/amazon/TokenPair"
 }
 
-// types.go
+// types.go marker preserve
