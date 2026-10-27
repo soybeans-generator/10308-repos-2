@@ -160,13 +160,14 @@ func probe(client *http.Client, key string, m modelInfo) result {
    }
 
    var content, reasoning strings.Builder
-   var got int
    var finish string
    var streamErr *apiError
 
    sc := bufio.NewScanner(resp.Body)
    sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 
+   // Read the stream to completion: no early break, so the reply is stored
+   // whole. maxToks bounds length; timeout bounds the wait.
    for sc.Scan() {
       line := sc.Text()
       if !strings.HasPrefix(line, "data:") {
@@ -192,7 +193,6 @@ func probe(client *http.Client, key string, m modelInfo) result {
       for _, c := range ch.Choices {
          if c.Delta.Content != "" {
             content.WriteString(c.Delta.Content)
-            got += len([]rune(c.Delta.Content))
          }
          if c.Delta.Reasoning != "" {
             reasoning.WriteString(c.Delta.Reasoning)
@@ -203,10 +203,6 @@ func probe(client *http.Client, key string, m modelInfo) result {
          if c.FinishReason != "" {
             finish = c.FinishReason
          }
-      }
-
-      if got >= capChars {
-         break
       }
    }
 
@@ -227,16 +223,16 @@ func probe(client *http.Client, key string, m modelInfo) result {
    think := strings.TrimSpace(reasoning.String())
 
    if text == "" {
-      if strings.EqualFold(finish, "content_filter") {
+      switch {
+      case strings.EqualFold(finish, "content_filter"):
          r.Status, r.Text = "FILTERED", "finish_reason=content_filter"
-         return r
-      }
-      if think != "" {
-         r.Status = "REASON"
+      case think != "":
+         r.Status = "ABSENT"
          r.Text = fmt.Sprintf("%d chars of reasoning, no content within %s", len([]rune(think)), timeout)
-         return r
+      default:
+         r.Status = "TIMEOUT"
+         r.Text = fmt.Sprintf("no content within %s", timeout)
       }
-      r.Status, r.Text = "TIMEOUT", fmt.Sprintf("no content within %s", timeout)
       return r
    }
 
@@ -248,5 +244,3 @@ func probe(client *http.Client, key string, m modelInfo) result {
    r.Text = text
    return r
 }
-
-// probe.go
