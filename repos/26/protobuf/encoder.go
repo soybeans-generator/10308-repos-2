@@ -127,6 +127,14 @@ func (m Message) Encode() ([]byte, error) {
          return nil, fmt.Errorf("cannot encode field: nil field or nil tag")
       }
 
+      // Validate the field number before writing anything, mirroring
+      // DecodeTag. Valid field numbers are 1 through 2^29-1 per the
+      // protobuf spec; emitting anything else would produce output that
+      // this package's own decoder rejects with ErrInvalidFieldNumber.
+      if num := field.Tag.Number; num == 0 || num > 536_870_911 {
+         return nil, fmt.Errorf("%w %d for encoding", ErrInvalidFieldNumber, num)
+      }
+
       var valueBytes []byte
 
       if field.Tag.Type == WireBytes {
