@@ -9,7 +9,7 @@ import (
    "io"
    "net/http"
    "os"
-   "sort"
+   "slices"
    "strings"
    "time"
    "unicode/utf8"
@@ -105,29 +105,30 @@ func main() {
       }
    }
 
-   todo := 0
+   left := 0
    for _, m := range models {
       if !done[m.ID] {
-         todo++
+         left++
       }
    }
 
    fmt.Printf("open-weight models: %d (of %d listed)\n", len(models), len(all))
-   fmt.Printf("resume: %d already in %s, %d to probe\n", len(models)-todo, resultsFile, todo)
+   fmt.Printf("resume: %d already in %s, %d to probe\n", len(models)-left, resultsFile, left)
    fmt.Printf("interrupt: Ctrl-C (results are saved after every model, re-run to resume)\n\n")
 
-   if todo == 0 {
+   if left == 0 {
       return
    }
 
-   for i, m := range models {
+   for _, m := range models {
       if done[m.ID] {
          continue
       }
 
       r := probe(client, *key, m)
 
-      fmt.Printf("%d/%d %.1fs\n", i+1, len(models), float64(r.Millis)/1000)
+      fmt.Printf("%d left %.1fs\n", left, float64(r.Millis)/1000)
+      left--
 
       recs = append(recs, record{
          Model:    m.ID,
@@ -141,6 +142,7 @@ func main() {
 
 // saveResults writes the array via a temp file plus rename, so an interrupted
 // write can never leave a half-written or unparseable results file behind.
+// recs is written as given; nothing here reorders it.
 func saveResults(path string, recs []record) error {
    b, err := json.MarshalIndent(recs, "", "  ")
    if err != nil {
@@ -231,7 +233,7 @@ func selectModels(all []modelInfo) []modelInfo {
       }
    }
 
-   sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+   slices.SortFunc(out, func(a, b modelInfo) int { return strings.Compare(a.ID, b.ID) })
    return out
 }
 
@@ -240,7 +242,7 @@ type record struct {
    Response string `json:"response"`
 }
 
-// loadResults reads the results array. A missing or empty file yields no
+// loadResults reads the array in file order. A missing or empty file yields no
 // records; a malformed file is an error rather than a silent reset.
 func loadResults(path string) ([]record, error) {
    raw, err := os.ReadFile(path)
