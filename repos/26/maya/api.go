@@ -226,12 +226,12 @@ func DashList(baseUrl *url.URL) (*Manifest, error) {
 }
 
 func HlsList(baseUrl *url.URL) (*Manifest, error) {
-   body, _, err := fetchData(baseUrl, nil, true)
+   body, effectiveUrl, err := fetchData(baseUrl, nil, true)
    if err != nil {
       return nil, err
    }
 
-   playlist, err := hls.DecodeMaster(string(body), baseUrl)
+   playlist, err := hls.DecodeMaster(string(body), effectiveUrl)
    if err != nil {
       return nil, err
    }
@@ -239,7 +239,7 @@ func HlsList(baseUrl *url.URL) (*Manifest, error) {
       return nil, err
    }
 
-   return &Manifest{Url: baseUrl, Body: body}, nil
+   return &Manifest{Url: effectiveUrl, Body: body}, nil
 }
 
 func (*Manifest) CachePath() string {
