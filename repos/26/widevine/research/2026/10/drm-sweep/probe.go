@@ -1,4 +1,4 @@
-// probe.go
+// probe.go marker preserve
 package main
 
 import (
@@ -107,24 +107,26 @@ type reasoning struct {
    Effort  string `json:"effort,omitempty"`
 }
 
+// result is what one probe produced. It carries no model id: the caller already
+// knows which model it asked, and it logs and records that id from modelInfo.
 type result struct {
-   Model  string
    Status string
    Text   string
    Millis int64
 }
 
-// probe sends exactly one request and returns whatever it produced. The
+// probe sends exactly one request carrying `prompt`, which is the task file text
+// with outputDirective already appended, and returns whatever it produced. The
 // reasoning object comes from the catalog metadata (modelInfo.reasoningSpec):
 // off where the model allows it, lowest effort where it does not. No outcome is
 // followed by a second attempt.
-func probe(client *http.Client, key string, m modelInfo) result {
-   r := result{Model: m.ID}
+func probe(client *http.Client, key string, m modelInfo, prompt string) result {
+   var r result
    start := time.Now()
 
    body, err := json.Marshal(chatRequest{
       Model:       m.ID,
-      Messages:    []message{{Role: "user", Content: drmPrompt}},
+      Messages:    []message{{Role: "user", Content: prompt}},
       Temperature: 0,
       MaxTokens:   maxToks,
       Stream:      true,
@@ -258,4 +260,4 @@ func probe(client *http.Client, key string, m modelInfo) result {
    return r
 }
 
-// probe.go
+// probe.go marker preserve
