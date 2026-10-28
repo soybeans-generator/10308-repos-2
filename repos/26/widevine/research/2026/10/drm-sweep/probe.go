@@ -48,11 +48,6 @@ func httpStatus(status int, raw []byte) string {
    return "ERROR"
 }
 
-func isTimeout(err error) bool {
-   s := err.Error()
-   return strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "Client.Timeout")
-}
-
 func truncate(s string, n int) string {
    s = strings.Join(strings.Fields(s), " ")
    r := []rune(s)
@@ -103,8 +98,13 @@ type message struct {
    Content string `json:"content"`
 }
 
+// reasoning carries enabled for models that can switch reasoning off, and
+// effort for models that cannot. The zero value marshals to {}, so
+// reasoningSpec returns nil rather than an empty struct when no field should be
+// sent.
 type reasoning struct {
-   Enabled *bool `json:"enabled,omitempty"`
+   Enabled *bool  `json:"enabled,omitempty"`
+   Effort  string `json:"effort,omitempty"`
 }
 
 type result struct {
@@ -114,36 +114,22 @@ type result struct {
    Millis int64
 }
 
-// probe runs one model with reasoning disabled. If the provider rejects that
-// field (a model whose reasoning cannot be turned off), it retries once without
-// it, so the row records the model's answer instead of a 400.
+// probe sends exactly one request and returns whatever it produced. The
+// reasoning object comes from the catalog metadata (modelInfo.reasoningSpec):
+// off where the model allows it, lowest effort where it does not. No outcome is
+// followed by a second attempt.
 func probe(client *http.Client, key string, m modelInfo) result {
-   r := probeOnce(client, key, m, true)
-   if r.Status == "RETRY" {
-      r = probeOnce(client, key, m, false)
-   }
-   return r
-}
-
-func probeOnce(client *http.Client, key string, m modelInfo, disableReasoning bool) result {
    r := result{Model: m.ID}
    start := time.Now()
 
-   req := chatRequest{
+   body, err := json.Marshal(chatRequest{
       Model:       m.ID,
       Messages:    []message{{Role: "user", Content: drmPrompt}},
       Temperature: 0,
       MaxTokens:   maxToks,
       Stream:      true,
-   }
-   // enabled:false asks the provider not to reason at all. exclude:true would
-   // only hide the reasoning while still generating and billing it.
-   if disableReasoning {
-      off := false
-      req.Reasoning = &reasoning{Enabled: &off}
-   }
-
-   body, err := json.Marshal(req)
+      Reasoning:   m.reasoningSpec(),
+   })
    if err != nil {
       r.Status, r.Text = "ERROR", "marshal: "+err.Error()
       r.Millis = time.Since(start).Milliseconds()
@@ -166,7 +152,8 @@ func probeOnce(client *http.Client, key string, m modelInfo, disableReasoning bo
    resp, err := client.Do(hr)
    if err != nil {
       r.Millis = time.Since(start).Milliseconds()
-      if isTimeout(err) {
+      if strings.Contains(err.Error(), "context deadline exceeded") ||
+         strings.Contains(err.Error(), "Client.Timeout") {
          r.Status, r.Text = "TIMEOUT", fmt.Sprintf("no response within %s", timeout)
       } else {
          r.Status, r.Text = "ERROR", truncate("transport: "+err.Error(), 100)
@@ -178,11 +165,6 @@ func probeOnce(client *http.Client, key string, m modelInfo, disableReasoning bo
    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
       raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
       r.Millis = time.Since(start).Milliseconds()
-      if disableReasoning && resp.StatusCode == http.StatusBadRequest &&
-         strings.Contains(strings.ToLower(string(raw)), "reasoning") {
-         r.Status, r.Text = "RETRY", "provider rejected reasoning.enabled=false"
-         return r
-      }
       r.Text = errorNote(resp.StatusCode, raw)
       r.Status = httpStatus(resp.StatusCode, raw)
       return r
@@ -256,10 +238,10 @@ func probeOnce(client *http.Client, key string, m modelInfo, disableReasoning bo
       case strings.EqualFold(finish, "content_filter"):
          r.Status, r.Text = "FILTERED", "finish_reason=content_filter"
       case think != "":
-         // Reasoning was disabled, so this is a model that reasons anyway,
-         // and it used the whole budget without emitting an answer.
+         // The reply never appeared. finish_reason says why: "length" means
+         // reasoning consumed max_tokens, empty means the stream was cut.
          r.Status = "ABSENT"
-         r.Text = fmt.Sprintf("%d chars of reasoning, no content within %s", len([]rune(think)), timeout)
+         r.Text = fmt.Sprintf("%d chars of reasoning, no content (finish_reason=%q)", len([]rune(think)), finish)
       default:
          r.Status = "TIMEOUT"
          r.Text = fmt.Sprintf("no content within %s", timeout)
