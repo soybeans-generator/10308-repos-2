@@ -25,7 +25,8 @@ const (
    // way out to resultsFile.
    maxToks = 2048
 
-   // resultsFile holds one JSON array of {"model":...,"response":...} objects.
+   // resultsFile holds one JSON array of {"model":...,"response":...} objects,
+   // sorted by response on a clean exit.
    resultsFile = "probe-results.json"
 
    // window is the trailing period an eligible model must fall inside.
@@ -119,7 +120,13 @@ func main() {
    fmt.Fprintf(os.Stderr, "resume: %d already in %s, %d to probe\n", len(models)-left, resultsFile, left)
    fmt.Fprintf(os.Stderr, "interrupt: Ctrl-C (results are saved after every model, re-run to resume)\n\n")
 
+   // Nothing left to probe, but the file may still be in probe order from an
+   // earlier interrupted run, so sort and rewrite it anyway.
    if left == 0 {
+      if err := sortAndSave(recs); err != nil {
+         fatalf("write %s: %v", resultsFile, err)
+      }
+      fmt.Fprintf(os.Stderr, "complete: sorted %d records in %s\n", len(recs), resultsFile)
       return
    }
 
@@ -133,6 +140,8 @@ func main() {
       fmt.Fprintf(os.Stderr, "%d left %.1fs %-9s %s\n", left, float64(r.Millis)/1000, r.Status, m.ID)
       left--
 
+      // Saved per model in probe order, so an interrupt keeps everything
+      // collected so far. The final sort happens after the loop.
       recs = append(recs, record{
          Model:    m.ID,
          Response: r.Text,
@@ -141,6 +150,11 @@ func main() {
          fatalf("write %s: %v", resultsFile, err)
       }
    }
+
+   if err := sortAndSave(recs); err != nil {
+      fatalf("write %s: %v", resultsFile, err)
+   }
+   fmt.Fprintf(os.Stderr, "done: sorted %d records in %s\n", len(recs), resultsFile)
 }
 
 // saveResults writes the array via a temp file plus rename, so an interrupted
@@ -158,6 +172,19 @@ func saveResults(path string, recs []record) error {
       return err
    }
    return os.Rename(tmp, path)
+}
+
+// sortAndSave orders records by response and rewrites the file. Sorting by the
+// model id as a tie-break keeps rows with byte-identical replies in a stable
+// order, so two runs over the same data produce the same file.
+func sortAndSave(recs []record) error {
+   slices.SortFunc(recs, func(a, b record) int {
+      if c := strings.Compare(a.Response, b.Response); c != 0 {
+         return c
+      }
+      return strings.Compare(a.Model, b.Model)
+   })
+   return saveResults(resultsFile, recs)
 }
 
 type modelInfo struct {
