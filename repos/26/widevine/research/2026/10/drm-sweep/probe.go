@@ -74,11 +74,12 @@ type apiError struct {
 }
 
 type chatRequest struct {
-   Model       string    `json:"model"`
-   Messages    []message `json:"messages"`
-   Temperature float64   `json:"temperature"`
-   MaxTokens   int       `json:"max_tokens"`
-   Stream      bool      `json:"stream"`
+   Model       string     `json:"model"`
+   Messages    []message  `json:"messages"`
+   Temperature float64    `json:"temperature"`
+   MaxTokens   int        `json:"max_tokens"`
+   Stream      bool       `json:"stream"`
+   Reasoning   *reasoning `json:"reasoning,omitempty"`
 }
 
 type chunk struct {
@@ -102,6 +103,10 @@ type message struct {
    Content string `json:"content"`
 }
 
+type reasoning struct {
+   Enabled *bool `json:"enabled,omitempty"`
+}
+
 type result struct {
    Model  string
    Status string
@@ -109,17 +114,36 @@ type result struct {
    Millis int64
 }
 
+// probe runs one model with reasoning disabled. If the provider rejects that
+// field (a model whose reasoning cannot be turned off), it retries once without
+// it, so the row records the model's answer instead of a 400.
 func probe(client *http.Client, key string, m modelInfo) result {
+   r := probeOnce(client, key, m, true)
+   if r.Status == "RETRY" {
+      r = probeOnce(client, key, m, false)
+   }
+   return r
+}
+
+func probeOnce(client *http.Client, key string, m modelInfo, disableReasoning bool) result {
    r := result{Model: m.ID}
    start := time.Now()
 
-   body, err := json.Marshal(chatRequest{
+   req := chatRequest{
       Model:       m.ID,
       Messages:    []message{{Role: "user", Content: drmPrompt}},
       Temperature: 0,
       MaxTokens:   maxToks,
       Stream:      true,
-   })
+   }
+   // enabled:false asks the provider not to reason at all. exclude:true would
+   // only hide the reasoning while still generating and billing it.
+   if disableReasoning {
+      off := false
+      req.Reasoning = &reasoning{Enabled: &off}
+   }
+
+   body, err := json.Marshal(req)
    if err != nil {
       r.Status, r.Text = "ERROR", "marshal: "+err.Error()
       r.Millis = time.Since(start).Milliseconds()
@@ -154,12 +178,17 @@ func probe(client *http.Client, key string, m modelInfo) result {
    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
       raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
       r.Millis = time.Since(start).Milliseconds()
+      if disableReasoning && resp.StatusCode == http.StatusBadRequest &&
+         strings.Contains(strings.ToLower(string(raw)), "reasoning") {
+         r.Status, r.Text = "RETRY", "provider rejected reasoning.enabled=false"
+         return r
+      }
       r.Text = errorNote(resp.StatusCode, raw)
       r.Status = httpStatus(resp.StatusCode, raw)
       return r
    }
 
-   var content, reasoning strings.Builder
+   var content, reasoningText strings.Builder
    var finish string
    var streamErr *apiError
 
@@ -195,10 +224,10 @@ func probe(client *http.Client, key string, m modelInfo) result {
             content.WriteString(c.Delta.Content)
          }
          if c.Delta.Reasoning != "" {
-            reasoning.WriteString(c.Delta.Reasoning)
+            reasoningText.WriteString(c.Delta.Reasoning)
          }
          if c.Delta.ReasoningContent != "" {
-            reasoning.WriteString(c.Delta.ReasoningContent)
+            reasoningText.WriteString(c.Delta.ReasoningContent)
          }
          if c.FinishReason != "" {
             finish = c.FinishReason
@@ -220,13 +249,15 @@ func probe(client *http.Client, key string, m modelInfo) result {
    }
 
    text := strings.TrimSpace(content.String())
-   think := strings.TrimSpace(reasoning.String())
+   think := strings.TrimSpace(reasoningText.String())
 
    if text == "" {
       switch {
       case strings.EqualFold(finish, "content_filter"):
          r.Status, r.Text = "FILTERED", "finish_reason=content_filter"
       case think != "":
+         // Reasoning was disabled, so this is a model that reasons anyway,
+         // and it used the whole budget without emitting an answer.
          r.Status = "ABSENT"
          r.Text = fmt.Sprintf("%d chars of reasoning, no content within %s", len([]rune(think)), timeout)
       default:
@@ -244,3 +275,5 @@ func probe(client *http.Client, key string, m modelInfo) result {
    r.Text = text
    return r
 }
+
+// probe.go
