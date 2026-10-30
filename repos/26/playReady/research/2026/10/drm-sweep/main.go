@@ -16,14 +16,6 @@ import (
 const (
    apiBase = "https://openrouter.ai/api/v1"
 
-   // timeout covers the whole request including body read; the stream loop
-   // reads to completion, so a slow model can run long.
-   timeout = 90 * time.Second
-
-   // maxToks bounds the response, and counts against reasoning tokens on most
-   // providers. Nothing is clipped on the way out to resultsFile.
-   maxToks = 2048
-
    // resultsFile holds one JSON array of {"model":...,"response":...} objects,
    // sorted by response on a clean exit.
    resultsFile = "probe-results.json"
@@ -37,10 +29,10 @@ const (
 
    // minContext is the smallest context window a model may advertise and still
    // be probed. It is sent to the catalog as context=<minContext>, which drops
-   // smaller models server-side so they never reach this program. selectModels
-   // re-checks context_length on whatever comes back, so the rule still holds
-   // if the query parameter is ever ignored or renamed.
-   minContext = 256000
+   // smaller models server-side so they never reach this program. That is the
+   // only context check: nothing re-tests the floor locally, so this assumes the
+   // catalog honours the parameter.
+   minContext = 263_000
 
    // outputDirective is appended to every prompt read from -prompt, so a model
    // answers in one of two shapes and never rambles: a STEPS line followed by
@@ -75,6 +67,14 @@ func loadPrompt(path string) (string, error) {
    return task + "\n\n" + outputDirective, nil
 }
 
+// logFilter prints one filter line: which side applied the filter, the rule
+// itself, and what it did to the id list. Columns are fixed width so two runs
+// diff cleanly. Each filter gets its own line and carries both counts it is
+// responsible for, so no summary line is needed beside them.
+func logFilter(side, rule, effect string) {
+   fmt.Fprintf(os.Stderr, "filter %-6s %-38s %s\n", side, rule, effect)
+}
+
 func main() {
    key := flag.String("key", "", "OpenRouter API key")
    promptFile := flag.String("prompt", "", "file containing the task; the STEPS/REFUSED directive is appended automatically")
@@ -98,7 +98,12 @@ func main() {
       fatalf("read prompt: %v", err)
    }
 
-   client := &http.Client{Timeout: timeout, Transport: loggingTransport{}}
+   // No timeout is set on the client and no deadline is put on the request, so a
+   // probe runs until the provider finishes or closes the connection. Cutting it
+   // off early would record a failed probe for a model that was still working.
+   // The cost is that a provider which accepts the connection and then stalls
+   // blocks the run until the process is killed.
+   client := &http.Client{Transport: loggingTransport{}}
 
    all, err := fetchModels(client, *key)
    if err != nil {
@@ -108,7 +113,7 @@ func main() {
    since := time.Now().Add(-window)
    models, skips := selectModels(all, since)
    if len(models) == 0 {
-      fatalf("no text models with context >= %d added since %s returned (from %d total)",
+      fatalf("no models with context >= %d added since %s returned (from %d total)",
          minContext, since.Format("2006-01-02"), len(all))
    }
 
@@ -131,27 +136,48 @@ func main() {
       }
    }
 
-   // Progress goes to stderr; the results file is the output.
-   fmt.Fprintf(os.Stderr, "models added since %s: %d with context >= %d (of %d listed)\n",
-      since.Format("2006-01-02"), len(models), minContext, len(all))
-   fmt.Fprintf(os.Stderr, "resume: %d already in %s, %d to probe\n", len(models)-left, resultsFile, left)
-
-   // Every id that will not be probed is listed in full, so no exclusion is
-   // silent. The counts line is a summary of the same list.
-   counts := make(map[string]int, 7)
+   // Progress goes to stderr; the results file is the output. One line per
+   // filter, nothing else: anything that only restates these counts is not
+   // printed, because the counts are already here.
+   //
+   // The catalog is asked only for models at or above minContext. That filter
+   // runs inside the catalog before the response is built, so the ids it drops
+   // never arrive and its count is not knowable from here: the line reports
+   // that, plus the total that did come back. It is the only context filter, so
+   // there is no client line for the floor. No modality filter is sent either,
+   // and none is applied locally, so every modality in the response is probed.
+   //
+   // Every other filter runs in this program over that response, in the order
+   // listed, and the first matching reason wins, so the drops partition the
+   // response and "kept" is the running total after each one.
+   //
+   // This list must name every reason selectModels can assign, in the order its
+   // switch tests them; a reason missing here would be an exclusion no line
+   // accounts for. The resume check is printed last because it applies to the
+   // survivors of every filter above it, not to the catalog.
+   counts := make(map[string]int, 5)
    for _, s := range skips {
       counts[s.Reason]++
    }
-   fmt.Fprintf(os.Stderr, "excluded %d of %d catalog ids:", len(skips), len(all))
-   for _, r := range []string{"old", "small-context", "non-text", "variant", "router", "alias", "empty-id"} {
-      if n := counts[r]; n > 0 {
-         fmt.Fprintf(os.Stderr, " %s=%d", r, n)
-      }
+
+   logFilter("server", fmt.Sprintf("context>=%d", minContext),
+      fmt.Sprintf("count unknown, %d kept", len(all)))
+
+   kept := len(all)
+   for _, f := range []struct{ reason, label string }{
+      {"old", "old (created before " + since.Format("2006-01-02") + ")"},
+      {"variant", `variant (":" suffix)`},
+      {"router", `router ("openrouter/" prefix)`},
+      {"alias", `alias ("~" prefix)`},
+      {"latest", `latest ("-latest" suffix)`},
+   } {
+      n := counts[f.reason]
+      kept -= n
+      logFilter("client", f.label, fmt.Sprintf("%d dropped, %d kept", n, kept))
    }
-   fmt.Fprintf(os.Stderr, "\n")
-   for _, s := range skips {
-      fmt.Fprintf(os.Stderr, "  skip %-13s %s\n", s.Reason, s.ID)
-   }
+
+   probed := len(models) - left
+   logFilter("client", "already in "+resultsFile, fmt.Sprintf("%d dropped, %d kept", probed, left))
    fmt.Fprintf(os.Stderr, "\n")
 
    // Nothing left to probe, but the file may still be in probe order from an
@@ -171,17 +197,20 @@ func main() {
 
       r := probe(client, *key, m, prompt)
 
-      // ABSENT means reasoning arrived but no answer: the budget went to
-      // thinking, so the reasoning object sent for this model is wrong. That
-      // is a bug here, not a model result, so stop the whole run rather than
-      // record it. Nothing is written for this model, so once the request is
-      // fixed a re-run will probe it again instead of skipping it.
-      if r.Status == "ABSENT" {
-         fatalf("%s: %s\nreasoning consumed the token budget before any answer: the "+
-            "reasoning object sent for this model is wrong. Aborting; nothing written "+
-            "for this model, and %s was not re-sorted.", m.ID, r.Text, resultsFile)
-      }
-
+      // No outcome stops the run. ABSENT in particular is recorded like any other
+      // status rather than treated as a bug: it means the model produced
+      // reasoning and then ran out of room for content. The row carries the
+      // character count and finish_reason so the fact is visible, and the run
+      // moves on.
+      //
+      // Worth knowing: any recorded row is final. loadResults counts a recorded
+      // id as done, so a model recorded here as ABSENT, as a 400 or as a 402 is
+      // not retried on a later run. Delete its row to re-probe it.
+      //
+      // The seconds figure is the whole probe, start of request to last byte,
+      // because nothing cuts the stream off. For a mandatory-reasoning model it
+      // therefore includes all the thinking that happens before the first
+      // character of the reply.
       fmt.Fprintf(os.Stderr, "%d left %.1fs %-9s %s\n", left, float64(r.Millis)/1000, r.Status, m.ID)
       left--
 

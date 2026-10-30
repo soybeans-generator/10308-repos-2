@@ -13,8 +13,14 @@ import (
 )
 
 // effortRank orders effort levels low to high so the cheapest one a model
-// advertises can be picked. "none" is deliberately absent: it means disable,
-// and a mandatory-reasoning model rejects it.
+// advertises can be picked. "none" is deliberately absent: it means disable, it
+// is not a point on this scale, and the catalog cannot be trusted to say which
+// models accept it. mistral-large-4-0 lists "none" in supported_efforts and
+// still answers 400 "reasoning_effort none is not supported for this model",
+// while qwen3.5-plus-02-15 publishes no allowlist at all and accepts "none"
+// happily, spending zero reasoning tokens. So "none" is never taken from a list;
+// it is sent only to a non-mandatory model that publishes no list, where there
+// is nothing better to pick.
 var effortRank = map[string]int{
    "minimal": 0,
    "low":     1,
@@ -24,25 +30,18 @@ var effortRank = map[string]int{
    "max":     5,
 }
 
-func isTextModel(m modelInfo) bool {
-   text := func(xs []string) bool {
-      return len(xs) == 0 || slices.ContainsFunc(xs, func(x string) bool {
-         return strings.EqualFold(strings.TrimSpace(x), "text")
-      })
-   }
-   return text(m.Architecture.Input) && text(m.Architecture.Output)
-}
-
-// selectModels keeps text-in/text-out models added since `since`, with base ids
-// only and a context window of at least minContext, and returns every rejected
-// id with its reason. Exactly one reason is assigned per id, in this order:
-// empty-id, old, small-context, non-text, variant, router, alias.
+// selectModels keeps models added since `since` with base ids only, and returns
+// every rejected id with its reason. Exactly one reason is assigned per id, in
+// this order: old, variant, router, alias, latest.
 //
-// The small-context case is a backstop: fetchModels already asks the catalog for
-// context>=minContext, so a model that is too small normally never arrives.
-// Checking context_length here keeps the floor true if the query parameter is
-// ignored or renamed, and a missing context_length (0) reads as too small, the
-// same way a missing created reads as old.
+// Neither modality nor context is tested here. The catalog is queried without a
+// modality filter, and no local check replaces it, so non-text models (image,
+// audio, video, embeddings) reach the probe list and are probed like any other;
+// they will mostly fail and be recorded as errors. The context floor is applied
+// only by fetchModels, as the catalog's context=<minContext> query parameter, so
+// a model below the floor never arrives and its context_length is not read at
+// all; if that parameter is ever ignored or renamed, undersized models are
+// probed with no local check to catch them.
 //
 // Anything carrying a variant suffix (:free, :nitro, :floor, :online, :thinking,
 // :extended, :batch) is dropped, because those are API-side routing and feature
@@ -57,32 +56,41 @@ func isTextModel(m modelInfo) bool {
 // it needs its own check: the tilde is a prefix, not a suffix, so the colon test
 // above never sees it. Such a slug resolves to whichever concrete model in the
 // family is newest, and its catalog row reports that target's pricing, context
-// length and modalities instead of anything of its own, so it clears the window,
-// context and text checks and reads as a duplicate of the real model listed
-// beside it. The response names the resolved model, never the alias. Only the
-// leading ~ is tested: it is the documented marker, so no extra catalog field is
-// read, and an alias whose family has no in-window concrete model is simply not
-// probed.
+// length and modalities instead of anything of its own, so it reads as a
+// duplicate of the real model listed beside it. The response names the resolved
+// model, never the alias. Only the leading ~ is tested: it is the documented
+// marker, so no extra catalog field is read, and an alias whose family has no
+// in-window concrete model is simply not probed.
+//
+// The latest case covers the same kind of moving target without the tilde.
+// openai/gpt-chat-latest is OpenAI's own alias for whatever its current Instant
+// chat model happens to be, so a recorded answer identifies nothing. It is not
+// caught above: no ~ prefix, no colon, not under openrouter/, and unlike the
+// tilde rows it carries no alias_target field at all, so the catalog does not
+// mark it as an alias in any machine-readable way. The -latest suffix is the
+// only distinguishing feature it exposes. This runs after the tilde test, so it
+// never re-reports an id the alias case already claimed.
+//
+// A blank id is not filtered here either. The catalog does not return one, so the
+// check only ever fired zero times, and an id that somehow arrived blank would
+// fall through every case to the default branch and be probed and recorded like
+// any other model.
 func selectModels(all []modelInfo, since time.Time) (models []modelInfo, skips []excluded) {
    cutoff := since.Unix()
 
    for _, m := range all {
       id := strings.TrimSpace(m.ID)
       switch {
-      case id == "":
-         skips = append(skips, excluded{"<empty id>", "empty-id"})
       case m.Created < cutoff:
          skips = append(skips, excluded{id, "old"})
-      case m.ContextLength < minContext:
-         skips = append(skips, excluded{id, "small-context"})
-      case !isTextModel(m):
-         skips = append(skips, excluded{id, "non-text"})
       case strings.Contains(id, ":"):
          skips = append(skips, excluded{id, "variant"})
       case strings.HasPrefix(id, "openrouter/"):
          skips = append(skips, excluded{id, "router"})
       case strings.HasPrefix(id, "~"):
          skips = append(skips, excluded{id, "alias"})
+      case strings.HasSuffix(id, "-latest"):
+         skips = append(skips, excluded{id, "latest"})
       default:
          models = append(models, m)
       }
@@ -99,7 +107,8 @@ func selectModels(all []modelInfo, since time.Time) (models []modelInfo, skips [
 }
 
 // excluded is one catalog id that will not be probed, with the single reason
-// it was rejected. selectModels returns these so main can print the full list.
+// it was rejected. selectModels returns these so main can count rejections per
+// reason; the ids themselves are not logged, only the per-filter totals.
 type excluded struct {
    ID     string
    Reason string
@@ -116,35 +125,43 @@ func (loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
    return http.DefaultTransport.RoundTrip(req)
 }
 
-// modelInfo carries the fields used for selection and for building the
-// reasoning object. The catalog omits Reasoning entirely for non-reasoning
-// models and dynamic routers, so a nil pointer means "do not send the field".
+// modelInfo carries the fields used for selection and for building the reasoning
+// object. The catalog omits Reasoning entirely for non-reasoning models and
+// dynamic routers, so a nil pointer means "do not send the field". Neither
+// context_length, the architecture modalities nor top_provider are decoded:
+// context is enforced solely by the catalog's context= query parameter, nothing
+// here tests modalities, and the request sends no max_tokens at all.
 type modelInfo struct {
-   ID string `json:"id"`
-   // ContextLength is the model's total window in tokens. Null or absent
-   // decodes to 0, which selectModels treats as smaller than minContext.
-   ContextLength int   `json:"context_length"`
-   Created       int64 `json:"created"`
-   Reasoning     *struct {
-      // Mandatory means reasoning cannot be disabled and effort "none" is
-      // rejected: the model must reason, so only the amount is negotiable.
+   ID        string `json:"id"`
+   Created   int64  `json:"created"`
+   Reasoning *struct {
+      // Mandatory means reasoning cannot be disabled, so the only thing that
+      // can be asked for is a lower amount. When it is false, reasoning can be
+      // switched off outright.
       Mandatory bool `json:"mandatory"`
+      // Pointer, because absent and false mean different things. false says
+      // reasoning is already off when the field is omitted, so the field stays
+      // omitted: sending an effort would switch reasoning on, the opposite of
+      // what this program wants. Absent says nothing about the default.
+      DefaultEnabled *bool `json:"default_enabled"`
       // RawMessage, not []string: absent (field omitted, model exposes no
       // effort selection) and null (no allowlist, every effort accepted) both
-      // decode to a nil slice but mean different things.
+      // decode to a nil slice but mean different things. Only an explicit list
+      // is read, and only as a preference, because the list is not accurate:
+      // it is missing "none" for models that accept it and present for models
+      // that reject it.
       SupportedEfforts json.RawMessage `json:"supported_efforts"`
    } `json:"reasoning"`
-   Architecture struct {
-      Input  []string `json:"input_modalities"`
-      Output []string `json:"output_modalities"`
-   } `json:"architecture"`
 }
 
+// fetchModels asks the catalog for models at or above minContext and returns
+// what it sends. context=<minContext> is the catalog's minimum-context filter
+// ("models with smaller context are excluded"), so small models are dropped
+// before the response is ever sent. It is the only context filter in the
+// program: selectModels does not re-check the floor. Nothing is filtered by
+// modality here either, so every modality comes back and is probed.
 func fetchModels(client *http.Client, key string) ([]modelInfo, error) {
-   // context=<minContext> is the catalog's minimum-context filter ("models with
-   // smaller context are excluded"), so small models are dropped before the
-   // response is ever sent.
-   url := fmt.Sprintf("%s/models?output_modalities=text&context=%d", apiBase, minContext)
+   url := fmt.Sprintf("%s/models?context=%d", apiBase, minContext)
    hr, err := http.NewRequest(http.MethodGet, url, nil)
    if err != nil {
       return nil, err
@@ -172,47 +189,78 @@ func fetchModels(client *http.Client, key string) ([]modelInfo, error) {
    return env.Data, nil
 }
 
-// reasoningSpec builds the reasoning object for this model. Disable reasoning
-// outright whenever the model allows it, and ask for the lowest effort the
-// model advertises when it does not:
+// lowestEffort returns the cheapest effort the model lists, ignoring "none", or
+// "" if it lists no ranked value at all. The list arrives in descending order,
+// so the whole list is scanned rather than the first element taken, and anything
+// effortRank does not know is skipped. For meta/muse-spark-open (a mandatory
+// reasoner whose list is ["xhigh","high","medium","low"]) this yields "low",
+// which is the least thinking that model will accept.
+func (m modelInfo) lowestEffort() string {
+   raw := strings.TrimSpace(string(m.Reasoning.SupportedEfforts))
+   if raw == "" || raw == "null" {
+      return ""
+   }
+   var listed []string
+   if json.Unmarshal(m.Reasoning.SupportedEfforts, &listed) != nil {
+      return ""
+   }
+   best := ""
+   for _, e := range listed {
+      e = strings.ToLower(strings.TrimSpace(e))
+      rank, ok := effortRank[e]
+      if ok && (best == "" || rank < effortRank[best]) {
+         best = e
+      }
+   }
+   return best
+}
+
+// reasoningSpec builds the reasoning object for this model, asking for the least
+// reasoning the model will accept:
 //
 //   no reasoning object          -> no field
-//   mandatory:false              -> enabled:false (off)
-//   mandatory, efforts listed    -> lowest of them, ignoring "none"
-//   mandatory, supported:null    -> minimal (every effort accepted)
-//   mandatory, field omitted     -> minimal (no effort selection to respect)
+//   default_enabled: false       -> no field  (already off, do not switch it on)
+//   allowlist has a ranked value -> {"enabled":true,"effort":<lowest ranked>}
+//   else, mandatory: false       -> {"enabled":true,"effort":"none"}
+//   else, mandatory: true        -> no field  (cannot disable, nothing to pick)
 //
-// effort:"none" is never sent. It means disable, which a mandatory-reasoning
-// model rejects with a 400, and it is absent from the allowlist of most
-// optional models too, so it risks a 400 where enabled:false does not.
+// "none" is what actually stops the thinking, and it is never taken from the
+// allowlist: mistral-large-4-0 lists it and rejects it with a 400, so a listed
+// "none" is skipped in favour of the lowest real value beside it. It is sent
+// only when no ranked value exists and the model says reasoning can be disabled
+// (mandatory:false) — which is exactly the shape qwen3.5-plus-02-15 has, no
+// supported_efforts at all, and that model answered with 0 reasoning tokens
+// instead of spending the entire token budget thinking.
+//
+// A model with no ranked value that must reason is left alone rather than
+// guessed at: omitting the field leaves the provider's own default in place,
+// which always works, and an invented effort can 400.
+//
+// What this function cannot do: for a mandatory-reasoning model with an
+// allowlist, "lowest ranked" is the floor, and it is a hint rather than a bound.
+// muse-spark-open at "low" still produced 43,938 characters of reasoning on a
+// real task. This function is all the economising that happens; the request
+// imposes no output limit, so such a model is allowed to finish instead of being
+// cut off mid-thought.
+//
+// enabled is always sent as true alongside the effort, matching the request
+// shape verified working; enabled:false is never sent, because it is rewritten
+// upstream to effort "none" and fails on the models that reject that.
 func (m modelInfo) reasoningSpec() *reasoning {
    if m.Reasoning == nil {
       return nil
    }
+   if m.Reasoning.DefaultEnabled != nil && !*m.Reasoning.DefaultEnabled {
+      return nil
+   }
+   on := true
+   if best := m.lowestEffort(); best != "" {
+      return &reasoning{Enabled: &on, Effort: best}
+   }
    if !m.Reasoning.Mandatory {
-      off := false
-      return &reasoning{Enabled: &off}
+      return &reasoning{Enabled: &on, Effort: "none"}
    }
-
-   // The list arrives in descending order, so scan for the minimum rather
-   // than taking the first element.
-   if raw := strings.TrimSpace(string(m.Reasoning.SupportedEfforts)); raw != "" && raw != "null" {
-      var listed []string
-      if json.Unmarshal(m.Reasoning.SupportedEfforts, &listed) == nil {
-         best := ""
-         for _, e := range listed {
-            e = strings.ToLower(strings.TrimSpace(e))
-            rank, ok := effortRank[e]
-            if ok && (best == "" || rank < effortRank[best]) {
-               best = e
-            }
-         }
-         if best != "" {
-            return &reasoning{Effort: best}
-         }
-      }
-   }
-   return &reasoning{Effort: "minimal"}
+   return nil
 }
 
 // catalog.go marker preserve

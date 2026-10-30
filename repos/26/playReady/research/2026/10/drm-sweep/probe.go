@@ -4,7 +4,6 @@ package main
 import (
    "bufio"
    "bytes"
-   "context"
    "encoding/json"
    "fmt"
    "io"
@@ -68,11 +67,18 @@ type apiError struct {
    } `json:"metadata"`
 }
 
+// chatRequest has no max_tokens field. Output length is not constrained by this
+// program: the field is simply absent, so the provider applies its own maximum
+// for the model. Sending a value was the source of two failures that had nothing
+// to do with the reply itself — an explicit 262,144 on a model whose served
+// context is 262,144 total (prompt included) answered 400, and explicit values
+// of 128,000 and 943,718 answered 402 because max_tokens is a credit
+// reservation, not a spend. Omitting the field removes both, because there is no
+// number left to reserve or to overrun the context with.
 type chatRequest struct {
    Model       string     `json:"model"`
    Messages    []message  `json:"messages"`
    Temperature float64    `json:"temperature"`
-   MaxTokens   int        `json:"max_tokens"`
    Stream      bool       `json:"stream"`
    Reasoning   *reasoning `json:"reasoning,omitempty"`
 }
@@ -109,6 +115,9 @@ type reasoning struct {
 
 // result is what one probe produced. It carries no model id: the caller already
 // knows which model it asked, and it logs and records that id from modelInfo.
+// Millis is the whole probe measured start to finish, which for a
+// mandatory-reasoning model includes every token of thinking before the first
+// character of the reply. It is reported in the progress line and nothing else.
 type result struct {
    Status string
    Text   string
@@ -116,10 +125,20 @@ type result struct {
 }
 
 // probe sends exactly one request carrying `prompt`, which is the task file text
-// with outputDirective already appended, and returns whatever it produced. The
-// reasoning object comes from the catalog metadata (modelInfo.reasoningSpec):
-// off where the model allows it, lowest effort where it does not. No outcome is
+// with outputDirective already appended, and returns whatever it produced.
+//
+// The reasoning object comes from the catalog metadata (modelInfo.reasoningSpec):
+// lowest effort the model accepts, or off where the allowlist says "none" is
+// available. That is the whole of the economising: the request carries no
+// max_tokens, so the provider's own limit applies and a model that thinks for a
+// long time is allowed to finish rather than being cut off. No outcome is
 // followed by a second attempt.
+//
+// The request carries no deadline either, so the stream loop reads until the
+// provider is done. The provider's own output limit and its own behaviour are
+// the only things that end a reply; a connection that stalls instead of closing
+// will block here. Millis is stamped on every return path, so a probe that
+// failed still reports how long it took to fail.
 func probe(client *http.Client, key string, m modelInfo, prompt string) result {
    var r result
    start := time.Now()
@@ -128,7 +147,6 @@ func probe(client *http.Client, key string, m modelInfo, prompt string) result {
       Model:       m.ID,
       Messages:    []message{{Role: "user", Content: prompt}},
       Temperature: 0,
-      MaxTokens:   maxToks,
       Stream:      true,
       Reasoning:   m.reasoningSpec(),
    })
@@ -138,10 +156,7 @@ func probe(client *http.Client, key string, m modelInfo, prompt string) result {
       return r
    }
 
-   ctx, cancel := context.WithTimeout(context.Background(), timeout)
-   defer cancel()
-
-   hr, err := http.NewRequestWithContext(ctx, http.MethodPost, apiBase+"/chat/completions", bytes.NewReader(body))
+   hr, err := http.NewRequest(http.MethodPost, apiBase+"/chat/completions", bytes.NewReader(body))
    if err != nil {
       r.Status, r.Text = "ERROR", "request: "+err.Error()
       r.Millis = time.Since(start).Milliseconds()
@@ -154,12 +169,7 @@ func probe(client *http.Client, key string, m modelInfo, prompt string) result {
    resp, err := client.Do(hr)
    if err != nil {
       r.Millis = time.Since(start).Milliseconds()
-      if strings.Contains(err.Error(), "context deadline exceeded") ||
-         strings.Contains(err.Error(), "Client.Timeout") {
-         r.Status, r.Text = "TIMEOUT", fmt.Sprintf("no response within %s", timeout)
-      } else {
-         r.Status, r.Text = "ERROR", truncate("transport: "+err.Error(), 100)
-      }
+      r.Status, r.Text = "ERROR", truncate("transport: "+err.Error(), 100)
       return r
    }
    defer resp.Body.Close()
@@ -180,7 +190,7 @@ func probe(client *http.Client, key string, m modelInfo, prompt string) result {
    sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 
    // Read the stream to completion: no early break, so the reply is stored
-   // whole. maxToks bounds length; timeout bounds the wait.
+   // whole. Nothing bounds the wait.
    for sc.Scan() {
       line := sc.Text()
       if !strings.HasPrefix(line, "data:") {
@@ -240,13 +250,14 @@ func probe(client *http.Client, key string, m modelInfo, prompt string) result {
       case strings.EqualFold(finish, "content_filter"):
          r.Status, r.Text = "FILTERED", "finish_reason=content_filter"
       case think != "":
-         // The reply never appeared. finish_reason says why: "length" means
-         // reasoning consumed max_tokens, empty means the stream was cut.
+         // The reply never appeared. finish_reason says why: "length" means the
+         // provider's own output limit was reached while reasoning.
          r.Status = "ABSENT"
          r.Text = fmt.Sprintf("%d chars of reasoning, no content (finish_reason=%q)", len([]rune(think)), finish)
       default:
-         r.Status = "TIMEOUT"
-         r.Text = fmt.Sprintf("no content within %s", timeout)
+         // No content and no reasoning: the stream ended without a reply.
+         r.Status = "ERROR"
+         r.Text = fmt.Sprintf("stream ended with no content (finish_reason=%q)", finish)
       }
       return r
    }
