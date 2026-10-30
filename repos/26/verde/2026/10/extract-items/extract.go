@@ -1,12 +1,11 @@
+// extract.go — text extraction: walk decoded JSON, pull out the text, recognise this tool's own previous output.
 package main
 
 import (
    "bytes"
    "encoding/json"
-   "flag"
    "fmt"
-   "os"
-   "sort"
+   "strconv"
    "strings"
 )
 
@@ -171,149 +170,55 @@ func itemLabel(raw json.RawMessage) string {
    return t
 }
 
-func main() {
-   inPath := flag.String("i", "", "input JSON file path")
-   outPath := flag.String("o", "", "output JSON file path (compacted array of {type,text} objects)")
-   removeCount := flag.Int("r", 0, "number of largest items to remove (by compacted size)")
-   flag.Parse()
-
-   if *inPath == "" || *outPath == "" {
-      fmt.Fprintln(os.Stderr, "usage: extract-text -i <input.json> -o <output.json> [-r N]")
-      flag.PrintDefaults()
-      os.Exit(1)
-   }
-
-   if err := run(*inPath, *outPath, *removeCount); err != nil {
-      fmt.Fprintf(os.Stderr, "error: %v\n", err)
-      os.Exit(1)
-   }
-}
-
-func run(inPath, outPath string, removeCount int) error {
-   raw, err := os.ReadFile(inPath)
-   if err != nil {
-      return fmt.Errorf("reading input: %w", err)
-   }
-
-   var root map[string]json.RawMessage
-   if err := json.Unmarshal(raw, &root); err != nil {
-      return fmt.Errorf("parsing JSON: %w", err)
-   }
-
-   itemsRaw, ok := root["items"]
-   if !ok {
-      return fmt.Errorf(`no "items" object found in input JSON`)
-   }
-
-   // Stream-decode the items object so keys are captured in original order.
-   dec := json.NewDecoder(bytes.NewReader(itemsRaw))
-
-   tok, err := dec.Token()
-   if err != nil {
-      return fmt.Errorf("parsing items object: %w", err)
-   }
-   if d, ok := tok.(json.Delim); !ok || d != '{' {
-      return fmt.Errorf(`"items" is not a JSON object`)
-   }
-
-   items := make([]orderedItem, 0)
-   for dec.More() {
-      keyTok, err := dec.Token()
-      if err != nil {
-         return fmt.Errorf("parsing items object: %w", err)
-      }
-      key, ok := keyTok.(string)
-      if !ok {
-         return fmt.Errorf("unexpected token in items object: expected key string, got %v", keyTok)
-      }
-
-      var val json.RawMessage
-      if err := dec.Decode(&val); err != nil {
-         return fmt.Errorf("parsing item %q: %w", key, err)
-      }
-      c, err := compact(val)
-      if err != nil {
-         return fmt.Errorf("compacting item %q: %w", key, err)
-      }
-      items = append(items, orderedItem{Key: key, Val: c})
-   }
-   if _, err := dec.Token(); err != nil { // closing '}'
-      return fmt.Errorf("parsing items object: %w", err)
-   }
-
-   origCompact, err := compact(itemsRaw)
-   if err != nil {
-      return fmt.Errorf("compacting items object: %w", err)
-   }
-   fmt.Printf("Original \"items\" object: %d items, size %s\n", len(items), humanSize(len(origCompact)))
-
-   // If removeCount > 0, drop the N largest items (order of the rest is preserved).
-   if removeCount > 0 {
-      if removeCount > len(items) {
-         return fmt.Errorf("-r %d exceeds number of items (%d)", removeCount, len(items))
-      }
-
-      idx := make([]int, len(items))
-      for i := range idx {
-         idx[i] = i
-      }
-      sort.SliceStable(idx, func(a, b int) bool {
-         return len(items[idx[a]].Val) > len(items[idx[b]].Val)
-      })
-
-      remove := make(map[int]bool, removeCount)
-      fmt.Printf("Removing %d largest item(s):\n", removeCount)
-      for _, i := range idx[:removeCount] {
-         fmt.Printf("  - %s [%s] : %s\n", items[i].Key, itemLabel(items[i].Val), humanSize(len(items[i].Val)))
-         remove[i] = true
-      }
-
-      kept := make([]orderedItem, 0, len(items)-removeCount)
-      for i, it := range items {
-         if !remove[i] {
-            kept = append(kept, it)
+// stripFences removes markdown code fences wrapped around s — e.g.
+//
+//   ```json
+//   [ ... ]
+//   ```
+//
+// Repeated fences are removed too, as are bare ones without a language tag. Only
+// the very start and very end are touched; nothing between them is modified. A
+// trailing fence is only removed if the string actually started with one, so
+// content that merely ends in backticks is left alone.
+func stripFences(s string) string {
+   for i := 0; i < 8; i++ {
+      t := strings.TrimSpace(s)
+      fenced := false
+      if strings.HasPrefix(t, "```") {
+         fenced = true
+         if nl := strings.IndexByte(t, '\n'); nl >= 0 {
+            t = t[nl+1:] // drop the "```json" line
+         } else {
+            t = strings.TrimLeft(t[3:], "`")
          }
+         t = strings.TrimSpace(t)
       }
-      items = kept
-   }
-
-   // One {type,text} object per text block found in each item, in order.
-   // Items with no text contribute nothing.
-   out := make([]textPart, 0, len(items))
-   for _, it := range items {
-      parts, err := textParts(it.Val)
-      if err != nil {
-         return fmt.Errorf("extracting text from item %q: %w", it.Key, err)
+      if fenced && strings.HasSuffix(t, "```") {
+         t = strings.TrimSpace(t[:len(t)-3])
       }
-      out = append(out, parts...)
+      if t == strings.TrimSpace(s) {
+         return t
+      }
+      s = t
    }
-
-   var buf bytes.Buffer
-   enc := json.NewEncoder(&buf)
-   enc.SetEscapeHTML(false) // keep <, >, & as-is instead of \u003c etc.
-   if err := enc.Encode(out); err != nil {
-      return fmt.Errorf("marshaling final output: %w", err)
-   }
-   finalBytes := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
-
-   if err := os.WriteFile(outPath, finalBytes, 0o644); err != nil {
-      return fmt.Errorf("writing output: %w", err)
-   }
-
-   fmt.Printf("Final output: %d text block(s) from %d kept item(s), size %s\n",
-      len(out), len(items), humanSize(len(finalBytes)))
-   fmt.Printf("Wrote %s\n", outPath)
-   return nil
+   return strings.TrimSpace(s)
 }
 
+// unquoteJSON unwraps a JSON string literal, for output that reached the message
+// escaped rather than as raw JSON.
+func unquoteJSON(s string) (string, bool) {
+   if len(s) > 1 && s[0] == '"' && s[len(s)-1] == '"' {
+      if u, err := strconv.Unquote(s); err == nil {
+         return u, true
+      }
+   }
+   return "", false
+}
+
+// kv is one object member buffered so document order survives.
 type kv struct {
    key string
    val json.RawMessage
-}
-
-type orderedItem struct {
-   Key string
-   Val json.RawMessage
 }
 
 // textPart is one piece of text pulled out of an item, plus the "type" that
@@ -324,6 +229,62 @@ type textPart struct {
    Text string `json:"text"`
 }
 
+// parseExportArray parses s as this tool's flat output, strictly: a non-empty
+// array whose elements have only "text" and optional "type", with "text" a
+// string.
+func parseExportArray(s string) ([]textPart, bool) {
+   var elems []json.RawMessage
+   if err := json.Unmarshal([]byte(s), &elems); err != nil || len(elems) == 0 {
+      return nil, false
+   }
+   parts := make([]textPart, 0, len(elems))
+   for _, e := range elems {
+      var obj map[string]json.RawMessage
+      if err := json.Unmarshal(e, &obj); err != nil {
+         return nil, false
+      }
+      for k := range obj {
+         if k != "text" && k != "type" {
+            return nil, false // some other array-of-objects: not our output
+         }
+      }
+      var probe struct {
+         Type string  `json:"type"`
+         Text *string `json:"text"`
+      }
+      if err := json.Unmarshal(e, &probe); err != nil || probe.Text == nil {
+         return nil, false
+      }
+      parts = append(parts, textPart{Type: probe.Type, Text: *probe.Text})
+   }
+   return parts, true
+}
+
+// splitExport reports whether s is output written by this tool — a JSON array
+// whose elements carry only a string "text" and an optional string "type" — and
+// if so returns its elements as text parts. The array may arrive bare, as a JSON
+// string literal, or wrapped in markdown code fences, which is how such output
+// usually ends up pasted back in. A false result means s is ordinary text, i.e.
+// the original prompt.
+func splitExport(s string) ([]textPart, bool) {
+   t := strings.TrimSpace(s)
+   if u, ok := unquoteJSON(t); ok {
+      t = strings.TrimSpace(u)
+   }
+   t = stripFences(t)
+   if len(t) < 2 || t[0] != '[' {
+      return nil, false
+   }
+   if parts, ok := parseExportArray(t); ok {
+      return parts, true
+   }
+   // Tolerate trailing prose after the closing bracket.
+   if i := strings.LastIndexByte(t, ']'); i > 0 {
+      return parseExportArray(t[:i+1])
+   }
+   return nil, false
+}
+
 // textParts returns every text block in an item, in document order.
 func textParts(raw json.RawMessage) ([]textPart, error) {
    parts := make([]textPart, 0, 4)
@@ -332,3 +293,5 @@ func textParts(raw json.RawMessage) ([]textPart, error) {
    }
    return parts, nil
 }
+
+// end extract.go
