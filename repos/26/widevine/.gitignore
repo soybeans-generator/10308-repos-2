@@ -1,6 +1,2 @@
-bdevcert.dat
-cookies.txt
-device_client_id_blob
-device_private_key
-zprivencr.dat
-zprivsig.dat
+*.cert
+msprcore.bla
