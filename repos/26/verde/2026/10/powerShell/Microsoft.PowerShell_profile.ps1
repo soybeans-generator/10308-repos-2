@@ -10,10 +10,11 @@ $androidPath = @()
 # Section 2 — Environment variables, array items & core behavior (can expire — dated)
 # ────────────────────────────────────────────────────────────────────
 
+# 2026-10-30
+$basePath += 'C:\Users\Steven\AppData\Local\Microsoft\WindowsApps'
+
 # 2026-10-11
 $basePath += 'C:\Users\Steven\.cargo\bin'
-#$basePath += 'C:\msvc\autoenv\x64'
-$basePath += 'C:\zig'
 
 # 2026-10-08
 $basePath += 'C:\gron'
