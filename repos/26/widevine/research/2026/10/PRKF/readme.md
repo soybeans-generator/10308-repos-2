@@ -25,9 +25,9 @@ fake.sig.prv.plain - ECC signing key (plaintext private component)
 what I need is:
 
 1. how to extract fake.cert from msprcore.bla
-2. how to extract fake.sig.prv from msprcore.bla
-3. how to decrypt fake.sig.prv
-4. how to create fake.sig.pub
+2. how to extract fake.sig.pub from msprcore.bla
+3. how to extract fake.sig.prv from msprcore.bla
+4. how to decrypt fake.sig.prv
 
 I have these files from the documents:
 
