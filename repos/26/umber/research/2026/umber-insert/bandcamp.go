@@ -15,8 +15,8 @@ import (
 )
 
 // do_bandcamp adds a Bandcamp track to the songs file. The address the
-// user pasted is what gets stored as I, so the duplicate check runs
-// first, before any network request.
+// user pasted is what gets stored as the address slot, so the duplicate
+// check runs first, before any network request.
 func do_bandcamp(address, name string) error {
    songs, err := read_songs(name)
    if err != nil {
@@ -43,17 +43,17 @@ func do_bandcamp(address, name string) error {
       return err
    }
 
-   songs = append(songs, &song{
+   songs = append(songs, new_song(
+      details.Artist,
+      details.Current.Title,
+      address,
       // 700 x 700
-      A: fmt.Sprintf("https://f4.bcbits.com/img/a%d_5", details.ArtId),
-      D: time.Now().Unix(),
-      I: address,
-      R: details.Artist,
-      T: details.Current.Title,
-      Y: release.Year(),
-   })
+      fmt.Sprintf("https://f4.bcbits.com/img/a%d_5", details.ArtId),
+      time.Now().Unix(),
+      release.Year(),
+   ))
    slices.SortFunc(songs, func(a, b *song) int {
-      return cmp.Compare(b.D, a.D)
+      return cmp.Compare(b.timestamp(), a.timestamp())
    })
 
    return write_songs(name, songs)

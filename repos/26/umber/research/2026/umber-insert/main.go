@@ -12,10 +12,22 @@ import (
    "path/filepath"
 )
 
+// Field positions inside the positional record. A is [timestamp, year];
+// B is [artist, title, address, image?]. The image slot is optional, so
+// B is three elements long for tracks without artwork.
+const (
+   posTime    = 0 // A[0]: unix timestamp
+   posYear    = 1 // A[1]: release year
+   posArtist  = 0 // B[0]
+   posTitle   = 1 // B[1]
+   posAddress = 2 // B[2]
+   posImage   = 3 // B[3]: optional
+)
+
 // contains_song reports whether a song with the given address already exists.
 func contains_song(songs []*song, address string) bool {
    for _, s := range songs {
-      if s.I == address {
+      if s.address() == address {
          return true
       }
    }
@@ -153,13 +165,27 @@ type config struct {
    InputFile string `json:"input_file"`
 }
 
+// song is the on-disk record:
+//
+//   {"A": [<unix timestamp>, <release year>],
+//    "B": [<artist>, <title>, <address>, <image?>]}
 type song struct {
-   A string `json:"A,omitempty"`
-   D int64  `json:"D"`
-   I string `json:"I"`
-   R string `json:"R,omitempty"`
-   T string `json:"T"`
-   Y int    `json:"Y"`
+   A [2]int64 `json:"A"`
+   B []string `json:"B"`
+}
+
+// new_song builds a record. The image is appended only when non-empty,
+// so the JSON carries no trailing null for tracks without artwork.
+func new_song(artist, title, address, image string, timestamp int64, year int) *song {
+   b := make([]string, 0, 4)
+   b = append(b, artist, title, address)
+   if image != "" {
+      b = append(b, image)
+   }
+   return &song{
+      A: [2]int64{timestamp, int64(year)},
+      B: b,
+   }
 }
 
 func read_songs(name string) ([]*song, error) {
@@ -174,5 +200,8 @@ func read_songs(name string) ([]*song, error) {
    }
    return songs, nil
 }
+func (s *song) address() string { return s.B[posAddress] }
+
+func (s *song) timestamp() int64 { return s.A[posTime] }
 
 // main.go marker preserve

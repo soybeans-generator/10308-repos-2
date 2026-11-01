@@ -86,20 +86,20 @@ func do_video_id(video_id, name, visitorID string) error {
       return err
    }
 
-   song_data := song{
-      D: time.Now().Unix(),
-      I: watch,
-      R: play.VideoDetails.Author,
-      T: video_title,
-      Y: play.Microformat.PlayerMicroformatRenderer.PublishDate.Year(),
-   }
-   if image != "" {
-      song_data.A = image
-   }
+   // image is "" when the video only has YouTube's default thumbnail;
+   // new_song then leaves B three elements long.
+   song_data := new_song(
+      play.VideoDetails.Author,
+      video_title,
+      watch,
+      image,
+      time.Now().Unix(),
+      play.Microformat.PlayerMicroformatRenderer.PublishDate.Year(),
+   )
 
-   songs = append(songs, &song_data)
+   songs = append(songs, song_data)
    slices.SortFunc(songs, func(a, b *song) int {
-      return cmp.Compare(b.D, a.D)
+      return cmp.Compare(b.timestamp(), a.timestamp())
    })
 
    return write_songs(name, songs)

@@ -50,18 +50,18 @@ func do_soundcloud(address, name string) error {
    }
 
    // Every track has artwork, or at worst the artist avatar as fallback.
-   song_data := song{
-      A: track.artwork(),
-      D: time.Now().Unix(),
-      I: address,
-      R: track.User.Username,
-      T: track.Title,
-      Y: track.DisplayDate.Year(),
-   }
+   song_data := new_song(
+      track.User.Username,
+      track.Title,
+      address,
+      track.artwork(),
+      time.Now().Unix(),
+      track.DisplayDate.Year(),
+   )
 
-   songs = append(songs, &song_data)
+   songs = append(songs, song_data)
    slices.SortFunc(songs, func(a, b *song) int {
-      return cmp.Compare(b.D, a.D)
+      return cmp.Compare(b.timestamp(), a.timestamp())
    })
 
    return write_songs(name, songs)
