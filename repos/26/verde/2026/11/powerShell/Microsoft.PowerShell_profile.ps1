@@ -10,6 +10,9 @@ $androidPath = @()
 # Section 2 — Environment variables, array items & core behavior (can expire — dated)
 # ────────────────────────────────────────────────────────────────────
 
+# 2026-11-01
+$basePath += 'C:\Bento4-SDK\bin'
+
 # 2026-10-11
 $basePath += 'C:\Users\Steven\.cargo\bin'
 
