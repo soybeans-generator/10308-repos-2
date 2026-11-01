@@ -1,7 +1,7 @@
 package playReady
 
 import (
-   "41.neocities.org/diana/playReady/xml"
+   "41.neocities.org/playReady/xml"
    "crypto/aes"
    "crypto/ecdh"
    "crypto/ecdsa"

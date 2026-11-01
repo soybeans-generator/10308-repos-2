@@ -6,7 +6,7 @@ import (
    "log"
    "os"
 
-   "41.neocities.org/diana/playReady"
+   "41.neocities.org/playReady"
 )
 
 func main() {

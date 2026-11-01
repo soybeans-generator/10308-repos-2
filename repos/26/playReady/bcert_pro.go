@@ -1,7 +1,7 @@
 package playReady
 
 import (
-   "41.neocities.org/diana/playReady/xml"
+   "41.neocities.org/playReady/xml"
    "encoding/binary"
    "encoding/hex"
    "errors"

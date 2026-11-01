@@ -20,8 +20,7 @@ First PlayReady commit, June 3 2025:
 
 ## Microsoft Edge
 
-<details>
-<summary>Part 1 — clear browsing data</summary>
+Part 1 — clear browsing data:
 
 1. Settings and more
 2. Settings
@@ -31,10 +30,7 @@ First PlayReady commit, June 3 2025:
 6. Cookies and other site data, Cached images and files
 7. Clear now
 
-</details>
-
-<details>
-<summary>Part 2 — disable Widevine DRM</summary>
+Part 2 — disable Widevine DRM:
 
 1. Go to `edge://flags`
 2. Search `DRM`
@@ -42,8 +38,6 @@ First PlayReady commit, June 3 2025:
 4. Visit `bitmovin.com/demos/drm`
 5. DASH
 6. Load
-
-</details>
 
 ## Contact
 

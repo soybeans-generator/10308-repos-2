@@ -10,7 +10,7 @@ import (
    "errors"
    "slices"
 
-   "41.neocities.org/diana/playReady/xml"
+   "41.neocities.org/playReady/xml"
    "github.com/emmansun/gmsm/padding"
 )
 
