@@ -32,7 +32,7 @@ const (
    // smaller models server-side so they never reach this program. That is the
    // only context check: nothing re-tests the floor locally, so this assumes the
    // catalog honours the parameter.
-   minContext = 262_000
+   minContext = 263_000
 
    // outputDirective is appended to every prompt read from -prompt, so a model
    // answers in one of two shapes and never rambles: a STEPS line followed by

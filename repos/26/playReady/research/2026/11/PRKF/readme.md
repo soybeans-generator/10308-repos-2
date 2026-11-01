@@ -17,26 +17,24 @@ https://packetstorm.news/files/id/208299
 
 ## prompt
 
-using the attached documents, I was able to create the attached scripts to
-extract these from msprcore.bla:
+using the attached document I was able to create a script, which can extract
+these from msprcore.bla:
 
 - `*.sig.prv`
 Obfuscated private ECC key component used for signing license requests
 - `*.sig.pub`
 Public ECC key component used for signing license requests
-
-then I was able to create the attached scripts to create:
-
-- `*.sig.plain`
-Plaintext value of ECC key component used for signing license requests
-
-I think all that is left is getting these:
-
 - `*.enc.prv`
 Obfuscated private ECC key component used for license blob encryption
 - `*.enc.pub`
 Public ECC key component used for license blob encryption
+
+and also decrypt `*.sig.prv` into this:
+
+- `*.sig.plain`
+Plaintext value of ECC key component used for signing license requests
+
+so I think the last step is decrypting `*.enc.prv` into this:
+
 - `*.enc.plain`
 Plaintext value of a private ECC key component used for license blob encryption
-
-but I am not sure if that is in msprcore.bla or somewhere else
