@@ -18,22 +18,30 @@ import (
    "github.com/emmansun/gmsm/padding"
 )
 
-// EncodeLicenseRequest creates and serializes a LicenseRequest protobuf message.
-func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
-   psshBytes, err := p.Encode()
-   if err != nil {
-      return nil, err
-   }
-   psshDataField := protobuf.Bytes(1, psshBytes)
-   widevinePsshData := protobuf.Embed(1, psshDataField)
-   contentIdentification := protobuf.Embed(2, widevinePsshData)
+const (
+   kWrappingKeyLabel    = "ENCRYPTION"
+   kWrappingKeySizeBits = 128
+)
 
-   message := protobuf.Message{
-      protobuf.Bytes(1, clientId),
-      contentIdentification,
-      protobuf.Varint(3, 1), // NEW
+// protobuf.go marker preserve
+func DecodePrivateKey(pemData []byte) (*rsa.PrivateKey, error) {
+   block, _ := pem.Decode(pemData)
+   if block == nil {
+      return nil, errors.New("failed to decode PEM block containing private key")
    }
-   return message.Encode()
+   key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+   if err == nil {
+      rsaKey, ok := key.(*rsa.PrivateKey)
+      if !ok {
+         return nil, errors.New("key in PEM block is not an RSA private key")
+      }
+      return rsaKey, nil
+   }
+   rsaKey, errPkcs1 := x509.ParsePKCS1PrivateKey(block.Bytes)
+   if errPkcs1 != nil {
+      return nil, fmt.Errorf("failed to parse private key: PKCS#8 (%v), PKCS#1 (%v)", err, errPkcs1)
+   }
+   return rsaKey, nil
 }
 
 // EncodeSignedMessage envelopes the request with an RSA signature.
@@ -50,12 +58,41 @@ func EncodeSignedMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte
    return message.Encode()
 }
 
+// GetKey searches for a key by its ID in a slice of KeyContainers.
+// If the key is found, it returns the key and a nil error.
+// If the key is not found, it returns nil and an error.
+func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
+   for _, key := range keys {
+      if bytes.Equal(key.Id, id) {
+         return key.Key, nil
+      }
+   }
+   return nil, errors.New("key not found")
+}
+
 func decodeErrorFromMessage(message protobuf.Message) error {
    errorCode, ok := message.Field(1)
    if !ok || errorCode == nil {
       return errors.New("widevine license error: unknown code")
    }
    return fmt.Errorf("widevine license error: code %v", errorCode.Numeric)
+}
+
+func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
+   hash := sha1.New()
+   hash.Write(requestData)
+   hashed := hash.Sum(nil)
+   opts := &rsa.PSSOptions{
+      SaltLength: rsa.PSSSaltLengthEqualsHash,
+      Hash:       crypto.SHA1,
+   }
+   return rsa.SignPSS(noopReader{}, privateKey, crypto.SHA1, hashed, opts)
+}
+
+type KeyContainer struct {
+   Id  []byte
+   Iv  []byte
+   Key []byte
 }
 
 func DecodeLicenseResponse(responseData []byte, requestData []byte, privateKey *rsa.PrivateKey) ([]*KeyContainer, error) {
@@ -139,18 +176,10 @@ func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sess
    return keys, nil
 }
 
-// Encode serializes the PsshData struct into the protobuf wire format.
-func (p *PsshData) Encode() ([]byte, error) {
-   var message protobuf.Message
-   for _, keyId := range p.KeyIds {
-      if len(keyId) > 0 {
-         message = append(message, protobuf.Bytes(2, keyId))
-      }
-   }
-   if len(p.ContentId) > 0 {
-      message = append(message, protobuf.Bytes(4, p.ContentId))
-   }
-   return message.Encode()
+// PsshData represents the Widevine-specific protobuf message.
+type PsshData struct {
+   KeyIds    [][]byte
+   ContentId []byte
 }
 
 // DecodePsshData parses the protobuf wire format into a PsshData struct.
@@ -173,71 +202,42 @@ func DecodePsshData(data []byte) (*PsshData, error) {
    return p, nil
 }
 
-const (
-   kWrappingKeyLabel    = "ENCRYPTION"
-   kWrappingKeySizeBits = 128
-)
-
-func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
-   hash := sha1.New()
-   hash.Write(requestData)
-   hashed := hash.Sum(nil)
-   opts := &rsa.PSSOptions{
-      SaltLength: rsa.PSSSaltLengthEqualsHash,
-      Hash:       crypto.SHA1,
+// Encode serializes the PsshData struct into the protobuf wire format.
+func (p *PsshData) Encode() ([]byte, error) {
+   var message protobuf.Message
+   for _, keyId := range p.KeyIds {
+      if len(keyId) > 0 {
+         message = append(message, protobuf.Bytes(2, keyId))
+      }
    }
-   return rsa.SignPSS(noopReader{}, privateKey, crypto.SHA1, hashed, opts)
+   if len(p.ContentId) > 0 {
+      message = append(message, protobuf.Bytes(4, p.ContentId))
+   }
+   return message.Encode()
 }
 
-type KeyContainer struct {
-   Id  []byte
-   Iv  []byte
-   Key []byte
-}
+// EncodeLicenseRequest creates and serializes a LicenseRequest protobuf message.
+func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
+   psshBytes, err := p.Encode()
+   if err != nil {
+      return nil, err
+   }
+   psshDataField := protobuf.Bytes(1, psshBytes)
+   widevinePsshData := protobuf.Embed(1, psshDataField)
+   contentIdentification := protobuf.Embed(2, widevinePsshData)
 
-// PsshData represents the Widevine-specific protobuf message.
-type PsshData struct {
-   KeyIds    [][]byte
-   ContentId []byte
+   message := protobuf.Message{
+      protobuf.Bytes(1, clientId),
+      contentIdentification,
+      protobuf.Varint(3, 1), // NEW
+   }
+   return message.Encode()
 }
 
 type noopReader struct{}
 
 func (noopReader) Read(p []byte) (n int, err error) {
    return len(p), nil
-}
-
-// protobuf.go marker preserve
-func DecodePrivateKey(pemData []byte) (*rsa.PrivateKey, error) {
-   block, _ := pem.Decode(pemData)
-   if block == nil {
-      return nil, errors.New("failed to decode PEM block containing private key")
-   }
-   key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-   if err == nil {
-      rsaKey, ok := key.(*rsa.PrivateKey)
-      if !ok {
-         return nil, errors.New("key in PEM block is not an RSA private key")
-      }
-      return rsaKey, nil
-   }
-   rsaKey, errPkcs1 := x509.ParsePKCS1PrivateKey(block.Bytes)
-   if errPkcs1 != nil {
-      return nil, fmt.Errorf("failed to parse private key: PKCS#8 (%v), PKCS#1 (%v)", err, errPkcs1)
-   }
-   return rsaKey, nil
-}
-
-// GetKey searches for a key by its ID in a slice of KeyContainers.
-// If the key is found, it returns the key and a nil error.
-// If the key is not found, it returns nil and an error.
-func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
-   for _, key := range keys {
-      if bytes.Equal(key.Id, id) {
-         return key.Key, nil
-      }
-   }
-   return nil, errors.New("key not found")
 }
 
 // widevine.go marker preserve

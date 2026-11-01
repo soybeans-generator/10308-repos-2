@@ -1,6 +1,7 @@
 package main
 
 import (
+   "41.neocities.org/widevine"
    "bytes"
    "cmp"
    "encoding/json"
@@ -10,8 +11,6 @@ import (
    "net/http"
    "os"
    "slices"
-
-   "41.neocities.org/diana/widevine"
 )
 
 // demo.unified-streaming.com/k8s/features
