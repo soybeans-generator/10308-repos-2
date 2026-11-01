@@ -1,6 +1,12 @@
 // umber.js marker preserve
 'use strict';
 
+// New record shape:
+//   A: [ unix timestamp, release year ]
+//   B: [ artist, title, url, image? ]
+const D = 0; // row.A: timestamp
+const Y = 1; // row.A: year
+
 const formatter = new Intl.DateTimeFormat('en', {
    weekday: 'short',
    month: 'short',
@@ -18,15 +24,17 @@ function date(timestamp) {
 }
 
 function media(row) {
-   let image = row.A;
+   const [,, href, thumb] = row.B;
+
+   let image = thumb;
    if (image === undefined) {
-      // A is omitted only for YouTube rows on the default thumbnail
-      const video = new URL(row.I).searchParams.get('v');
+      // B[3] is omitted only for YouTube rows on the default thumbnail
+      const video = new URL(href).searchParams.get('v');
       image = 'https://i.ytimg.com/vi_webp/' + video + '/sddefault.webp';
    }
 
    return {
-      href: row.I,
+      href: href,
       src: image
    };
 }
@@ -35,11 +43,13 @@ const template = document.querySelector('template');
 const limit = 10;
 
 function label(row) {
-   const R = row.I.startsWith('https://youtube.com/') && row.R.endsWith(' - Topic')
-      ? row.R.slice(0, -' - Topic'.length)
-      : row.R;
+   const [R, T, I] = row.B;
 
-   return row.T.toLowerCase().includes(R.toLowerCase()) ? row.T : R + ' - ' + row.T;
+   const artist = I.startsWith('https://youtube.com/') && R.endsWith(' - Topic')
+      ? R.slice(0, -' - Topic'.length)
+      : R;
+
+   return T.toLowerCase().includes(artist.toLowerCase()) ? T : artist + ' - ' + T;
 }
 
 function build(row) {
@@ -57,10 +67,10 @@ function build(row) {
    title.textContent = label(row);
 
    const release = clone.querySelector('.release');
-   release.textContent = row.Y.toString(10);
+   release.textContent = row.A[Y].toString(10);
 
    const posted = clone.querySelector('.post');
-   posted.textContent = date(row.D);
+   posted.textContent = date(row.A[D]);
 
    const td_view = clone.querySelector('td.view');
    const th_view = clone.querySelector('th.view');
@@ -88,7 +98,7 @@ async function main() {
 
    // `d` is measured from the oldest D in the whole JSON, so fix that
    // first, before any `?t=` filtering changes the list
-   const oldest = records.reduce((min, row) => Math.min(min, row.D), Infinity);
+   const oldest = records.reduce((min, row) => Math.min(min, row.A[D]), Infinity);
 
    if (query.has('t')) {
       const needle = query.get('t').toLowerCase();
@@ -100,7 +110,7 @@ async function main() {
    const offset = query.get('d');
    const start = offset === null
       ? 0
-      : records.findIndex(row => row.D <= oldest + Number(offset));
+      : records.findIndex(row => row.A[D] <= oldest + Number(offset));
 
    if (start === -1) {
       return;
@@ -110,7 +120,7 @@ async function main() {
    document.getElementById('figures').append(...chunk.map(build));
 
    // the value for the page whose first row is `records[index]`
-   const stamp = index => String(records[index].D - oldest);
+   const stamp = index => String(records[index].A[D] - oldest);
 
    const older = document.getElementById('older');
    if (start + limit < records.length) {
