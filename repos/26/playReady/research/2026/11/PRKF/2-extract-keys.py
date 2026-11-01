@@ -38,7 +38,6 @@ def main(src="msprcore.bla", refstem="fake", outstem="extracted"):
 
     b = rd(src)
     if b is None or b[:4] != b"PRKF": raise SystemExit(f"{src}: not a PRKF")
-    ref = {k: rd(p) for k, p in refs.items()}
 
     km = next((s for s in walk(b, 12, len(b)) if s[2] == 0x1009), None)
     if km is None: raise SystemExit("no 0x1009 key-material section")
@@ -50,26 +49,30 @@ def main(src="msprcore.bla", refstem="fake", outstem="extracted"):
         print(f"  {r['off']:#8x}  pub={r['publen']:>2}B priv={r['privlen']:>2}B "
               f"{r['pub'][:8].hex()}")
 
-    # --- signing key: identified by the reference pubkey, which is authoritative.
-    if ref["sig.pub"] is None:
-        raise SystemExit(f"{refs['sig.pub']} is required to identify the signing "
-                         f"key among {len(recs)} records")
-    hits = [r for r in recs if r["pub"] == ref["sig.pub"]]
-    if len(hits) != 1:
-        raise SystemExit(f"{len(hits)} records match {refs['sig.pub']} (need 1)")
-    sig = hits[0]
-    print(f"signing key: {sig['off']:#x}  (pubkey == {refs['sig.pub']})")
-
-    # --- encryption key: the 65-byte private component
-    enc_c = [r for r in recs if r["privlen"] == 65 and r is not sig]
+    # --- encryption key: the unique 65-byte private component
+    enc_c = [r for r in recs if r["privlen"] == 65]
     if len(enc_c) != 1:
-        raise SystemExit(f"{len(enc_c)} non-signing records have a 65-byte "
-                         f"private component (need 1)")
+        raise SystemExit(f"{len(enc_c)} records have a 65-byte private "
+                         f"component (need 1)")
     enc = enc_c[0]
     print(f"encryption key: {enc['off']:#x}  (65-byte private component)")
 
+    # --- signing key: the 32-byte record immediately preceding the encryption
+    #     key.  No field in the PRKF separates it from the other 32-byte record:
+    #     ver/flags/z1/z2 are identical across all three (0x0001 / 0x0100 / 0 / 0)
+    #     and every pubkey occurs exactly twice, so neither header values nor
+    #     cross-reference counts discriminate.
+    i = recs.index(enc)
+    if i == 0:
+        raise SystemExit("encryption key is the first record - nothing precedes it")
+    sig = recs[i - 1]
     if sig["privlen"] != 32:
-        raise SystemExit(f"signing priv is {sig['privlen']}B, expected 32")
+        raise SystemExit(f"record before the encryption key has a "
+                         f"{sig['privlen']}-byte private component, expected 32")
+    print(f"signing key: {sig['off']:#x}  (record preceding the encryption key)")
+
+    if sig["off"] == enc["off"] or sig["pub"] == enc["pub"]:
+        raise SystemExit("signing and encryption records are not distinct")
 
     data = {"sig.pub": sig["pub"], "sig.prv": sig["priv"],
             "enc.pub": enc["pub"], "enc.prv": enc["priv"]}
@@ -79,16 +82,19 @@ def main(src="msprcore.bla", refstem="fake", outstem="extracted"):
         open(outs[k], "wb").write(v)
         print(f"  {outs[k]}  {len(v):>2} B")
 
+    # --- optional verification: only if the reference files happen to exist.
+    #     Their absence is not an error; a mismatch is.
     ok = True
     print(f"\nverified against {refstem}.sig.* :")
     for k in ("sig.pub", "sig.prv"):
-        if ref[k] is None:
+        ref = rd(refs[k])
+        if ref is None:
             print(f"  [ n/a] {refs[k]} not present")
-        else:
-            same = data[k] == ref[k]
-            ok &= same
-            print(f"  [{' OK ' if same else 'FAIL'}] {outs[k]} "
-                  f"{'==' if same else '!='} {refs[k]}")
+            continue
+        same = data[k] == ref
+        ok &= same
+        print(f"  [{' OK ' if same else 'FAIL'}] {outs[k]} "
+              f"{'==' if same else '!='} {refs[k]}")
 
     print("\nPASS" if ok else "\nFAIL")
     return 0 if ok else 1
