@@ -1,66 +1,55 @@
-// openrouter.go marker preserve
 package main
 
 import (
+   "cmp"
    "encoding/json"
    "fmt"
    "io"
    "log"
    "net/http"
    "net/url"
+   "os"
+   "slices"
    "strconv"
+   "strings"
+   "time"
 )
 
-// ---------------------------------------------------------------------------
-// Endpoints
-// ---------------------------------------------------------------------------
+// The model page URL names a model by its short slug,
+// deepseek/deepseek-v4.1-flash-1017, but stats/endpoint only answers to the
+// dated permaslug, deepseek/deepseek-v4.1-flash-20261017. The catalog is the
+// only map between them, so it is always the first request.
+const (
+   catalogURL = "https://openrouter.ai/api/frontend/v1/models/find"
 
-// One request for the whole catalog (confirmed by capture). The
-// min_intelligence_index / max_output_price filters are appended by
-// catalogURL() when the corresponding flags are set — both are documented
-// server-side filters on the models list endpoint. The 1M minimum
-// context length is likewise a documented server-side filter ("context"
-// param) and is baked into the base URL.
-const catalogBaseURL = "https://openrouter.ai/api/frontend/v1/models/find" +
-   "?context=1000000"
+   statsURL = "https://openrouter.ai/api/frontend/v1/stats/endpoint" +
+      "?perfWorkload=text_generation&permaslug=%s"
+)
 
-// Per-model request for provider throughput stats. Only two params are
-// needed: permaslug (which model) and perfWorkload (which workload the
-// throughput is measured on). latencyMetric and variant were tested
-// and dropped — omitting either alone reproduces the baseline exactly,
-// omitting perfWorkload changes the values.
-const statsURLTemplate = "https://openrouter.ai/api/frontend/v1/stats/endpoint" +
-   "?perfWorkload=text_generation&permaslug=%s"
-
-// catalogURL appends the active server-side filters to the base URL.
-func catalogURL(f filters) string {
-   u, err := url.Parse(catalogBaseURL)
+// fetchPermaslug looks slug up in the catalog and returns the permaslug that
+// stats/endpoint answers to.
+func fetchPermaslug(c *http.Client, slug string) (string, error) {
+   body, err := get(c, catalogURL)
    if err != nil {
-      return catalogBaseURL // constant URL; parse cannot fail
+      return "", err
    }
-   q := u.Query()
-   if f.minIntelligenceIndex > 0 {
-      q.Set("min_intelligence_index", formatFloat(f.minIntelligenceIndex))
+   var cat findResponse
+   if err := json.Unmarshal(body, &cat); err != nil {
+      return "", err
    }
-   if f.maxOutputPrice > 0 {
-      q.Set("max_output_price", formatFloat(f.maxOutputPrice))
+   for _, cm := range cat.Data.Models {
+      if strings.EqualFold(cm.Slug, slug) || strings.EqualFold(cm.Permaslug, slug) {
+         return cm.Permaslug, nil
+      }
    }
-   u.RawQuery = q.Encode()
-   return u.String()
+   return "", fmt.Errorf("%q not in catalog (%d models)", slug, len(cat.Data.Models))
 }
 
-// formatFloat renders 33.0 as "33" and 2.5 as "2.5", so the logged URLs
-// match the documented examples.
-func formatFloat(v float64) string {
-   return strconv.FormatFloat(v, 'f', -1, 64)
-}
-
-func httpGet(c *http.Client, rawURL string) ([]byte, error) {
-   req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+func get(c *http.Client, u string) ([]byte, error) {
+   req, err := http.NewRequest(http.MethodGet, u, nil)
    if err != nil {
       return nil, err
    }
-   req.Header.Set("User-Agent", "tp-rank/1.0")
    log.Println(req.Method, req.URL)
    resp, err := c.Do(req)
    if err != nil {
@@ -68,14 +57,25 @@ func httpGet(c *http.Client, rawURL string) ([]byte, error) {
    }
    defer resp.Body.Close()
    if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+      return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, req.URL)
    }
    return io.ReadAll(resp.Body)
 }
 
-// perTokToMTok converts a per-token price string ("0.000001") into a
-// per-million-token dollar figure (1.0). Empty or malformed strings
-// become 0.
+func main() {
+   log.SetFlags(log.Ltime) // HMS only, no date
+
+   if len(os.Args) != 2 {
+      fmt.Fprintf(os.Stderr, "usage: %s <model-url>\n", os.Args[0])
+      os.Exit(2)
+   }
+   if err := run(os.Args[1]); err != nil {
+      fmt.Fprintln(os.Stderr, err)
+      os.Exit(1)
+   }
+}
+
+// perTokToMTok converts a per-token price string into $/Mtok.
 func perTokToMTok(s string) float64 {
    v, err := strconv.ParseFloat(s, 64)
    if err != nil || v < 0 {
@@ -84,123 +84,115 @@ func perTokToMTok(s string) float64 {
    return v * 1_000_000
 }
 
-// ---------------------------------------------------------------------------
-// Math helpers
-// ---------------------------------------------------------------------------
+func run(rawURL string) error {
+   client := &http.Client{Timeout: 30 * time.Second}
 
-// percentile returns the p-th percentile of ascending-sorted data with
-// linear interpolation (numpy's default method): fractional index
-// i = (p/100) * (n-1), interpolate between neighbors.
-func percentile(sorted []float64, p float64) float64 {
-   n := len(sorted)
-   if n == 0 {
-      return 0
-   }
-   if n == 1 {
-      return sorted[0]
-   }
-   i := p / 100 * float64(n-1)
-   lo := int(i)
-   if lo+1 >= n {
-      return sorted[n-1]
-   }
-   frac := i - float64(lo)
-   return sorted[lo] + frac*(sorted[lo+1]-sorted[lo])
-}
-
-type benchmarks struct {
-   AA *struct {
-      IntelligenceIndex float64 `json:"intelligence_index"`
-   } `json:"aa"`
-}
-
-// ---------------------------------------------------------------------------
-// Catalog: one request -> server-filtered -> open-weights candidates
-// ---------------------------------------------------------------------------
-
-type candidate struct {
-   slug         string
-   name         string
-   intelligence float64
-   context      int
-   inputPrice   float64 // $/Mtok input
-   outputPrice  float64 // $/Mtok output
-}
-
-// fetchCandidates requests the catalog with the server-side filters
-// (context length, intelligence index, output price) already applied,
-// then narrows it client-side to open-weights models. Context length
-// and pricing are taken from here too: the model object carries
-// context_length, and its nested default endpoint carries the pricing
-// OpenRouter quotes for the model.
-func fetchCandidates(c *http.Client, f filters) ([]*candidate, int, error) {
-   body, err := httpGet(c, catalogURL(f))
+   slug, err := slugFromURL(rawURL)
    if err != nil {
-      return nil, 0, err
+      return err
    }
-   var resp findResponse
-   if err := json.Unmarshal(body, &resp); err != nil {
-      return nil, 0, fmt.Errorf("decoding catalog: %w", err)
+   permaslug, err := fetchPermaslug(client, slug)
+   if err != nil {
+      return err
+   }
+   if permaslug != slug {
+      log.Printf("resolved %s -> %s", slug, permaslug)
+   }
+   provs, err := fetchProviders(client, permaslug)
+   if err != nil {
+      return err
+   }
+   if len(provs) == 0 {
+      return fmt.Errorf("%s: no provider throughput data", permaslug)
    }
 
-   total := len(resp.Data.Models)
-   seen := make(map[string]bool)
-   var cands []*candidate
-   for _, m := range resp.Data.Models {
-      // Open weights = weights published on Hugging Face.
-      if m.Permaslug == "" || m.HfSlug == "" {
-         continue
+   for i, p := range provs {
+      if i > 0 {
+         fmt.Println()
       }
-      // The catalog can contain duplicate entries per permaslug.
-      if seen[m.Permaslug] {
-         continue
-      }
-      seen[m.Permaslug] = true
-
-      cd := &candidate{
-         slug:        m.Permaslug,
-         name:        m.Name,
-         context:     m.ContextLength,
-         inputPrice:  perTokToMTok(m.Endpoint.Pricing.Prompt),
-         outputPrice: perTokToMTok(m.Endpoint.Pricing.Completion),
-      }
-      if b, ok := resp.Data.Benchmarks[m.Permaslug]; ok && b.AA != nil {
-         cd.intelligence = b.AA.IntelligenceIndex
-      }
-      cands = append(cands, cd)
+      fmt.Printf("provider: %s\n", p.name)
+      fmt.Printf("output/M: $%.2f\n", p.outputPrice)
+      fmt.Printf("P50 TPS: %.0f\n", p.p50)
    }
-   return cands, total, nil
+   return nil
 }
 
-// ---------------------------------------------------------------------------
-// Catalog types (from the models/find payload)
-// ---------------------------------------------------------------------------
+// slugFromURL takes the last two path segments, which is <author>/<model> for
+// both /author/model and /models/author/model.
+func slugFromURL(raw string) (string, error) {
+   u, err := url.Parse(strings.TrimSpace(raw))
+   if err != nil {
+      return "", err
+   }
+   segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+   if len(segs) < 2 || segs[len(segs)-2] == "" || segs[len(segs)-1] == "" {
+      return "", fmt.Errorf("%q: no model in URL, want openrouter.ai/<author>/<model>", raw)
+   }
+   return segs[len(segs)-2] + "/" + segs[len(segs)-1], nil
+}
 
 type catalogModel struct {
-   Permaslug     string `json:"permaslug"`
-   Name          string `json:"name"`
-   HfSlug        string `json:"hf_slug"` // non-empty == open weights
-   ContextLength int    `json:"context_length"`
-   Endpoint      struct {
-      Pricing struct {
-         Prompt     string `json:"prompt"`
-         Completion string `json:"completion"`
-      } `json:"pricing"`
-   } `json:"endpoint"`
-}
-
-// filters holds the server-side catalog filters. Zero values mean
-// "don't filter" — the query parameter is simply omitted.
-type filters struct {
-   minIntelligenceIndex float64
-   maxOutputPrice       float64
+   Slug      string `json:"slug"`
+   Permaslug string `json:"permaslug"`
 }
 
 type findResponse struct {
    Data struct {
-      Models     []catalogModel        `json:"models"`
-      Benchmarks map[string]benchmarks `json:"benchmarks"`
+      Models []catalogModel `json:"models"`
    } `json:"data"`
 }
 
-// openrouter.go marker preserve
+type provider struct {
+   name        string
+   p50         float64
+   outputPrice float64 // $/Mtok
+}
+
+// fetchProviders returns every provider with throughput, fastest first.
+func fetchProviders(c *http.Client, permaslug string) ([]provider, error) {
+   body, err := get(c, fmt.Sprintf(statsURL, url.QueryEscape(permaslug)))
+   if err != nil {
+      return nil, err
+   }
+   var sr statsResponse
+   if err := json.Unmarshal(body, &sr); err != nil {
+      return nil, err
+   }
+
+   // A provider appears once per quantization, so duplicates collapse to the
+   // slowest one — that is what you actually get from that provider.
+   idx := map[string]int{}
+   var out []provider
+   for _, ep := range sr.Data {
+      if ep.ProviderName == "" || ep.Stats == nil || ep.Stats.P50Throughput <= 0 {
+         continue
+      }
+      p := provider{
+         name:        ep.ProviderName,
+         p50:         ep.Stats.P50Throughput,
+         outputPrice: perTokToMTok(ep.Pricing.Completion),
+      }
+      if i, seen := idx[p.name]; seen {
+         if p.p50 < out[i].p50 {
+            out[i] = p
+         }
+         continue
+      }
+      idx[p.name] = len(out)
+      out = append(out, p)
+   }
+   slices.SortFunc(out, func(a, b provider) int { return cmp.Compare(b.p50, a.p50) })
+   return out, nil
+}
+
+type statsResponse struct {
+   Data []struct {
+      ProviderName string `json:"provider_name"`
+      Pricing      struct {
+         Completion string `json:"completion"`
+      } `json:"pricing"`
+      Stats *struct {
+         P50Throughput float64 `json:"p50_throughput"`
+      } `json:"stats"`
+   } `json:"data"`
+}
