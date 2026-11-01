@@ -6,33 +6,37 @@ MediaFoundationCdmStore\x86_64\0123456789ABCDEF0123456789ABCDEF\
 com.microsoft.playready\Cache\msprcore.bla
 ~~~
 
+## Microsoft Warbird and PMP Security Research
+
+- <https://security-explorations.com/materials/wbpmp_doc.md.txt>
+- https://packetstorm.news/files/id/182931
+
+## Microsoft PlayReady Activation Protocol Issues
+
 https://packetstorm.news/files/id/208299
 
-I am trying to generate client identity, as shown in the documents. I assume
-this is derived from fake.sig.prv.plain using normal methods:
+## prompt
 
-fake.sig.pub       - ECC signing key (public component)
+using the attached documents, I was able to create the attached scripts to
+extract these from msprcore.bla:
 
-these are embedded as is in msprcore.bla:
+- `*.sig.prv`
+Obfuscated private ECC key component used for signing license requests
+- `*.sig.pub`
+Public ECC key component used for signing license requests
 
-- fake.cert          - PlayReady Identity Certificate Chain
-- fake.sig.prv       - ECC signing key (encrypted private component)
+then I was able to create the attached scripts to create:
 
-and this is derived by decrypting fake.sig.prv:
+- `*.sig.plain`
+Plaintext value of ECC key component used for signing license requests
 
-fake.sig.prv.plain - ECC signing key (plaintext private component)
+I think all that is left is getting these:
 
-what I need is:
+- `*.enc.prv`
+Obfuscated private ECC key component used for license blob encryption
+- `*.enc.pub`
+Public ECC key component used for license blob encryption
+- `*.enc.plain`
+Plaintext value of a private ECC key component used for license blob encryption
 
-1. how to extract fake.cert from msprcore.bla
-2. how to extract fake.sig.pub from msprcore.bla
-3. how to extract fake.sig.prv from msprcore.bla
-4. how to decrypt fake.sig.prv
-
-I have these files from the documents:
-
-- msprcore.bla
-- fake.cert
-- fake.sig.prv
-- fake.sig.prv.plain
-- fake.sig.pub
+but I am not sure if that is in msprcore.bla or somewhere else

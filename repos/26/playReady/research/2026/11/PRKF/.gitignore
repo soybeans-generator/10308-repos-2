@@ -1,4 +1,8 @@
-fake.sig.prv
-fake.sig.prv.plain
+*.enc.prv
+*.enc.pub
+*.sig.prv
+*.sig.prv.plain
+*.sig.pub
 findprsub.txt
+msprcore.bla
 prsubs.json
