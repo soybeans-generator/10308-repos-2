@@ -1,6 +1,12 @@
 *.bin
+*.dll
 *.enc.prv
 *.enc.pub
+*.exe
+*.lib
+*.pdb
+*.sig.prv
+*.sig.pub
 *.txt
+*.xml
 oracle
-wbtool.exe
