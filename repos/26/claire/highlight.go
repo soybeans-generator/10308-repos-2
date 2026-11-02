@@ -1,3 +1,4 @@
+// highlight.go marker preserve
 package claire
 
 import (
@@ -189,4 +190,4 @@ func syntaxHighlight(source string, fset *token.FileSet, typeOffsets map[int]str
    return template.HTML(buf.String()), nil
 }
 
-// highlight.go
+// highlight.go marker preserve

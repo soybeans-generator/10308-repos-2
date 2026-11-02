@@ -1,3 +1,4 @@
+// parser.go marker preserve
 package claire
 
 import (
@@ -178,4 +179,4 @@ func (p *PackageDoc) Render(outputPath string) error {
    return tmpl.Execute(file, p)
 }
 
-// parser.go
+// parser.go marker preserve
