@@ -4,31 +4,56 @@ package hls
 import (
    "fmt"
    "net/url"
+   "slices"
    "strconv"
    "strings"
 )
 
-// populateStreamInfAttributes updates a StreamInf's fields from a map of attributes.
-func populateStreamInfAttributes(stream *StreamInf, attrs map[string]string) error {
-   stream.Codecs = attrs["CODECS"]
-   stream.Resolution = attrs["RESOLUTION"]
-   stream.FrameRate = attrs["FRAME-RATE"]
-   stream.Subtitles = attrs["SUBTITLES"]
-
-   if val := attrs["BANDWIDTH"]; val != "" {
-      bw, err := strconv.Atoi(val)
-      if err != nil {
-         return fmt.Errorf("invalid BANDWIDTH: %w", err)
+// populateStreamInfAttributes merges attrs into stream.
+//
+// A field is written only when the attribute is actually present (and non-empty)
+// in attrs, so a tag that omits an optional attribute can never erase a value
+// parsed from another tag that points at the same URI.
+//
+// overwrite selects the merge policy:
+//   - true  : values present in attrs replace existing ones (the primary,
+//     lowest-bandwidth variant).
+//   - false : values present in attrs only fill fields that are still empty.
+func populateStreamInfAttributes(stream *StreamInf, attrs map[string]string, overwrite bool) error {
+   setString := func(dst *string, key string) {
+      val, ok := attrs[key]
+      if !ok || val == "" {
+         return
       }
-      stream.Bandwidth = bw
+      if overwrite || *dst == "" {
+         *dst = val
+      }
    }
+   setString(&stream.Codecs, "CODECS")
+   setString(&stream.Resolution, "RESOLUTION")
+   setString(&stream.FrameRate, "FRAME-RATE")
+   setString(&stream.Subtitles, "SUBTITLES")
 
-   if val := attrs["AVERAGE-BANDWIDTH"]; val != "" {
-      abw, err := strconv.Atoi(val)
-      if err != nil {
-         return fmt.Errorf("invalid AVERAGE-BANDWIDTH: %w", err)
+   setInt := func(dst *int, key string) error {
+      val, ok := attrs[key]
+      if !ok || val == "" {
+         return nil
       }
-      stream.AverageBandwidth = abw
+      if !overwrite && *dst != 0 {
+         return nil
+      }
+      n, err := strconv.Atoi(val)
+      if err != nil {
+         return fmt.Errorf("invalid %s: %w", key, err)
+      }
+      *dst = n
+      return nil
+   }
+   if err := setInt(&stream.Bandwidth, "BANDWIDTH"); err != nil {
+      return err
+   }
+   if err := setInt(&stream.AverageBandwidth, "AVERAGE-BANDWIDTH"); err != nil {
+      return err
    }
    return nil
 }
@@ -97,29 +122,34 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
             streamMap[uriLine] = stream
             masterPlaylist.StreamInfs = append(masterPlaylist.StreamInfs, stream)
 
-            // This is the first so it's automatically the lowest bandwidth; populate all fields
-            if err := populateStreamInfAttributes(stream, attrs); err != nil {
+            // This is the first so it's automatically the lowest bandwidth;
+            // take every attribute it actually carries.
+            if err := populateStreamInfAttributes(stream, attrs, true); err != nil {
+               return nil, err
+            }
+         } else {
+            // Decide the policy for this tag: a strictly lower BANDWIDTH (or
+            // a first BANDWIDTH when the primary had none) makes this variant
+            // the primary, so its values may replace existing ones. Otherwise
+            // it only fills the gaps.
+            overwrite := stream.Bandwidth == 0
+            if bwStr := attrs["BANDWIDTH"]; bwStr != "" {
+               bw, err := strconv.Atoi(bwStr)
+               if err != nil {
+                  return nil, fmt.Errorf("invalid BANDWIDTH in EXT-X-STREAM-INF: %w", err)
+               }
+               if bw < stream.Bandwidth {
+                  overwrite = true
+               }
+            }
+            if err := populateStreamInfAttributes(stream, attrs, overwrite); err != nil {
                return nil, err
             }
          }
 
-         // Always add the AUDIO group from the current tag to the list.
-         if audioGroup := attrs["AUDIO"]; audioGroup != "" {
+         // Always add the AUDIO group from the current tag, but never twice.
+         if audioGroup := attrs["AUDIO"]; audioGroup != "" && !slices.Contains(stream.Audio, audioGroup) {
             stream.Audio = append(stream.Audio, audioGroup)
-         }
-
-         // Check if this variant has a lower bandwidth than the one stored.
-         // If so, update the stream's primary attributes.
-         if bwStr := attrs["BANDWIDTH"]; bwStr != "" {
-            bw, err := strconv.Atoi(bwStr)
-            if err != nil {
-               return nil, fmt.Errorf("invalid BANDWIDTH in EXT-X-STREAM-INF: %w", err)
-            }
-            if exists && bw < stream.Bandwidth {
-               if err := populateStreamInfAttributes(stream, attrs); err != nil {
-                  return nil, err
-               }
-            }
          }
       }
    }
@@ -190,7 +220,8 @@ func (m *Media) String() string {
 
 // StreamInf represents a single media playlist (URI) from a #EXT-X-STREAM-INF tag.
 // It aggregates information from all tags that point to the same URI. The primary
-// attributes are taken from the variant with the lowest bandwidth.
+// attributes are taken from the variant with the lowest bandwidth; attributes the
+// primary does not carry are filled in from the other variants.
 type StreamInf struct {
    Audio            []string // A list of associated audio Media GROUP-IDs
    AverageBandwidth int
