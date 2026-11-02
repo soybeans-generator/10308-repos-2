@@ -1,4 +1,6 @@
 *.bin
+*.enc.prv
+*.enc.pub
+*.txt
 oracle
 wbtool.exe
-wbtool.txt
