@@ -1,6 +1,8 @@
 // model.go marker preserve
 package protobuf
 
+import "fmt"
+
 // Field represents a single, decoded field in a protobuf message.
 type Field struct {
    Tag     *Tag
@@ -73,6 +75,22 @@ func Varint(fieldNum uint32, value uint64) *Field {
       },
       Numeric: value,
    }
+}
+
+// SubMessage decodes a length-delimited field as an embedded message.
+// Fields built with Embed return their already-known Message; decoded
+// fields are parsed on demand, so the result is not cached.
+func (f *Field) SubMessage() (Message, error) {
+   if f == nil || f.Tag == nil {
+      return nil, fmt.Errorf("field has no tag")
+   }
+   if f.Tag.Type != WireBytes {
+      return nil, fmt.Errorf("%w %d is not length-delimited", ErrInvalidWireType, f.Tag.Type)
+   }
+   if f.Message != nil {
+      return f.Message, nil // built via Embed
+   }
+   return DecodeMessage(f.Bytes)
 }
 
 // Iterator provides a stateful, memory-efficient way to loop over

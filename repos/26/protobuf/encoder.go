@@ -9,15 +9,6 @@ import (
 
 // DecodeMessage populates a message by decoding the protobuf wire format data.
 func DecodeMessage(data []byte) (Message, error) {
-   return decodeMessageLimit(data, 0)
-}
-
-func decodeMessageLimit(data []byte, depth int) (Message, error) {
-   // Prevent stack overflow from deeply nested messages
-   if depth > 100 {
-      return nil, ErrMaxDepthExceeded
-   }
-
    var (
       fields Message
       offset int
@@ -65,19 +56,11 @@ func decodeMessageLimit(data []byte, depth int) (Message, error) {
          offset += bytesRead
          dataLength = int(length)
 
-         messageData := data[offset : offset+dataLength]
+         // Copy rather than aliasing data[offset:offset+dataLength]: a
+         // sub-slice would pin the entire parent buffer for as long as
+         // this one field is retained.
          field.Bytes = make([]byte, dataLength)
-         copy(field.Bytes, messageData)
-
-         // Attempt to recursively decode as an embedded message.
-         // Because this is schemaless, we don't know if this is a sub-message or just raw string/bytes.
-         embedded, err := decodeMessageLimit(messageData, depth+1)
-         if err == nil && len(embedded) > 0 {
-            field.Message = embedded
-         }
-         // If err != nil (including ErrMaxDepthExceeded), we just ignore it.
-         // It means the payload is either invalid as a sub-message or it hit the depth limit,
-         // in which case falling back to raw bytes (field.Bytes) is the correct behavior.
+         copy(field.Bytes, data[offset:offset+dataLength])
 
       default:
          return nil, fmt.Errorf("%w %d for field %d at offset %d", ErrInvalidWireType, tag.Type, tag.Number, offset)
