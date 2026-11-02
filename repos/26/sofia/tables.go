@@ -52,7 +52,17 @@ func buildCtts(samples []*RemuxSample) []byte {
       }
       entries = append(entries, CttsEntry{currentCount, currentOffset})
    }
-   return CttsBox{Entries: entries}.Encode()
+   // buildCtts synthesises the box from samples rather than round-tripping a
+   // decoded one, so there is no source version to carry over: version 1 is
+   // required as soon as any offset is negative, version 0 otherwise.
+   version := byte(0)
+   for _, entry := range entries {
+      if entry.SampleOffset < 0 {
+         version = 1
+         break
+      }
+   }
+   return CttsBox{Version: version, Entries: entries}.Encode()
 }
 
 func buildStsc(counts []uint32) []byte {
@@ -110,22 +120,9 @@ func buildStts(samples []*RemuxSample) []byte {
    return SttsBox{Entries: entries}.Encode()
 }
 
-// encodeTable builds a table box from raw 4-byte entries. count is the
-// entry count written into the box, which differs from len(entries) when
-// one entry spans several words (stts, ctts, stsc).
+// encodeTable builds a table box from raw 4-byte entries, at version 0.
 func encodeTable(name string, count int, entries []uint32) []byte {
-   buffer := make([]byte, 16+len(entries)*4)
-   w := writer{buf: buffer}
-   w.offset = 8
-   w.PutUint32(0) // version and flags
-   w.PutUint32(uint32(count))
-   for _, entry := range entries {
-      w.PutUint32(entry)
-   }
-   header := &BoxHeader{Size: uint32(len(buffer))}
-   copy(header.Type[:], name)
-   header.Put(buffer)
-   return buffer
+   return encodeTableVersion(name, 0, count, entries)
 }
 
 // encodeTable64 is encodeTable with 8-byte entries.
@@ -137,6 +134,24 @@ func encodeTable64(name string, entries []uint64) []byte {
    w.PutUint32(uint32(len(entries)))
    for _, entry := range entries {
       w.PutUint64(entry)
+   }
+   header := &BoxHeader{Size: uint32(len(buffer))}
+   copy(header.Type[:], name)
+   header.Put(buffer)
+   return buffer
+}
+
+// encodeTableVersion builds a table box with an explicit FullBox version.
+// count is the entry count written into the box, which differs from
+// len(entries) when one entry spans several words (stts, ctts, stsc).
+func encodeTableVersion(name string, version byte, count int, entries []uint32) []byte {
+   buffer := make([]byte, 16+len(entries)*4)
+   w := writer{buf: buffer}
+   w.offset = 8
+   w.PutUint32(uint32(version) << 24)
+   w.PutUint32(uint32(count))
+   for _, entry := range entries {
+      w.PutUint32(entry)
    }
    header := &BoxHeader{Size: uint32(len(buffer))}
    copy(header.Type[:], name)
@@ -199,7 +214,29 @@ func (b Co64Box) Encode() []byte {
 }
 
 // --- CTTS ---
+// CttsBox is the CompositionOffsetBox ('ctts'), ISO/IEC 14496-12 §8.7.2.
+//
+//   aligned(8) class CompositionOffsetBox extends FullBox('ctts', version, 0) {
+//       unsigned int(32) entry_count;
+//       int i;
+//       if (version == 0) {
+//           for (i = 0; i < entry_count; i++) {
+//               unsigned int(32) sample_count;
+//               unsigned int(32) sample_offset;
+//           }
+//       } else if (version == 1) {
+//           for (i = 0; i < entry_count; i++) {
+//               unsigned int(32) sample_count;
+//               signed int(32) sample_offset;
+//           }
+//       }
+//   }
+//
+// The entry layout is identical in both versions; the version decides only
+// whether sample_offset is read as unsigned (0) or signed (1). Version 1 is
+// required whenever any offset is negative.
 type CttsBox struct {
+   Version byte
    Entries []CttsEntry
 }
 
@@ -208,12 +245,15 @@ func DecodeCttsBox(data []byte) (*CttsBox, error) {
       return nil, errors.New("box too short")
    }
    p := parser{data: data, offset: 8}
-   _ = p.Uint32()      // version and flags
+   version := byte(p.Uint32() >> 24) // version and flags
+   if version > 1 {
+      return nil, errors.New("unsupported ctts version")
+   }
    count := p.Uint32() // entry count: each entry is 8 bytes
    if int(count) > (len(data)-p.offset)/8 {
       return nil, errors.New("ctts box too short for declared entries")
    }
-   b := &CttsBox{Entries: make([]CttsEntry, count)}
+   b := &CttsBox{Version: version, Entries: make([]CttsEntry, count)}
    for i := range b.Entries {
       b.Entries[i].SampleCount = p.Uint32()
       b.Entries[i].SampleOffset = int32(p.Uint32())
@@ -226,7 +266,7 @@ func (b CttsBox) Encode() []byte {
    for i, entry := range b.Entries {
       raw[2*i], raw[2*i+1] = entry.SampleCount, uint32(entry.SampleOffset)
    }
-   return encodeTable("ctts", len(b.Entries), raw)
+   return encodeTableVersion("ctts", b.Version, len(b.Entries), raw)
 }
 
 type CttsEntry struct {
