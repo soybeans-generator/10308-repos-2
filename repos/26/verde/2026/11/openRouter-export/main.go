@@ -1,4 +1,4 @@
-// main.go — extract-text: read an OpenRouter export, unnest the first message, remove, write flat output.
+// main.go — extract-text: read an OpenRouter export, unnest the first message, drop reasoning parts, write flat output.
 package main
 
 import (
@@ -7,7 +7,6 @@ import (
    "flag"
    "fmt"
    "os"
-   "sort"
    "strconv"
    "strings"
    "unicode/utf8"
@@ -26,31 +25,30 @@ func commas(n int) string {
    return b.String()
 }
 
+// isReasoningPart reports whether a part's type marks it as chain-of-thought:
+// reasoning, reasoning_text, reasoning.text, reasoning.summary, thinking, ...
+// Matching is by substring so provider-specific spellings are all caught, and
+// it can never fire on an absent type or on plain "text"/"input_text".
+func isReasoningPart(p textPart) bool {
+   t := strings.ToLower(strings.TrimSpace(p.Type))
+   return t != "" && (strings.Contains(t, "reason") || strings.Contains(t, "think"))
+}
+
 func main() {
    inPath := flag.String("i", "", "input JSON file path (an OpenRouter export)")
    outPath := flag.String("o", "", "output JSON file path (compacted array of {type,text} objects)")
-   removeCount := flag.Int("r", 0,
-      "number of largest messages to remove, counted after unnesting; the original first prompt is always kept")
    flag.Parse()
 
    if *inPath == "" || *outPath == "" {
-      fmt.Fprintln(os.Stderr, "usage: extract-text -i <input.json> -o <output.json> [-r N]")
+      fmt.Fprintln(os.Stderr, "usage: extract-text -i <input.json> -o <output.json>")
       flag.PrintDefaults()
       os.Exit(1)
    }
 
-   if err := run(*inPath, *outPath, *removeCount); err != nil {
+   if err := run(*inPath, *outPath); err != nil {
       fmt.Fprintf(os.Stderr, "error: %v\n", err)
       os.Exit(1)
    }
-}
-
-// partLabel names one text object for reporting.
-func partLabel(p textPart) string {
-   if p.Type == "" {
-      return "text"
-   }
-   return p.Type
 }
 
 // partSize is the encoded size of one {type,text} object, i.e. what it costs in
@@ -74,7 +72,7 @@ func preview(s string, n int) string {
    return s
 }
 
-func run(inPath, outPath string, removeCount int) error {
+func run(inPath, outPath string) error {
    raw, err := os.ReadFile(inPath)
    if err != nil {
       return fmt.Errorf("reading input: %w", err)
@@ -98,59 +96,69 @@ func run(inPath, outPath string, removeCount int) error {
       return fmt.Errorf(`"items" object is empty`)
    }
 
-   origCompact, err := compact(itemsRaw)
+   fmt.Printf("Input: %d items, %s\n", len(items), humanSize(len(raw)))
+
+   // The first message is either the original prompt or a previous run's
+   // output; expand the latter into the messages it holds. Its first part is
+   // the original prompt and is never stripped.
+   firstPs, err := textParts(items[0].Val)
    if err != nil {
-      return fmt.Errorf("compacting items object: %w", err)
+      return fmt.Errorf("extracting text from item %q: %w", items[0].Key, err)
    }
-   fmt.Printf("Original \"items\" object: %d items, size %s\n", len(items), humanSize(len(origCompact)))
+   flat, nested := unnestFirst(firstPs)
 
-   // Step 1: unnest.
-   units, err := buildUnits(items)
-   if err != nil {
-      return err
+   out := make([]textPart, 0, len(items)+len(flat))
+   removedParts, removedBytes := 0, 0
+
+   // drop records and reports one reasoning part. True means dropped.
+   drop := func(p textPart) bool {
+      if !isReasoningPart(p) {
+         return false
+      }
+      removedParts++
+      removedBytes += partSize(p)
+      return true
    }
-   fmt.Printf("Messages: %d before unnesting (first message counted as 1) -> %d after unnesting\n",
-      len(items), len(units))
 
-   // Step 2: remove, largest first, never the locked prompt. The count is the
-   // unnested one.
-   if removeCount > 0 {
-      cand := make([]int, 0, len(units))
-      for i, u := range units {
-         if !u.locked {
-            cand = append(cand, i)
+   fmt.Printf("First message %s [%s]: %d text part(s)%s\n",
+      items[0].Key, itemLabel(items[0].Val), len(flat),
+      map[bool]string{true: ", holds a previous run's output", false: ""}[nested])
+
+   if len(flat) > 0 {
+      prompt := flat[0]
+      out = append(out, prompt) // locked: never stripped
+      fmt.Printf("  original prompt: %q\n", preview(prompt.Text, 70))
+      if isReasoningPart(prompt) {
+         fmt.Printf("  note: prompt is typed %q; kept anyway\n", prompt.Type)
+      }
+      for _, p := range flat[1:] {
+         if drop(p) {
+            continue
          }
+         out = append(out, p)
       }
-      if removeCount > len(cand) {
-         return fmt.Errorf("-r %d exceeds number of removable messages (%d of %d unnested messages); the original first prompt is always kept",
-            removeCount, len(cand), len(units))
-      }
-      sort.SliceStable(cand, func(a, b int) bool {
-         return units[cand[a]].size > units[cand[b]].size
-      })
-
-      remove := make(map[int]bool, removeCount)
-      fmt.Printf("Removing %d largest removable message(s):\n", removeCount)
-      for _, i := range cand[:removeCount] {
-         fmt.Printf("  - %s [%s] : %s\n", units[i].key, units[i].label, humanSize(units[i].size))
-         remove[i] = true
-      }
-
-      kept := make([]unit, 0, len(units)-removeCount)
-      for i, u := range units {
-         if !remove[i] {
-            kept = append(kept, u)
-         }
-      }
-      units = kept
    } else {
-      fmt.Printf("Nothing removed (-r 0); all %d message(s) kept\n", len(units))
+      fmt.Printf("  no text in the first message\n")
    }
 
-   // Step 3: write unnested output.
-   out := make([]textPart, 0, len(units))
-   for _, u := range units {
-      out = append(out, u.parts...)
+   for _, it := range items[1:] {
+      ps, err := textParts(it.Val)
+      if err != nil {
+         return fmt.Errorf("extracting text from item %q: %w", it.Key, err)
+      }
+      for _, p := range ps {
+         if drop(p) {
+            continue
+         }
+         out = append(out, p)
+      }
+   }
+
+   if removedParts == 0 {
+      fmt.Println("Reasoning parts: none found")
+   } else {
+      fmt.Printf("Removed %s reasoning part(s), %s\n",
+         commas(removedParts), humanSize(removedBytes))
    }
 
    var buf bytes.Buffer
@@ -169,8 +177,8 @@ func run(inPath, outPath string, removeCount int) error {
    for _, p := range out {
       tokens += tokenEstimate(p.Text)
    }
-   fmt.Printf("Final output: %d text object(s) from %d kept message(s), size %s, ~%s tokens (est.)\n",
-      len(out), len(units), humanSize(len(finalBytes)), commas(tokens))
+   fmt.Printf("Output: %d text object(s), %s, ~%s tokens (est.)\n",
+      len(out), humanSize(len(finalBytes)), commas(tokens))
    fmt.Printf("Wrote %s\n", outPath)
    return nil
 }
@@ -265,92 +273,12 @@ func readItems(itemsRaw json.RawMessage) ([]orderedItem, error) {
       if err := dec.Decode(&val); err != nil {
          return nil, fmt.Errorf("parsing item %q: %w", key, err)
       }
-      c, err := compact(val)
-      if err != nil {
-         return nil, fmt.Errorf("compacting item %q: %w", key, err)
-      }
-      items = append(items, orderedItem{Key: key, Val: c})
+      items = append(items, orderedItem{Key: key, Val: val})
    }
    if _, err := dec.Token(); err != nil { // closing '}'
       return nil, fmt.Errorf("parsing items object: %w", err)
    }
    return items, nil
-}
-
-// unit is one prunable message. Every message after unnesting gets one unit,
-// wherever it came from: a later item, or a message found inside the first one.
-type unit struct {
-   key    string // item key, or "<item>:inner[n]" for a message found inside the first
-   label  string // e.g. "message/user", "output_text"
-   parts  []textPart
-   size   int
-   locked bool // the original first prompt: never removed
-}
-
-// buildUnits does step 1. The first message's text is either the original
-// prompt or the output of a previous run; any part of it that is such output is
-// expanded into the messages it holds, in order. The first message of the
-// resulting list is the original prompt and is the only locked unit; every other
-// message - unnested or not - is a removal candidate. Later items are one unit
-// each, sized by their compacted JSON.
-func buildUnits(items []orderedItem) ([]unit, error) {
-   units := make([]unit, 0, len(items)+8)
-
-   first := items[0]
-   ps, err := textParts(first.Val)
-   if err != nil {
-      return nil, fmt.Errorf("extracting text from item %q: %w", first.Key, err)
-   }
-   flat, nested := unnestFirst(ps)
-
-   fmt.Printf("First message %s [%s], %s\n", first.Key, itemLabel(first.Val), humanSize(len(first.Val)))
-
-   if len(flat) == 0 {
-      fmt.Printf("  no text in the first message; nothing kept from it\n")
-   } else {
-      if nested {
-         fmt.Printf("  it holds the output of a previous run: %d message(s) inside\n", len(flat))
-      }
-      head, rest := flat[0], flat[1:]
-      fmt.Printf("  original prompt (always kept): %q\n", preview(head.Text, 70))
-      units = append(units, unit{
-         key:    first.Key,
-         label:  partLabel(head),
-         parts:  []textPart{head},
-         size:   partSize(head),
-         locked: true,
-      })
-      if len(rest) > 0 {
-         fmt.Printf("  %d other message(s) inside it, each prunable on its own\n", len(rest))
-      }
-      for n, p := range rest {
-         units = append(units, innerUnit(first.Key, p, n+1))
-      }
-   }
-
-   for _, it := range items[1:] {
-      ps, err := textParts(it.Val)
-      if err != nil {
-         return nil, fmt.Errorf("extracting text from item %q: %w", it.Key, err)
-      }
-      units = append(units, unit{
-         key:   it.Key,
-         label: itemLabel(it.Val),
-         parts: ps,
-         size:  len(it.Val),
-      })
-   }
-   return units, nil
-}
-
-// innerUnit wraps one message found inside the first message as its own unit.
-func innerUnit(key string, p textPart, n int) unit {
-   return unit{
-      key:   fmt.Sprintf("%s:inner[%d]", key, n),
-      label: partLabel(p),
-      parts: []textPart{p},
-      size:  partSize(p),
-   }
 }
 
 // end main.go

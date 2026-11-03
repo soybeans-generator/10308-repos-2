@@ -123,15 +123,6 @@ func collectFromValue(raw json.RawMessage, key string, out *[]textPart) error {
    return nil
 }
 
-// compact removes insignificant whitespace from raw JSON, preserving key order.
-func compact(raw json.RawMessage) (json.RawMessage, error) {
-   var buf bytes.Buffer
-   if err := json.Compact(&buf, raw); err != nil {
-      return nil, err
-   }
-   return buf.Bytes(), nil
-}
-
 func humanSize(n int) string {
    const KB = 1024
    const MB = KB * 1024
