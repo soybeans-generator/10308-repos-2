@@ -1,14 +1,7 @@
 *.bin
-*.dll
 *.enc.plain
 *.enc.prv
 *.enc.pub
-*.exe
-*.lib
-*.pdb
-*.sig.plain
-*.sig.prv
-*.sig.pub
+*.json
 *.txt
-*.xml
 oracle
