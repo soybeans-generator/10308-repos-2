@@ -8,24 +8,17 @@
 #   private scalar, in four steps:
 #
 #     stage 1  prv[0x00:0x20]  --0x6c6f00-->  OBF              (32 bytes)
-#     stage 2  OBF (mutated in place) --0x529250-->  mapped     (32 bytes)
-#     stage 3  mapped  --64 per-nibble bijection subtables-->  mapped' 
-#     stage 4  mapped' --16-entry permutation from oracle_map.json-->  plain
+#     stage 2  OBF (mutated in place) --0x529250-->  mut       (32 bytes)
+#     stage 3  mut  --64 per-nibble bijection subtables-->  mapped
+#     stage 4  mapped --16-entry permutation from oracle_map.json-->  plain
 #
-#   Then it proves the result: d * G must reproduce extracted.enc.pub. Only on
-#   that proof is the file written.
-#
-# WHY EACH STAGE EXISTS
-#   stage 1/2 are done by the real library code (kernel-assisted, op=3) so that
-#   this script never has to reimplement the crypto. stage 3/4 are done in
-#   Python, because the bijection tables are plain data in the decrypted image
-#   and the permutation was measured by 2-derive-map.py.
+#   Then it proves the result: d * G must reproduce extracted.enc.pub. Nothing
+#   is written unless that proof succeeds.
 #
 # PIPELINE
 #   1-decrypt-img.py  ->  wbtool_img.bin      (consumed here via IMG)
 #   2-derive-map.py   ->  oracle_map.json     (consumed here via MAPF)
 #   3-derive-plain.py ->  extracted.enc.plain (this script)
-#   4-verify-plain.py ->  content_key.bin     (independent proof)
 #
 # INPUTS
 #   extracted.enc.prv      from the msprcore.bla extractor. 0x41 = 65 bytes:
@@ -37,25 +30,23 @@
 #                          verify the derived scalar - never as an input to the
 #                          derivation.
 #   wbtool_img.bin         from 1-decrypt-img.py. Supplies (a) the plaintext
-#                          segment blocks that are copied into the live image so
-#                          stage 1/2 can execute, and (b) the s4 bijection
-#                          subtables as plain data.
+#                          segment blocks copied into the live image so stage 1/2
+#                          can execute, and (b) the s4 bijection subtables.
 #   oracle_map.json        from 2-derive-map.py. The build's 16-entry
 #                          permutation, mapped nibble -> real nibble.
-#   PlayReady.dll          read directly; used to enumerate descriptors and to
-#                          find which descriptor owns each stage routine, and
-#                          loaded so the routines can be called.
+#   PlayReady.dll          read directly; used to enumerate descriptors, find the
+#                          descriptor owning each stage routine, and loaded so
+#                          the routines can be called.
 #
 # OUTPUT
 #   extracted.enc.plain    32-byte plaintext private scalar.
-#                          s4 bijection + this MAP reproduce it exactly.
 #   derive_plain.txt       log.
 #
 # VERIFY BY
-#   The script self-checks with d*G == .enc.pub before writing. Independent
-#   proofs afterwards:
-#     4-verify-plain.py        XMR AES-CMAC + content key match   (no DLL)
-#     go run ./lictest         Go implementation, same content key
+#   Self-check d*G == .enc.pub happens before writing; that is the acceptance
+#   test. Independent cross-checks that need not run every time:
+#     an ECIES decrypt of a real licence XMR (AES-CMAC must match)
+#     go run ./lictest      Go implementation, same content key
 #   Expected output:
 #       plain     cdfb1d858ea5cfe062d0ba877cbe2ea731fdcd196d0c9be64699cf723cbcdcc1
 #       pubkey    MATCH
@@ -78,19 +69,16 @@ LOG   = "derive_plain.txt"       # output: log
 IMG   = "wbtool_img.bin"         # input: from 1-decrypt-img.py
 MAPF  = "oracle_map.json"        # input: from 2-derive-map.py
 
-# --- the four routines / tables, as RVAs within wbtool_img.bin ----------------
-# These are per-build. They were identified by cross-referencing the WB call
-# trace, and for CODE_MAP/CLUSTER also confirmed against published reference
-# data (the s2 cluster reproduces the doc's published OBF->MAP vector, which
-# fixes the table layout; the oracle then proved s4 is the live one here).
+# --- the routines / tables, as RVAs within wbtool_img.bin ---------------------
+# These are per-build. Identified by cross-referencing the WB call trace; the
+# table layout was confirmed against published reference data (the s2 cluster
+# reproduces the published OBF->MAP vector), and the nibble oracle then proved
+# s4 is the live cluster for this build's key format.
 CODE_OBF = 0x6C6F00    # stage 1: prv[0x00:0x20] -> OBF
 CODE_MAP = 0x529250    # stage 2: in = OBF (mutated in place), out = prv[0x20:0x40]
 CLUSTER  = 0x8E2210    # bijection subtables proven live by the nibble oracle
 RWX      = 0x40
 CURVE_N  = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
-
-# recorded from the WB trace / from the validated run; used only if stage 1 is skipped
-KNOWN_OBF = "69ef7582608af8d0df0fb4b515449be5a8d0c903741cbf3353be70eb460521f4"
 
 L = []
 def log(s=""):
@@ -127,14 +115,14 @@ PRV = open(PRVF, "rb").read()
 if len(PRV) != 0x41:
     die(f"{PRVF} is {len(PRV)} bytes, expected 0x41 (65)")
 
-# .enc.pub is X||Y, but tolerate a prefixed form by taking the last 64 bytes
+# .enc.pub is X||Y; tolerate a prefixed form by taking the last 64 bytes
 PUB = open(PUBF, "rb").read()[-64:]
 PX = int.from_bytes(PUB[:32], "big")
 PY = int.from_bytes(PUB[32:], "big")
 
 # ---------------------------------------------------------------- PE layout
-# The descriptor list is read from the ON-DISK file (not the image) because this
-# script needs each descriptor's file offset to read its relocs/num fields.
+# Descriptors are enumerated from the ON-DISK file, not the image, because each
+# descriptor's file offset is needed to read its relocs/num fields.
 img = open(IMG, "rb").read()     # from 1-decrypt-img.py
 fb  = open(DLL, "rb").read()
 u32 = lambda b, o: struct.unpack_from("<I", b, o)[0]
@@ -191,7 +179,7 @@ d_map = desc_of.get(CODE_MAP)
 if d_obf is None or d_map is None:
     die(f"descriptor missing: 0x{CODE_OBF:06x}->{d_obf}, 0x{CODE_MAP:06x}->{d_map}")
 
-# only blocks this image actually decrypted (differs from the file)
+# only blocks this image actually decrypted (i.e. differ from the file)
 patch_list = []
 for r, s in seg:
     rawb = raw_at(r, s)
@@ -245,10 +233,10 @@ def wr(rva, data):
     k32.VirtualProtect(addr, span, old.value, ctypes.byref(DUM))
     return True
 
-# Copy the decrypted segment spans over the live ciphertext so that every
-# routine the stages call is real code. The stage routines' OWN blocks are
-# heap-exec and are deliberately left ciphertext - the kernel decrypts each of
-# them exactly once during the op=3 call, and pre-patching would double-decrypt.
+# Copy the decrypted segment spans over the live ciphertext so every routine the
+# stages call is real code. The stage routines' OWN blocks are heap-exec and are
+# deliberately left ciphertext: the kernel decrypts each exactly once during the
+# op=3 call, and pre-patching would double-decrypt them.
 npatched = sum(1 for r, s in patch_list if wr(r, img[r:r + s]))
 log(f"base 0x{base:x}   segment blocks patched {npatched}/{len(patch_list)}   "
     f"heap-exec left ciphertext")
@@ -260,25 +248,22 @@ def onfault(ep):
     code = struct.unpack_from("<I", ctypes.string_at(er, 4))[0]
     addr = struct.unpack_from("<Q", ctypes.string_at(er + 0x10, 8))[0]
     # hard_die, not die: sys.exit cannot unwind out of a ctypes callback
-    hard_die(f"FAULT 0x{code:08x} at rva 0x{(addr - base) & 0xFFFFFFFF:.x}"
-             if False else f"FAULT 0x{code:08x} at rva 0x{(addr - base) & 0xFFFFFFFF:x}")
+    hard_die(f"FAULT 0x{code:08x} at rva 0x{(addr - base) & 0xFFFFFFFF:x}")
 
 VEH = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
 keep_veh = VEH(onfault)
 k32.AddVectoredExceptionHandler(1, keep_veh)
 
-def op3(desc_rva, ln, status, key, out, inbuf=None):
+def op3(desc_rva, ln, status, key, out):
     """
     Issue op=3 (WbHeapExecuteCall) against a heap-exec descriptor.
 
-    Argument block, as the routines see it (rcx = args+0x10):
+    Argument block as the routines see it (rcx = args+0x10):
         +0x00  -> status dword
-        +0x08  -> key / input buffer
+        +0x08  -> key / writable input buffer
         +0x10  u32 size 0x20
-        +0x14  -> output buffer
+        +0x14  -> output / read-only input buffer
         +0x1c  u32 size 0x20      (only when ln >= 0x30)
-    `inbuf` is unused: stage 2 reads its second input from the buffer passed as
-    `out`, and mutates `key` in place.
     """
     a = ctypes.create_string_buffer(0x40)
     struct.pack_into("<Q", a, 0x00, 3)
@@ -293,42 +278,43 @@ def op3(desc_rva, ln, status, key, out, inbuf=None):
     return rc, bytes(status.raw)[:4]
 
 # ---------------------------------------------------------------- stage 1 -> OBF
-# 0x6c6f00 takes prv[0x00:0x20] and writes OBF. --obf lets the caller supply
-# OBF directly (e.g. a value captured from a WB trace) to isolate stage 2.
-argv = sys.argv[1:]
-if argv[:1] == ["--obf"] and len(argv) > 1:
-    OBF = bytes.fromhex(argv[1])
-    log(f"OBF       {OBF.hex()}  (from --obf)")
-else:
-    st = ctypes.create_string_buffer(0x40)
-    kb = ctypes.create_string_buffer(PRV[0x00:0x20], 0x40)
-    ob = ctypes.create_string_buffer(0x40)
-    rc, sd = op3(d_obf, 0x2C, st, kb, ob)
-    OBF = bytes(ob.raw)[:0x20]
-    log(f"stage 1   0x{CODE_OBF:06x} nt=0x{rc:08x} status={sd.hex()}")
-    if rc != 0 or sd != b"\0\0\0\0" or OBF == b"\0" * 0x20:
-        OBF = bytes.fromhex(KNOWN_OBF)
-        log("          stage 1 unusable, falling back to recorded OBF")
-    log(f"OBF       {OBF.hex()}")
+# 0x6c6f00 takes prv[0x00:0x20] and writes OBF. There is deliberately no
+# fallback and no bypass: a substituted OBF would still let the later stages
+# reach pubkey MATCH and mask a broken stage 1.
+st = ctypes.create_string_buffer(0x40)
+kb = ctypes.create_string_buffer(PRV[0x00:0x20], 0x40)
+ob = ctypes.create_string_buffer(0x40)
+rc, sd = op3(d_obf, 0x2C, st, kb, ob)
+OBF = bytes(ob.raw)[:0x20]
+log(f"stage 1   0x{CODE_OBF:06x} nt=0x{rc:08x} status={sd.hex()}")
+if rc != 0:
+    die(f"stage 1: WB call failed (nt=0x{rc:08x})")
+if sd != b"\0\0\0\0":
+    die(f"stage 1: routine rejected the key (status {sd.hex()})")
+if OBF == b"\0" * 0x20:
+    die("stage 1: routine returned all zeros")
+log(f"OBF       {OBF.hex()}")
 
-# ---------------------------------------------------------------- stage 2 -> mapped
+# ---------------------------------------------------------------- stage 2 -> mut
 # 0x529250 takes OBF as the writable `in` and prv[0x20:0x40] as the read-only
-# `out`, and MUTATES `in` in place. The mutated value is what feeds the
-# bijection; `ob` is only here to satisfy the argument contract.
+# `out`, and MUTATES `in` in place. The mutated value feeds the bijection; `ob`
+# is only there to satisfy the argument contract.
 st = ctypes.create_string_buffer(0x40)
 ib = ctypes.create_string_buffer(OBF, 0x40)
 ob = ctypes.create_string_buffer(PRV[0x20:0x40], 0x40)
 rc, sd = op3(d_map, 0x30, st, ib, ob)
 mut = bytes(ib.raw)[:0x20]
 log(f"stage 2   0x{CODE_MAP:06x} nt=0x{rc:08x} status={sd.hex()}")
-if rc != 0 or sd != b"\0\0\0\0":
-    die(f"stage 2 rejected (status {sd.hex()})")
+if rc != 0:
+    die(f"stage 2: WB call failed (nt=0x{rc:08x})")
+if sd != b"\0\0\0\0":
+    die(f"stage 2: routine rejected the input (status {sd.hex()})")
 log(f"in-mutated {mut.hex()}")
 
 # ---------------------------------------------------------------- bijection + MAP
 # Stage 3: the cluster is 64 consecutive 16-byte subtables. Nibble i of the
-# input indexes subtable i, and the byte found there is nibble i of the output.
-# Stage 4: the 16-entry permutation from oracle_map.json.
+# input indexes subtable i, and the value found there becomes nibble i of the
+# output. Stage 4: the 16-entry permutation from oracle_map.json.
 BLK = [img[CLUSTER + i * 16: CLUSTER + i * 16 + 16] for i in range(64)]
 if any(len(b) != 16 or max(b) > 15 or len(set(b)) != 16 for b in BLK):
     die(f"cluster 0x{CLUSTER:06x} is not 64 clean nibble permutations")
@@ -348,8 +334,8 @@ log(f"mapped    {mapped.hex()}")
 log(f"plain     {plain.hex()}")
 
 # ---------------------------------------------------------------- verify + write
-# The only real acceptance test: the derived scalar must reproduce .enc.pub.
-# Nothing is written unless it does.
+# The acceptance test: the derived scalar must reproduce .enc.pub. Nothing is
+# written unless it does.
 from cryptography.hazmat.primitives.asymmetric import ec
 
 d = int.from_bytes(plain, "big")
