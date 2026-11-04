@@ -2,11 +2,13 @@
 import base64, ctypes, hashlib, json, os, re, struct, subprocess, sys
 
 DLL      = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
-IMG      = "wbtool_img.bin"
-ORACLE   = "oracle"
 PRVF     = "extracted.enc.prv"
 OUTF     = "oracle_map.json"
 LOG      = "derive_map.txt"
+
+IMG      = "wbtool_img.bin"
+ORACLE   = "oracle"
+
 DESC     = 0x491C0          # .enc.prv consumer (decrypt license blob)
 CLEN     = 0x400            # 64 per-nibble subtables x 16 bytes
 RWX      = 0x40
