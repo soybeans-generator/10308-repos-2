@@ -2,12 +2,13 @@
 import ctypes, hashlib, json, os, struct, sys
 
 DLL   = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
-IMG   = "wbtool_img.bin"
-MAPF  = "oracle_map.json"
 PRVF  = "extracted.enc.prv"
 PUBF  = "extracted.enc.pub"
 OUTF  = "extracted.enc.plain"
 LOG   = "derive_plain.txt"
+
+IMG   = "wbtool_img.bin"
+MAPF  = "oracle_map.json"
 
 CODE_OBF = 0x6C6F00    # stage 1: prv[0x00:0x20] -> OBF
 CODE_MAP = 0x529250    # stage 2: in = OBF (mutated in place), out = prv[0x20:0x40]
