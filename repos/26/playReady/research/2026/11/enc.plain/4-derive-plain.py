@@ -1,38 +1,51 @@
 # =============================================================================
-# 3-derive-plain.py
+# 4-derive-plain.py
 #
-# Stage 3 of the chain: extracted.enc.prv -> extracted.enc.plain
+# Stage 4 of the chain: extracted.enc.prv -> extracted.enc.plain
 #
 # WHAT IT DOES
 #   Turns the obfuscated 65-byte private ECC key into the plaintext 32-byte
 #   private scalar, in four steps:
 #
-#     stage 1  prv[0x00:0x20]  --0x6c6f00-->  OBF              (32 bytes)
-#     stage 2  OBF (mutated in place) --0x529250-->  mut       (32 bytes)
-#     stage 3  mut  --64 per-nibble bijection subtables-->  mapped
+#     stage 1  prv[0x00:0x20]  --0x6c6f00-->  OBF
+#     stage 2  OBF (mutated in place) --0x529250-->  mut
+#     stage 3  mut   --64 per-nibble bijection subtables-->  mapped
 #     stage 4  mapped --16-entry permutation from oracle_map.json-->  plain
 #
 #   Then it proves the result: d * G must reproduce extracted.enc.pub. Nothing
 #   is written unless that proof succeeds.
 #
+# WHY EACH STAGE IS IMPLEMENTED WHERE IT IS
+#   Stages 1 and 2 are the library's own code, invoked through the kernel's
+#   Warbird call mechanism. Reimplementing them in Python would mean
+#   reimplementing the obfuscation, so instead the real routines are called.
+#   Stages 3 and 4 are done in Python because the bijection subtables are plain
+#   data in the decrypted image and the permutation was measured by
+#   3-derive-map.py.
+#
+#   There is deliberately no fallback and no bypass for stage 1. A substituted
+#   OBF would still let stages 2-4 reach pubkey MATCH and would mask a broken
+#   stage 1, turning the only acceptance test into a false pass.
+#
 # PIPELINE
-#   1-decrypt-img.py  ->  wbtool_img.bin      (consumed here via IMG)
-#   2-derive-map.py   ->  oracle_map.json     (consumed here via MAPF)
-#   3-derive-plain.py ->  extracted.enc.plain (this script)
+#   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
+#   2-decrypt-img.py   ->  wbtool_img.bin
+#   3-derive-map.py    ->  oracle_map.json
+#   4-derive-plain.py  ->  extracted.enc.plain                (this script)
 #
 # INPUTS
 #   extracted.enc.prv      from the msprcore.bla extractor. 0x41 = 65 bytes:
 #                            [0x00:0x20]  first half   (stage 1 input)
 #                            [0x20:0x40]  second half  (stage 2 read-only input)
-#                            [0x40]       variant byte (selects the pair of
-#                                          internal-decrypt / bijection tables)
+#                            [0x40]       variant byte (selects the routine pair)
 #   extracted.enc.pub      from the same extractor, 64 bytes X||Y. Used ONLY to
-#                          verify the derived scalar - never as an input to the
+#                          verify the derived scalar, never as an input to the
 #                          derivation.
-#   wbtool_img.bin         from 1-decrypt-img.py. Supplies (a) the plaintext
-#                          segment blocks copied into the live image so stage 1/2
-#                          can execute, and (b) the s4 bijection subtables.
-#   oracle_map.json        from 2-derive-map.py. The build's 16-entry
+#   wbtool_img.bin         from 2-decrypt-img.py. Supplies (a) the plaintext
+#                          segment blocks copied into the live image so stages
+#                          1 and 2 can execute, and (b) the s4 bijection
+#                          subtables.
+#   oracle_map.json        from 3-derive-map.py. The build's 16-entry
 #                          permutation, mapped nibble -> real nibble.
 #   PlayReady.dll          read directly; used to enumerate descriptors, find the
 #                          descriptor owning each stage routine, and loaded so
@@ -42,14 +55,45 @@
 #   extracted.enc.plain    32-byte plaintext private scalar.
 #   derive_plain.txt       log.
 #
-# VERIFY BY
-#   Self-check d*G == .enc.pub happens before writing; that is the acceptance
-#   test. Independent cross-checks that need not run every time:
-#     an ECIES decrypt of a real licence XMR (AES-CMAC must match)
-#     go run ./lictest      Go implementation, same content key
-#   Expected output:
+# ACCEPTANCE CHECK
+#   Self-check d*G == .enc.pub, executed before writing. Expected for the
+#   recorded build:
+#       OBF       69ef7582608af8d0df0fb4b515449be5a8d0c903741cbf3353be70eb460521f4
 #       plain     cdfb1d858ea5cfe062d0ba877cbe2ea731fdcd196d0c9be64699cf723cbcdcc1
 #       pubkey    MATCH
+#   A pass here means stages 1 through 4 all ran correctly, because each stage's
+#   output feeds the next and the final scalar must land on the exact public
+#   point. Independent cross-checks, run only when needed:
+#       ECIES-decrypt a real licence XMR with d; the AES-CMAC must match
+#       go run ./lictest       Go implementation, same content key
+#
+# PER-BUILD CONSTANTS
+#   CODE_OBF, CODE_MAP and CLUSTER are RVAs in this build and change with it.
+#   CODE_OBF/CODE_MAP were confirmed by the WB call trace; CLUSTER is whatever
+#   3-derive-map.py reports as the live cluster, and must be updated here when
+#   the map is re-derived for a new build.
+#
+# HOW THE STAGES ARE CALLED
+#   Stages 1 and 2 are heap-exec routines, so they are invoked with the kernel's
+#   op=3 call. The argument block, as the routines see it (rcx = args+0x10):
+#       +0x00  -> status dword
+#       +0x08  -> key / writable input buffer
+#       +0x10  u32 size 0x20
+#       +0x14  -> output / read-only input buffer
+#       +0x1c  u32 size 0x20
+#   Stage 2 mutates its +0x08 buffer in place; that mutated value is what feeds
+#   the bijection, not the +0x14 buffer.
+#
+# KNOWN PITFALLS
+#   - The stage routines' own blocks must be LEFT CIPHERTEXT. They are heap-exec,
+#     so the kernel decrypts each exactly once during the op=3 call; patching
+#     them from wbtool_img.bin beforehand causes a double decrypt and the routine
+#     executes garbage.
+#   - Segment blocks must still be patched to plaintext, otherwise the helper
+#     routines the stages call (e.g. 0x335460, 0x521210) are ciphertext and the
+#     call faults.
+#   - A fault is reported with its code and RVA, then hard-exits via os._exit;
+#     sys.exit cannot unwind out of a ctypes callback and would recurse.
 #
 # SECURITY
 #   extracted.enc.plain is the identity private encryption key: it decrypts any

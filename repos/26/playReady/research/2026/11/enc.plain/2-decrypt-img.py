@@ -1,49 +1,72 @@
 # =============================================================================
-# 1-decrypt-img.py
+# 2-decrypt-img.py
 #
-# Stage 1 of the Warbird/PlayReady image decryption chain.
+# Stage 2 of the chain: decrypt the Warbird-protected code and tables in
+# Windows.Media.Protection.PlayReady.dll into a flat, plaintext image.
 #
-# PURPOSE
-#   Produce a fully-decrypted copy of Windows.Media.Protection.PlayReady.dll,
-#   so that later scripts can read the WB code and the bijection tables as
-#   plain bytes instead of ciphertext.
+# WHY THIS EXISTS
+#   PlayReady keeps the interesting parts of the library — the license blob
+#   parser, the ECC key handling, the per-nibble bijection subtables — as
+#   Warbird-encrypted blocks. The decryption keys live in the kernel and are
+#   never exported, but the kernel will decrypt a block on request for any
+#   descriptor whose embedded SHA-256 validates. So the image is decrypted
+#   block by descriptor rather than by recovering a key.
+#
+#   Two different descriptor kinds need two different treatment:
+#     - segment descriptors (?g_Encry, sizes other than 0xF0) each list one or
+#       more RVA ranges. All of them can be decrypted in a single loaded image.
+#     - heap-exec descriptors (size 0xF0) describe a single code block, and the
+#       kernel only honours the FIRST such decrypt per loaded image. Each block
+#       therefore needs its own fresh LoadLibraryW.
 #
 # PIPELINE
-#   1-decrypt-img.py  ->  wbtool_img.bin      (this script)
-#   2-derive-map.py   ->  oracle_map.json     (reads IMG, oracle/lic_*.blob)
-#   3-derive-plain.py ->  extracted.enc.plain (reads IMG, oracle_map.json)
-#   4-verify-plain.py ->  content_key.bin     (no image needed; proves the key)
+#   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
+#   2-decrypt-img.py   ->  wbtool_img.bin                      (this script)
+#   3-derive-map.py    ->  oracle_map.json
+#   4-derive-plain.py  ->  extracted.enc.plain
 #
-# INPUTS
-#   Windows.Media.Protection.PlayReady.dll
-#       The target library, read straight from System32. Expected for the
-#     reference build:
-#         sha256 3cc6724d105e94bb0fb5971cc07ab2967dde2290ecebf4e0d4a910c80732ba7a
-#         version 10.0.19041.4780
-#     Nothing else is required - no WRET, no sample key files.
+# INPUT
+#   Windows.Media.Protection.PlayReady.dll, read directly from System32.
+#   Recorded build for the current chain:
+#       version  10.0.19041.4780
+#       sha256   3cc6724d105e94bb0fb5971cc07ab2967dde2290ecebf4e0d4a910c80732ba7a
+#   A different build is supported but yields a different permutation
+#   (see 3-derive-map.py), so the downstream expectations below no longer hold.
 #
-# OUTPUTS
-#   wbtool_img.bin     sizeOfImage-sized plaintext image (10,305,536 bytes for
-#                      the build above). RVA == file offset, so consumers can
-#                      index it directly. Consumed by 2-derive-map.py and
-#                      3-derive-plain.py via their IMG constant.
-#   decrypt_img.txt    human-readable log (counts, per-block failures, probes).
+# OUTPUT
+#   wbtool_img.bin   SizeOfImage bytes (10,305,536 for the build above), laid out
+#                    so RVA == file offset. Consumed by IMG in 3-derive-map.py
+#                    and 4-derive-plain.py.
+#   decrypt_img.txt  log: descriptor counts, per-block results, probe bytes.
 #
-# VERIFIED BY
-#   Running 3-derive-plain.py against this image must yield
-#       plain cdfb1d858ea5cfe062d0ba877cbe2ea731fdcd196d0c9be64699cf723cbcdcc1
-#       pubkey MATCH
-#   Expected build signature (independent of load base):
+# ACCEPTANCE CHECK
+#   Load-base independent, so these readings decide whether the image is usable:
 #       segment descriptors 37 ok 37
 #       heap-exec 981 changed 981
 #       probe 0x335460  4c8bdc49895b2055565741554156498d
+#       probe 0x6c6f00  488d15f9ffffff488b0c2448896c2420
 #       probe 0x8e2210  0f04070a0800030d0b010906050c0e02
+#   End-to-end proof is 4-derive-plain.py printing pubkey MATCH, which requires
+#   all three of: the stage-1 and stage-2 routines being real code here, the
+#   gap blocks around 0x335460 being decrypted, and the s4 bijection subtables
+#   being intact.
 #
-# NOTE ON OUTPUT HASH
-#   The sha256 of wbtool_img.bin is NOT reproducible across runs: each
-#   LoadLibraryW bakes the current process load base into IAT slots and
-#   relocated fields. Compare the probes and the downstream scalar, never the
-#   whole-file hash.
+# DO NOT COMPARE THE FILE HASH BETWEEN RUNS
+#   Every LoadLibraryW bakes the current process load base into IAT slots and
+#   relocated fields, so no two decrypted images hash alike even though they are
+#   functionally identical. Compare the probes above, never the whole-file hash.
+#
+# KNOWN PITFALLS
+#   - Descriptor size cap must stay at 0x200000. The two largest descriptors on
+#     this build are 0x829c and 0x3cac; a 0x2000 cap silently skips them, which
+#     loses the 0x334290..0x3370ef gap blocks (including 0x335460) and makes
+#     4-derive-plain.py execute ciphertext. A patch step is not enough — the gap
+#     blocks are the first thing that breaks.
+#   - Segment descriptors must be decrypted per descriptor, not per deduped RVA.
+#     Descriptor span lists overlap; deduping by RVA drops later/larger spans
+#     (7818 spans instead of 7937) and corrupts the downstream scalar.
+#   - The sacrificial descriptor page's original protection must be restored
+#     before the WB call, or the kernel rejects the descriptor with 0xc000000d.
 # =============================================================================
 
 import ctypes, hashlib, struct, sys

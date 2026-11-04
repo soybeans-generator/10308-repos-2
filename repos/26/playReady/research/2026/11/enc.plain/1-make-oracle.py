@@ -1,31 +1,32 @@
 # =============================================================================
-# 0-make-oracle.py
+# 1-make-oracle.py
 #
-# Stage 0 of the chain: build the nibble-oracle inputs used by 2-derive-map.py.
+# Stage 1 of the chain: build the nibble-oracle inputs used by 3-derive-map.py.
 #
 # WHY THIS EXISTS
-#   2-derive-map.py measures the build's 16-entry nibble permutation by forcing
-#   the live bijection subtable to a constant mapped value MM and checking
-#   whether a known licence decrypts. That needs, for every real nibble value
-#   N = 0x01..0x0f:
-#       oracle/key_NN.pub     public key whose private scalar is 0xNN repeated
-#                             64 times (64*nibble nibbles, reduced mod N)
-#       oracle/lic_NN.blob    licence blob addressed to that key, whose
-#                             plaintext point X-coordinate is
-#                             "HELLO MICROSOFT!" || 0^16
-#   When the target key's bijection is forced so that its derived scalar becomes
-#   the all-NN scalar, the target decrypts lic_NN.blob successfully and the
-#   sentinel appears in the output. MM then equals MAP^{-1}(NN).
+#   3-derive-map.py measures the build's 16-entry nibble permutation by forcing
+#   the mapped nibble to a constant value M against a license blob built for a
+#   known key, and checking whether a known plaintext appears. That requires,
+#   for every key nibble N in 0x0N for N in 0..f (excluding 0x00):
 #
-#   Real nibble 0x00 is deliberately absent: zero is not a valid private scalar,
-#   so it cannot be expressed this way. 2-derive-map.py recovers it as the one
-#   leftover permutation slot.
+#       oracle/key_NN.pub    public key whose private scalar is nibble NN
+#                            repeated 64 times
+#       oracle/lic_NN.blob   licence blob addressed to that public key, whose
+#                            plaintext content key / signature block contains
+#                            the known sentinel "HELLO MICROSOFT!"
+#
+#   The permutation entry is recovered because decrypting a blob addressed to
+#   key_NN with the unknown private key only succeeds if the forced mapped
+#   nibble M satisfies MAP[M] = NN.
+#
+#   Nibble 0x00 is skipped here because scalar 0 is not a valid private key;
+#   3-derive-map.py recovers that entry as the leftover permutation value.
 #
 # PIPELINE
-#   0-make-oracle.py  ->  oracle/key_NN.pub, oracle/lic_NN.blob   (this script)
-#   1-decrypt-img.py  ->  wbtool_img.bin
-#   2-derive-map.py   ->  oracle_map.json
-#   3-derive-plain.py ->  extracted.enc.plain
+#   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob   (this script)
+#   2-decrypt-img.py   ->  wbtool_img.bin
+#   3-derive-map.py    ->  oracle_map.json
+#   4-derive-plain.py  ->  extracted.enc.plain
 #
 # OUTPUTS
 #   oracle/key_NN.pub     64 bytes, X||Y (no 0x04 prefix)
@@ -33,14 +34,18 @@
 #
 # PROPERTIES
 #   - key_NN.pub is DETERMINISTIC: same bytes on every run, every machine.
-#   - lic_NN.blob is NOT: the ephemeral scalar k is random. Different bytes each
-#     run, equally valid. Never compare blobs between runs; compare keys, and
-#     prove the blobs with 2-derive-map.py (GOLD match) and 3-derive-plain.py
-#     (pubkey MATCH).
+#     Byte-identical to the values recorded during development, so a rebuilt
+#     oracle is verifiable with a file hash.
+#   - lic_NN.blob is NOT reproducible: it uses a random ephemeral scalar, so
+#     the bytes differ on every run. Validity is proven instead by
+#       3-derive-map.py  reaching GOLD match
+#       4-derive-plain.py reaching pubkey MATCH
 #
 # ORACLE PRIVATE SCALARS (for reference / manual checks)
-#   nibble NN  ->  d = 0xNN repeated 64 times, i.e. int("NN"*64, 16) % CURVE_N
-#   0x0f reduces mod CURVE_N (2^256-1 > N); the key bytes are still all 0x0f.
+#   nibble NN  ->  d = 0xNN repeated 64 times
+#   For 0x0f that scalar (2^256-1) exceeds the group order N and is reduced
+#   mod N for the scalar multiplication; the key *bytes* are still all 0x0f,
+#   which is what the oracle needs.
 # =============================================================================
 
 import os

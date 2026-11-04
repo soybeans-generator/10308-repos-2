@@ -1,58 +1,89 @@
 # =============================================================================
-# 2-derive-map.py
+# 3-derive-map.py
 #
-# Stage 2 of the chain: recover this build's 16-entry nibble permutation
-# ("[MAP] mapped -> real") by exercising the live license-decrypt path.
+# Stage 3 of the chain: recover this build's 16-entry nibble permutation, i.e.
+# the transformation from the "mapped" obfuscated key to the real private
+# scalar. Writes oracle_map.json for 4-derive-plain.py.
 #
-# WHY THIS SCRIPT EXISTS
-#   The private encryption key in *.enc.prv is stored as 64 nibbles that have
-#   been passed through per-nibble tables and then through a fixed 16-entry
-#   permutation. The tables are in the DLL and can be read statically; the
-#   permutation is per-library-build, is NOT published, and brute force is
-#   infeasible (16! = 20,922,789,888,000). So it is measured instead, using a
-#   chosen-key oracle:
+# THE PROBLEM
+#   A PlayReady private encryption key on disk (.enc.prv) is 65 bytes:
+#       [0x00:0x20]  first half
+#       [0x20:0x40]  second half
+#       [0x40]       variant byte, selects the routine/table pair for the build
+#   After the library's own deobfuscation the scalar exists in "mapped" form,
+#   where each of the 64 nibbles has been passed through one of 64 per-nibble
+#   bijection subtables. A further fixed 16-entry permutation maps those nibbles
+#   to the real ones.
 #
-#     - For each real nibble value N in 0x01..0x0f, an ECC key is generated
-#       whose private scalar is that nibble repeated 64 times, and a licence
-#       blob is built for it whose plaintext content key is a known sentinel.
-#     - The live bijection subtable the decrypt path uses is overwritten with a
-#       constant nibble value MM (forcing every mapped nibble to MM).
-#     - The licence for scalar N is decrypted. The sentinel appears in the
-#       output exactly when MM maps to N, i.e. MAP[MM] = N.
-#     - 15 such queries plus one leftover value (real 0x0, which cannot be
-#       expressed as a private scalar) give the whole permutation.
+#   The subtables are plain data in wbtool_img.bin, so 4-derive-plain.py reads
+#   them directly. The permutation is NOT stored as data anywhere (only 3
+#   standalone 16-byte permutations exist in the whole image, none of them the
+#   right one) and brute force is infeasible: 16! = 20,922,789,888,000.
 #
-#   16 syntactic entries, so 16 forced values x 15 licences = 240 decrypt calls.
+#   So the permutation is measured rather than found, using a chosen-key oracle.
+#
+# HOW THE ORACLE WORKS
+#   The live subtable set is overwritten with a constant byte so that every
+#   mapped nibble becomes the same value M. Then lic_NN.blob — a licence built
+#   for the key whose private scalar is nibble NN repeated 64 times — is
+#   decrypted with the unknown target key. The known sentinel appears in the
+#   output only when M maps to NN, i.e. MAP[M] = NN.
+#
+#   Needed per query: 15 licences (NN = 0x01..0x0f) and 16 forced values, so at
+#   most 240 decrypt calls. Nibble 0x00 has no licence (zero scalar is invalid)
+#   and is recovered as the one leftover permutation value.
+#
+#   Phase 1 identifies WHICH of the eight 0x400-byte subtable clusters is on the
+#   live path, by running lic_01 against each and looking for a single hit.
+#   Phase 2 resolves the other 14 nibbles against that cluster.
 #
 # PIPELINE
-#   1-decrypt-img.py  ->  wbtool_img.bin      (consumed here via IMG)
-#   2-derive-map.py   ->  oracle_map.json     (this script)
-#   3-derive-plain.py ->  extracted.enc.plain (consumes oracle_map.json)
-#   4-verify-plain.py ->  content_key.bin
+#   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
+#   2-decrypt-img.py   ->  wbtool_img.bin
+#   3-derive-map.py    ->  oracle_map.json                    (this script)
+#   4-derive-plain.py  ->  extracted.enc.plain
 #
-# INPUTS (all produced before this script runs)
-#   wbtool_img.bin          from 1-decrypt-img.py. Supplies the plaintext copy of
-#                           the eight bijection clusters and the plaintext
-#                           segment blocks that the decrypt path walks.
-#   extracted.enc.prv       from the msprcore.bla extractor. The target identity's
-#                           obfuscated private encryption key (0x41 = 65 bytes).
-#   oracle/lic_NN.blob      from oracle.py. 15 licence blobs (0x80 bytes each),
-#                           one per real nibble NN = 0x01..0x0f. Each is an
-#                           ECIES blob addressed to oracle/key_NN.pub whose
-#                           plaintext point X-coordinate is
-#                           "HELLO MICROSOFT!" || 0^16.
-#   PlayReady.dll           read directly; used only to enumerate descriptors so
-#                           the loaded image can be prepared.
+# INPUTS
+#   wbtool_img.bin         from 2-decrypt-img.py. Supplies the plaintext
+#                          bijection clusters and the plaintext code that the
+#                          decrypt path executes.
+#   extracted.enc.prv      from the msprcore.bla extractor. The target identity's
+#                          obfuscated key; 0x41 bytes.
+#   oracle/lic_NN.blob     from 1-make-oracle.py. 15 files, 0x80 bytes each.
+#   PlayReady.dll          read directly; used to enumerate descriptors so the
+#                          loaded image can be prepared, and loaded so the
+#                          decrypt path can be driven.
 #
 # OUTPUT
-#   oracle_map.json         {"0":14,"1":0,...} mapped nibble -> real nibble.
-#                           Reusable for every .enc.prv from the same build.
-#   derive_map.txt          log.
+#   oracle_map.json        {"0":14,"1":0,…} — mapped nibble -> real nibble.
+#                          Reusable for every .enc.prv from the same build.
+#   derive_map.txt         log.
 #
-# VERIFIED BY
-#   GOLD below is the permutation recorded for DLL sha 3cc6724d...; this build
-#   must reproduce it. Downstream, 3-derive-plain.py must reach
-#   pubkey MATCH, and 4-verify-plain.py must reach CMAC ok True.
+# ACCEPTANCE CHECK
+#   16 values, a valid bijection, exactly one leftover, and — when the DLL sha
+#   matches the recorded build — a GOLD match against the permutation derived
+#   during development. Expected for the recorded build:
+#       live cluster: s4 0x8e2210   MAP[0xd] = 0x1
+#       leftover mapped 0x1 -> real 0x0
+#       cross-check: matches the recorded permutation (GOLD match)
+#   End-to-end proof is 4-derive-plain.py printing pubkey MATCH.
+#
+# IF THE BUILD CHANGES
+#   Everything is per-build: which cluster is live, the permutation itself, and
+#   the W10/W11 XOR magic. A different DLL will produce a different map and will
+#   skip the GOLD comparison. That is expected, not an error — but it also means
+#   the map must be re-derived for each build, and 4-derive-plain.py's CLUSTER
+#   constant must be updated to whatever phase 1 reports.
+#
+# KNOWN PITFALLS
+#   - The control decrypt (cluster intact) must NOT return the sentinel. If it
+#     does, the key or the licences are wrong and every result would be garbage.
+#   - Patching a cluster that is not on the live path yields 16 identical
+#     outputs and zero hits — that is the signal used to rule it out.
+#   - The subtable page's original protection must be restored around every
+#     patch, or the kernel rejects the WB call with 0xc000000d.
+#   - A fault in the decrypt path is reported with its RVA and then hard-exits;
+#     sys.exit cannot unwind out of a ctypes callback.
 # =============================================================================
 
 import base64, ctypes, hashlib, json, os, re, struct, subprocess, sys
