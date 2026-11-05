@@ -37,11 +37,15 @@
 #   against each and looking for a single hit. Phase 2 resolves the other 14
 #   nibbles against that set.
 #
-#   THE SETS ARE LOCATED BY STRUCTURE, NOT BY ADDRESS. A set is 64 consecutive
-#   16-byte blocks, each a permutation of 0x0..0xf. Because every byte in such a
-#   set is a nibble value, the whole 0x400 region is a run of bytes < 0x10 —
-#   which makes candidate runs cheap to find. This is what allows the script to
-#   run against a build whose addresses are unknown; nothing here is hardcoded.
+# NOTHING HERE IS ADDRESSED BY CONSTANT
+#   - the bijection sets are located by structure: a set is 64 consecutive
+#     16-byte blocks, each a permutation of 0x0..0xf, so every byte in the
+#     0x400-byte region is < 0x10 and the region is found as a run of low bytes;
+#   - the descriptor of the 0x41-byte key consumer is located by its own
+#     input-size check, `cmp dword ptr [rcx+0x14], 0x41` (83 79 14 41), which is
+#     unique in the decrypted image, then mapped to the heap-exec descriptor
+#     that owns that code.
+#   The script therefore runs unmodified on any build with these two shapes.
 #
 # PIPELINE
 #   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
@@ -69,18 +73,17 @@
 #   16 values, a valid bijection, exactly one leftover, and — when the DLL sha
 #   matches the recorded build — a GOLD match against the permutation derived
 #   during development. Expected for the recorded build:
-#       live cluster: <label> 0x8e2210   MAP[0xd] = 0x1
+#       live cluster: MAP[0xd] = 0x1
 #       leftover mapped 0x1 -> real 0x0
 #       cross-check: matches the recorded permutation (GOLD match)
 #   End-to-end proof is 4-derive-plain.py printing pubkey MATCH.
 #
 # IF THE BUILD CHANGES
-#   The live set is re-identified by phase 1 automatically and the candidate
-#   sets are re-discovered by structure, so this script needs no editing for a
-#   new build. The permutation itself and the W10/W11 XOR magic still differ,
-#   and the GOLD comparison will be skipped — expected, not an error.
-#   4-derive-plain.py's CLUSTER constant must be updated to whatever phase 1
-#   reports here.
+#   Candidate sets, the live set and the key-consumer descriptor are all
+#   re-derived at runtime, so this script needs no editing. The permutation and
+#   the W10/W11 XOR magic still differ, and the GOLD comparison is skipped —
+#   expected, not an error. 4-derive-plain.py's CLUSTER constant, which is still
+#   an address, must be updated to whatever phase 1 reports here.
 #
 # KNOWN PITFALLS
 #   - The control decrypt (set intact) must NOT return the sentinel. If it does,
@@ -91,6 +94,9 @@
 #     patch, or the kernel rejects the WB call with 0xc000000d.
 #   - A fault in the decrypt path is reported with its RVA and then hard-exits;
 #     sys.exit cannot unwind out of a ctypes callback.
+#   - The key-consumer discovery assumes the routine still tests `+0x14` against
+#     `0x41`. If a future build changes that argument offset, the scan finds
+#     zero sites and the script stops rather than guessing.
 # =============================================================================
 
 import ctypes, hashlib, json, os, re, struct, subprocess, sys
@@ -104,7 +110,6 @@ LOG      = "derive_map.txt"      # output: log
 IMG      = "wbtool_img.bin"      # input: from 2-decrypt-img.py
 ORACLE   = "oracle"              # input dir: from 1-make-oracle.py (lic_NN.blob)
 
-DESC     = 0x491C0          # .enc.prv consumer (decrypt license blob)
 CBLK     = 16               # one subtable: a permutation of 0x0..0xf
 CN       = 64               # subtables per set
 CLEN     = CBLK * CN        # size of one set: 0x400
@@ -119,11 +124,9 @@ MAGIC = bytes.fromhex("a77bece491a87ebcd8a2c62856b165b3"
 SENT  = b"HELLO MICROSOFT!" + b"\x00" * 16
 WANT  = bytes(a ^ b for a, b in zip(SENT, MAGIC))
 
-# Recorded results for DLL 10.0.19041.4780 — advisory cross-checks only.
+# Recorded permutation for DLL 10.0.19041.4780 — advisory cross-check only.
 GOLD = {0x0: 0xe, 0x1: 0x0, 0x2: 0xb, 0x3: 0x4, 0x4: 0xa, 0x5: 0x7, 0x6: 0xc, 0x7: 0x3,
         0x8: 0x2, 0x9: 0x8, 0xa: 0x9, 0xb: 0x5, 0xc: 0xf, 0xd: 0x1, 0xe: 0x6, 0xf: 0xd}
-GOLD_SETS = [0x843720, 0x862ee0, 0x882920, 0x8a23f0,
-             0x8c2470, 0x8e2210, 0x902180, 0x922230]
 GOLD_DLL_SHA = "3cc6724d105e94bb0fb5971cc07ab2967dde2290ecebf4e0d4a910c80732ba7a"
 
 
@@ -158,11 +161,55 @@ def find_sets(img):
     return [(f"set{i}", rva) for i, rva in enumerate(bases)]
 
 
+def find_key_consumer(img, fb):
+    """
+    Locate the descriptor of the 0x41-byte key consumer, by its own input-size
+    check rather than by address.
+
+    The routine tests the size field of its argument struct early:
+        cmp dword ptr [rcx+0x14], 0x41      bytes: 83 79 14 41
+    That sequence is unique in the decrypted image on the recorded build. The
+    code containing it is owned by exactly one heap-exec descriptor, and that
+    descriptor is what the oracle has to drive.
+
+    Returns (descriptorRva, codeRva, nSites). descriptorRva is None if the
+    pattern was not unique or its owner could not be resolved.
+    """
+    PAT = b"\x83\x79\x14\x41"
+    sites, i = [], img.find(PAT)
+    while i != -1:
+        sites.append(i)
+        i = img.find(PAT, i + 1)
+    if len(sites) != 1:
+        return None, (sites[0] if sites else None), len(sites)
+
+    u32 = lambda b, o: struct.unpack_from("<I", b, o)[0]
+    lf = u32(fb, 0x3C)
+    nsec = struct.unpack_from("<H", fb, lf + 6)[0]
+    optsz = struct.unpack_from("<H", fb, lf + 20)[0]
+    p = lf + 24 + optsz
+    owner = None
+    for _ in range(nsec):
+        vs, va, rs, rp = struct.unpack_from("<IIII", fb, p + 8)
+        b = fb[rp:rp + rs]
+        for off in range(0, max(0, len(b) - 0xF0), 4):
+            if u32(b, off + 0x20) != 0xF0:
+                continue
+            if hashlib.sha256(b[off + 0x20:off + 0xF0]).digest() != b[off:off + 32]:
+                continue
+            code = u32(b, off + 0x34) & 0x0FFFFFFF
+            ln   = u32(b, off + 0x38) & 0x0FFFFFFF
+            if code <= sites[0] < code + ln:
+                owner = va + off
+        p += 40
+    return owner, sites[0], len(sites)
+
+
 # ---------------------------------------------------------------- worker
 # Runs in its own process (see the --sweep entry point at the bottom) so that a
 # fault in the decrypt path cannot take down the driver, and so the loaded image
 # is discarded after every query.
-def sweep(cbase, blobpath):
+def sweep(cbase, blobpath, desc):
     PRV = open(PRVF, "rb").read()
     img = open(IMG, "rb").read()     # from 2-decrypt-img.py
     fb = open(DLL, "rb").read()
@@ -277,7 +324,7 @@ def sweep(cbase, blobpath):
     blob = open(blobpath, "rb").read()            # oracle/lic_NN.blob
 
     # --- one decrypt of the given licence blob with the target .enc.prv.
-    # Argument block layout for descriptor 0x491C0 (op=3):
+    # Argument block layout for the key consumer (op=3), as the routine sees it:
     #   rcx+0x00 status ptr   rcx+0x08 mode        rcx+0x0c key ptr (0x41 bytes)
     #   rcx+0x14 size = 0x41  rcx+0x18 blob ptr    rcx+0x20 output ptr
     # The output is (signature key || content key) XOR MAGIC.
@@ -288,7 +335,7 @@ def sweep(cbase, blobpath):
         cb = ctypes.create_string_buffer(blob, len(blob))
         a = ctypes.create_string_buffer(0x40)
         struct.pack_into("<Q", a, 0x00, 3)
-        struct.pack_into("<Q", a, 0x08, base + DESC)
+        struct.pack_into("<Q", a, 0x08, base + desc)
         struct.pack_into("<Q", a, 0x10, ctypes.addressof(st))
         struct.pack_into("<I", a, 0x18, 0)
         struct.pack_into("<Q", a, 0x1C, ctypes.addressof(kb))
@@ -322,7 +369,7 @@ def sweep(cbase, blobpath):
 
 
 if len(sys.argv) > 1 and sys.argv[1] == "--sweep":
-    sweep(int(sys.argv[2], 0), sys.argv[3])
+    sweep(int(sys.argv[2], 0), sys.argv[3], int(sys.argv[4], 0))
     raise SystemExit
 
 
@@ -353,15 +400,17 @@ for nib in range(1, 16):
         die(f"{path} is not 0x80 bytes")
     blobs[nib] = path
 
-dll_sha = hashlib.sha256(open(DLL, "rb").read()).hexdigest()
+FB = open(DLL, "rb").read()
+dll_sha = hashlib.sha256(FB).hexdigest()
+IMG_BYTES = open(IMG, "rb").read()
+
 log(f"dll    {DLL}")
 log(f"sha256 {dll_sha}")
-log(f"image  {IMG}  ({os.path.getsize(IMG):,} bytes)")
+log(f"image  {IMG}  ({len(IMG_BYTES):,} bytes)")
 log(f"prv    {PRVF}  ({os.path.getsize(PRVF)} bytes)")
 log("")
 
-# --- locate the subtable sets by structure (no hardcoded addresses)
-IMG_BYTES = open(IMG, "rb").read()
+# --- locate the bijection sets by structure (no hardcoded addresses)
 SETS = find_sets(IMG_BYTES)
 log(f"bijection sets found by structure: {len(SETS)}")
 for name, rva in SETS:
@@ -370,24 +419,21 @@ log("")
 if not SETS:
     die("no 64x16-byte permutation sets found - is wbtool_img.bin decrypted?")
 
-if dll_sha == GOLD_DLL_SHA:
-    got = [r for _, r in SETS]
-    if got == GOLD_SETS:
-        log("set locations: GOLD match (advisory)")
-    else:
-        log("set locations: differ from the recorded build")
-        log(f"  got  {[hex(x) for x in got]}")
-        log(f"  want {[hex(x) for x in GOLD_SETS]}")
-    log("")
-elif len(SETS) != 8:
-    log(f"NOTE: expected 8 sets on the recorded build, found {len(SETS)}.")
-    log("      continuing - phase 1 identifies the live one regardless.")
-    log("")
+# --- locate the 0x41-byte key consumer by its own size check (no address)
+DESC, DESC_AT, NSITES = find_key_consumer(IMG_BYTES, FB)
+if DESC is None:
+    if NSITES == 0:
+        die("key consumer not found: no 'cmp dword ptr [rcx+0x14], 0x41' in image")
+    if NSITES > 1:
+        die(f"key consumer ambiguous: {NSITES} sites of 83 79 14 41 in image")
+    die(f"key consumer found at 0x{DESC_AT:06x} but no heap-exec descriptor owns it")
+log(f"key consumer: descriptor 0x{DESC:06x}  (size check at 0x{DESC_AT:06x})")
+log("")
 
 def run(cbase, blobpath, tag):
     """Run one sweep in a child process and summarise what it reported."""
     p = subprocess.run([sys.executable, os.path.abspath(__file__),
-                        "--sweep", hex(cbase), blobpath],
+                        "--sweep", hex(cbase), blobpath, hex(DESC)],
                        capture_output=True, text=True, timeout=TIMEOUT)
     lines = [x for x in (p.stdout or "").splitlines() if x.strip()]
     info = {"patched": None, "control": None, "hits": [], "fault": None}

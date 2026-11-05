@@ -27,41 +27,35 @@
 #
 # INPUT
 #   Windows.Media.Protection.PlayReady.dll, read directly from System32.
-#   Recorded build for the current chain:
-#       version  10.0.19041.4780
-#       sha256   3cc6724d105e94bb0fb5971cc07ab2967dde2290ecebf4e0d4a910c80732ba7a
-#   A different build is supported but yields a different permutation
-#   (see 3-derive-map.py), so the downstream expectations below no longer hold.
+#   Nothing about this build is assumed: descriptor locations, counts, sizes,
+#   the sacrificial slot and its relocation data are all discovered at runtime.
 #
 # OUTPUT
-#   wbtool_img.bin   SizeOfImage bytes (10,305,536 for the build above), laid out
-#                    so RVA == file offset. Consumed by IMG in 3-derive-map.py
-#                    and 4-derive-plain.py.
-#   decrypt_img.txt  log: descriptor counts, per-block results, probe bytes.
+#   wbtool_img.bin   SizeOfImage bytes, laid out so RVA == file offset.
+#                    Consumed by IMG in 3-derive-map.py and 4-derive-plain.py.
+#   decrypt_img.txt  log: descriptor counts, per-block results, sample bytes.
 #
 # ACCEPTANCE CHECK
-#   Load-base independent, so these readings decide whether the image is usable:
-#       segment descriptors 37 ok 37
-#       heap-exec 981 changed 981
-#       probe 0x335460  4c8bdc49895b2055565741554156498d
-#       probe 0x6c6f00  488d15f9ffffff488b0c2448896c2420
-#       probe 0x8e2210  0f04070a0800030d0b010906050c0e02
-#   End-to-end proof is 4-derive-plain.py printing pubkey MATCH, which requires
-#   all three of: the stage-1 and stage-2 routines being real code here, the
-#   gap blocks around 0x335460 being decrypted, and the s4 bijection subtables
-#   being intact.
+#   This stage cannot judge itself, because every address and every count is
+#   per-build. What it must report is:
+#       descriptors <n>  segments <n>  heap-exec <n>      (informational)
+#       slot 0x<...>  relocs 0x<...>/<n>                  (resolved, not hardcoded)
+#       segment descriptors <n> ok <n>                    (all must succeed)
+#       heap-exec <n>  changed <n>  unchanged <n>  error 0
+#   The real proof is 4-derive-plain.py printing pubkey MATCH: that requires the
+#   stage routines to be real code, the blocks they call to be decrypted, and the
+#   live bijection set to be intact. It is the only version-independent check.
 #
 # DO NOT COMPARE THE FILE HASH BETWEEN RUNS
 #   Every LoadLibraryW bakes the current process load base into IAT slots and
 #   relocated fields, so no two decrypted images hash alike even though they are
-#   functionally identical. Compare the probes above, never the whole-file hash.
+#   functionally identical. The hash in the log is a per-run identifier only.
 #
 # KNOWN PITFALLS
 #   - Descriptor size cap must stay at 0x200000. The two largest descriptors on
-#     this build are 0x829c and 0x3cac; a 0x2000 cap silently skips them, which
-#     loses the 0x334290..0x3370ef gap blocks (including 0x335460) and makes
-#     4-derive-plain.py execute ciphertext. A patch step is not enough — the gap
-#     blocks are the first thing that breaks.
+#     the recorded build are 0x829c and 0x3cac; a 0x2000 cap silently skips them,
+#     which loses the gap blocks 0x334290..0x3370ef and makes 4-derive-plain.py
+#     execute ciphertext.
 #   - Segment descriptors must be decrypted per descriptor, not per deduped RVA.
 #     Descriptor span lists overlap; deduping by RVA drops later/larger spans
 #     (7818 spans instead of 7937) and corrupts the downstream scalar.
@@ -73,21 +67,8 @@ import ctypes, hashlib, struct, sys
 
 # --- inputs / outputs --------------------------------------------------------
 DLL    = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"  # input
-OUT    = "wbtool_img.bin"        # output: consumed by 2-derive-map.py, 3-derive-plain.py
+OUT    = "wbtool_img.bin"        # output: consumed by 3-derive-map.py, 4-derive-plain.py
 LOG    = "decrypt_img.txt"       # output: log only
-
-# --- Warbird calling convention constants ------------------------------------
-# SLOT is a sacrificial segment descriptor inside ?g_Encry. The heap-exec pass
-# overwrites it with a synthetic descriptor so the kernel will decrypt an
-# arbitrary RVA. Any spare 0x100-byte descriptor slot would do; this one is used
-# because it is mapped R-X and its header can be restored byte-for-byte.
-SLOT   = 0x6D8000
-
-# RELOCS/NUM are the .reloc RVA and relocation-entry count passed to the WB
-# kernel call for every synthetic descriptor. They are the values stored in the
-# sacrificial descriptor itself (+0x2C / +0x30), hardcoded here because the
-# synthetic descriptor carries the heap-exec block's crypto params instead.
-RELOCS, NUM = 0x943770, 20888
 
 RWX    = 0x40                    # PAGE_EXECUTE_READWRITE
 
@@ -130,11 +111,10 @@ for va, rs, rp in secs:
     b = f[rp:rp + rs]
     for off in range(0, max(0, len(b) - 0x40), 4):
         size = u32(b, off + 0x20)
-        # 0x200000, not 0x2000: the two largest descriptors on this build are
-        # 0x829c and 0x3cac bytes. A 0x2000 cap silently skips them, which
-        # loses the gap blocks 0x334290..0x3370ef (incl. 0x335460) and makes
-        # 3-derive-plain.py fault. This was the one real defect in the C#
-        # predecessor; do not lower it.
+        # 0x200000, not 0x2000: the two largest descriptors on the recorded
+        # build are 0x829c and 0x3cac bytes. A 0x2000 cap silently skips them,
+        # which loses the gap blocks 0x334290..0x3370ef and makes
+        # 4-derive-plain.py fault. Do not lower it.
         if size < 0x40 or size > 0x200000 or off + size > len(b):
             continue
         if hashlib.sha256(b[off + 0x20:off + size]).digest() != b[off:off + 32]:
@@ -148,10 +128,29 @@ for va, rs, rp in secs:
         else:
             segs.append((va + off, rp + off, size))
 
+if not segs:
+    finish("FATAL: no segment descriptors found", 1)
+
+# --- Warbird calling convention constants ------------------------------------
+# SLOT / RELOCS / NUM all vary between DLL builds, so they are read from a real
+# segment descriptor instead of being hardcoded. segs[0] is used as the
+# sacrificial slot because a genuine descriptor already carries its own
+# self-address at +0x28, which the kernel validates; a fabricated slot elsewhere
+# would have to be told its own RVA. On the recorded build this resolves to
+# SLOT 0x6d8000, RELOCS 0x943770, NUM 20888.
+#
+# The heap-exec pass overwrites this slot with a synthetic descriptor so the
+# kernel will decrypt an arbitrary RVA; the segment pass has already finished by
+# then, so reusing one of its descriptors is safe.
+SLOT   = segs[0][0]
+RELOCS = u32(f, segs[0][1] + 0x2C)
+NUM    = u32(f, segs[0][1] + 0x30)
+
 log(f"dll     {DLL}")
 log(f"sha256  {hashlib.sha256(f).hexdigest()}")
 log(f"image   0x{sizeImg:x} ({sizeImg:,} bytes)")
 log(f"descriptors {len(segs) + len(heaps)}  segments {len(segs)}  heap-exec {len(heaps)}")
+log(f"slot    0x{SLOT:x}  relocs 0x{RELOCS:x}/{NUM}")
 log("")
 
 # =============================================================================
@@ -230,7 +229,7 @@ log("")
 # =============================================================================
 # Heap-exec pass: ONE FRESH IMAGE PER BLOCK.
 #
-# The kernel only honourS the first heap-exec decrypt per loaded image, so the
+# The kernel only honours the first heap-exec decrypt per loaded image, so the
 # library must be reloaded for every block. Each iteration:
 #   - build a synthetic descriptor for (rva, size) using this block's crypto
 #     params (copied from the block's own descriptor body at +0x40..+0xF0)
@@ -288,16 +287,18 @@ log("")
 open(OUT, "wb").write(bytes(img))
 
 # --- build signature ---------------------------------------------------------
-# These probes are the acceptance check for this stage; they are load-base
-# independent, unlike the file hash.
-for rva in (0x335460,   # gap block A - first bytes must be 4c8bdc...
-            0x337700,   # WB internal-decrypt routine
-            0x6C6F00,   # stage 1 routine, used by 3-derive-plain.py
-            0x2229F0,   # licence-blob consumer (declicense)
-            0x5234E0,   # stage 2 routine (0x720 pair)
-            0x4300F0,   # stage 2 routine (0x4f pair)
-            0x8E2210):  # s4 bijection, live cluster per 2-derive-map.py
-    log(f"  probe 0x{rva:06x} {bytes(img[rva:rva + 16]).hex()}")
+# Deliberately no hardcoded probe addresses: they are per-build. Instead dump
+# the first bytes of the first heap-exec block and of the largest segment span,
+# both chosen at runtime, so the log is still useful for eyeballing real code.
+def dump(tag, rva, n=16):
+    log(f"  {tag} 0x{rva:06x} {bytes(img[rva:rva + n]).hex()}")
+
+if heaps:
+    dump("first heap-exec", heaps[0][2])
+if segs:
+    big = max(segs, key=lambda s: s[2])
+    dump("largest segment", big[0])
+
 log("")
 log(f"written {OUT}  ({len(img):,} bytes)")
 log(f"sha256   {hashlib.sha256(bytes(img)).hexdigest()}")
