@@ -1,125 +1,91 @@
-// extract.go — text extraction: walk decoded JSON, pull out the text, recognise this tool's own previous output.
+// extract.go — extract-text: read an OpenRouter orpg.3 export, order messages by
+// createdAt, unnest the oldest, drop reasoning parts, remove the oldest
+// remaining messages, write a flat array of {type,text} objects.
+//
+// Rules, in order: order by message createdAt; unpack the oldest message if it
+// holds a previous run's output; shield the oldest and the newest; drop reasoning
+// from every message; remove the N oldest unprotected messages.
 package main
 
 import (
    "bytes"
    "encoding/json"
+   "flag"
    "fmt"
-   "strconv"
+   "os"
+   "slices"
    "strings"
+   "time"
 )
 
-// textKeys are the keys whose bare string values count as text. Objects are
-// handled structurally instead: any object with a string "text" field is a
-// part, no matter what it is nested under.
-var textKeys = map[string]bool{
-   "text":              true,
-   "content":           true,
-   "thinking":          true,
-   "reasoning":         true,
-   "reasoning_content": true,
-   "output":            true,
-   "message":           true,
-   "summary":           true,
-   "prompt":            true,
-   "completion":        true,
-   "value":             true,
-   "body":              true,
-   "delta":             true,
-}
-
-// collectFromObject reads an object whose '{' has already been consumed,
-// buffering its members so document order survives. If the object carries a
-// string "text" field, that is its text and its children are not descended
-// into; otherwise every member is walked in order.
-func collectFromObject(dec *json.Decoder, out *[]textPart) error {
-   pairs := make([]kv, 0, 8)
-   for dec.More() {
-      kt, err := dec.Token()
-      if err != nil {
-         return err
-      }
-      key, ok := kt.(string)
-      if !ok {
-         return fmt.Errorf("unexpected object key token %v", kt)
-      }
-      var raw json.RawMessage
-      if err := dec.Decode(&raw); err != nil {
-         return err
-      }
-      pairs = append(pairs, kv{key: key, val: raw})
-   }
-   if _, err := dec.Token(); err != nil { // closing '}'
-      return err
-   }
-
-   for _, p := range pairs {
-      if !strings.EqualFold(p.key, "text") {
-         continue
-      }
-      var s string
-      if err := json.Unmarshal(p.val, &s); err != nil || strings.TrimSpace(s) == "" {
-         continue
-      }
-      part := textPart{Text: s}
-      for _, q := range pairs {
-         if strings.EqualFold(q.key, "type") {
-            var ts string
-            if json.Unmarshal(q.val, &ts) == nil {
-               part.Type = ts
-            }
+// compact drops reasoning parts, removes the oldest unprotected messages, and
+// writes the flat result. Messages arrive chronological and shielded.
+func compact(msgs []msg, outPath string, removeN int) error {
+   // The part is the unit, so a message mixing reasoning and content keeps the
+   // content and goes only once empty.
+   rParts := 0
+   kept := msgs[:0]
+   for _, m := range msgs {
+      out := m.parts[:0]
+      for _, p := range m.parts {
+         if !isReasoningPart(p) {
+            out = append(out, p)
          }
       }
-      *out = append(*out, part)
-      return nil
-   }
-
-   for _, p := range pairs {
-      if err := collectFromValue(p.val, p.key, out); err != nil {
-         return err
+      rParts += len(m.parts) - len(out)
+      m.parts = out
+      if len(m.parts) == 0 && !m.protected {
+         continue
       }
+      kept = append(kept, m)
    }
-   return nil
-}
+   fmt.Printf("Reasoning parts removed: %d\n", rParts)
 
-// collectFromValue walks one JSON value. key is the object key it sits under
-// (or the key of the enclosing array), so bare strings under a text key are
-// picked up even without a wrapping object.
-func collectFromValue(raw json.RawMessage, key string, out *[]textPart) error {
-   if len(bytes.TrimSpace(raw)) == 0 {
-      return nil
-   }
-   dec := json.NewDecoder(bytes.NewReader(raw))
-   tok, err := dec.Token()
-   if err != nil {
-      return err
-   }
-
-   switch t := tok.(type) {
-   case string:
-      if isTextField(key) && strings.TrimSpace(t) != "" {
-         *out = append(*out, textPart{Text: t})
-      }
-   case json.Delim:
-      switch t {
-      case '{':
-         return collectFromObject(dec, out)
-      case '[':
-         for dec.More() {
-            var elem json.RawMessage
-            if err := dec.Decode(&elem); err != nil {
-               return err
-            }
-            if err := collectFromValue(elem, key, out); err != nil {
-               return err
-            }
+   // kept is chronological, so one pass front to back removes the oldest.
+   if removeN > 0 {
+      removable := 0
+      for _, m := range kept {
+         if !m.protected {
+            removable++
          }
-         _, err := dec.Token() // closing ']'
-         return err
-      default:
-         return fmt.Errorf("unexpected delimiter %v", t)
       }
+      if removeN > removable {
+         return fmt.Errorf("-r %d exceeds the %d removable message(s); the oldest and the newest message are always kept",
+            removeN, removable)
+      }
+      fmt.Printf("Removing %d oldest message(s):\n", removeN)
+      live := make([]msg, 0, len(kept)-removeN)
+      for _, m := range kept {
+         if !m.protected && removeN > 0 {
+            removeN--
+            fmt.Printf("  - %s [%s]\n", m.key, m.label)
+            continue
+         }
+         live = append(live, m)
+      }
+      kept = live
    }
+   fmt.Printf("Kept %d message(s)\n", len(kept))
+   fmt.Printf("  shielded: %s ... %s\n", kept[0].key, kept[len(kept)-1].key)
+
+   out := make([]textPart, 0, len(kept))
+   for _, m := range kept {
+      out = append(out, m.parts...)
+   }
+
+   var buf bytes.Buffer
+   enc := json.NewEncoder(&buf)
+   enc.SetEscapeHTML(false)
+   if err := enc.Encode(out); err != nil {
+      return fmt.Errorf("marshaling final output: %w", err)
+   }
+   finalBytes := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+   if err := os.WriteFile(outPath, finalBytes, 0o644); err != nil {
+      return fmt.Errorf("writing output: %w", err)
+   }
+   fmt.Printf("Output: %d text object(s) from %d message(s), %s\n",
+      len(out), len(kept), humanSize(len(finalBytes)))
+   fmt.Printf("Wrote %s\n", outPath)
    return nil
 }
 
@@ -136,153 +102,247 @@ func humanSize(n int) string {
    }
 }
 
-func isTextField(key string) bool {
-   return textKeys[strings.ToLower(strings.TrimSpace(key))]
+// isReasoningPart reports whether a part's type marks it as chain-of-thought:
+// reasoning_text, reasoning, reasoning.summary, thinking, ... Matching is by
+// substring, and never fires on an absent type or on plain "text"/"input_text"/
+// "output_text".
+func isReasoningPart(p textPart) bool {
+   t := strings.ToLower(p.Type)
+   return t != "" && (strings.Contains(t, "reason") || strings.Contains(t, "think"))
 }
 
-// itemLabel describes an item for reporting, e.g. "message/user".
-func itemLabel(raw json.RawMessage) string {
-   var probe struct {
-      Data *struct {
-         Type string `json:"type"`
-         Role string `json:"role"`
-      } `json:"data"`
+func main() {
+   inPath := flag.String("i", "", "input JSON file path (an OpenRouter export)")
+   outPath := flag.String("o", "", "output JSON file path (compacted array of {type,text} objects)")
+   removeN := flag.Int("r", 0,
+      "number of oldest messages to remove, ordered by message createdAt, after unnesting and after reasoning is dropped; the oldest and the newest message are always kept")
+   flag.Parse()
+
+   if *inPath == "" || *outPath == "" {
+      fmt.Fprintln(os.Stderr, "usage: extract-text -i <input.json> -o <output.json> [-r N]")
+      flag.PrintDefaults()
+      os.Exit(1)
    }
-   if err := json.Unmarshal(raw, &probe); err != nil || probe.Data == nil {
-      return "?"
+   if *removeN < 0 {
+      fmt.Fprintln(os.Stderr, "error: -r must be zero or positive")
+      os.Exit(1)
    }
-   t := probe.Data.Type
-   if t == "" {
-      t = "?"
+
+   msgs, err := readMsgs(*inPath)
+   if err != nil {
+      fmt.Fprintf(os.Stderr, "error: %v\n", err)
+      os.Exit(1)
    }
-   if probe.Data.Role != "" {
-      return t + "/" + probe.Data.Role
+   msgs, err = shieldAndUnnest(msgs)
+   if err != nil {
+      fmt.Fprintf(os.Stderr, "error: %v\n", err)
+      os.Exit(1)
    }
-   return t
+   if err := compact(msgs, *outPath, *removeN); err != nil {
+      fmt.Fprintf(os.Stderr, "error: %v\n", err)
+      os.Exit(1)
+   }
 }
 
-// stripFences removes markdown code fences wrapped around s — e.g.
-//
-//   ```json
-//   [ ... ]
-//   ```
-//
-// Repeated fences are removed too, as are bare ones without a language tag. Only
-// the very start and very end are touched; nothing between them is modified. A
-// trailing fence is only removed if the string actually started with one, so
-// content that merely ends in backticks is left alone.
-func stripFences(s string) string {
-   for i := 0; i < 8; i++ {
-      t := strings.TrimSpace(s)
-      fenced := false
-      if strings.HasPrefix(t, "```") {
-         fenced = true
-         if nl := strings.IndexByte(t, '\n'); nl >= 0 {
-            t = t[nl+1:] // drop the "```json" line
-         } else {
-            t = strings.TrimLeft(t[3:], "`")
+// export is the top-level document. Only the two maps that carry the chat are
+// read; the rest of the export is metadata this tool has no business reading.
+type export struct {
+   Messages map[string]message `json:"messages"`
+   Items    map[string]item    `json:"items"`
+}
+
+// item is one piece of a message: a message body or a reasoning block.
+type item struct {
+   Data itemData `json:"data"`
+}
+
+// itemData holds an item's content parts. Status, role and id are not needed:
+// the message carries the role and the timestamp, and the part carries its type.
+type itemData struct {
+   Content []textPart `json:"content"`
+}
+
+// itemRef points at an item by id. The array order is the order the parts belong
+// in, so nothing else on the reference is read.
+type itemRef struct {
+   ID string `json:"id"`
+}
+
+// message is one turn. It holds no text itself: its items do. createdAt is what
+// "oldest" means, and type is "user" or "assistant".
+type message struct {
+   Type      string    `json:"type"`
+   CreatedAt string    `json:"createdAt"`
+   Items     []itemRef `json:"items"`
+}
+
+// msg is one message; the unit N is removed from.
+type msg struct {
+   key       string    // message key
+   label     string    // message label
+   at        time.Time // creation time
+   parts     []textPart
+   protected bool // oldest or newest: never removed
+}
+
+// readMsgs reads the export and returns one message per chat turn, ordered by
+// createdAt. The message id breaks ties so a shared timestamp cannot reorder runs.
+func readMsgs(inPath string) ([]msg, error) {
+   raw, err := os.ReadFile(inPath)
+   if err != nil {
+      return nil, fmt.Errorf("reading input: %w", err)
+   }
+
+   var ex export
+   if err := json.Unmarshal(raw, &ex); err != nil {
+      return nil, fmt.Errorf("parsing JSON: %w", err)
+   }
+   if len(ex.Messages) == 0 {
+      return nil, fmt.Errorf("input has no messages")
+   }
+   fmt.Printf("Input: %d message(s), %d item(s), %s\n",
+      len(ex.Messages), len(ex.Items), humanSize(len(raw)))
+
+   msgs := make([]msg, 0, len(ex.Messages))
+   for id, m := range ex.Messages {
+      if m.Type == "" {
+         return nil, fmt.Errorf("message %q declares no type", id)
+      }
+      if m.CreatedAt == "" {
+         return nil, fmt.Errorf("message %q has no createdAt", id)
+      }
+      at, err := time.Parse(time.RFC3339Nano, m.CreatedAt)
+      if err != nil {
+         return nil, fmt.Errorf("message %q createdAt %q: %w", id, m.CreatedAt, err)
+      }
+
+      var parts []textPart
+      for _, ref := range m.Items {
+         it, ok := ex.Items[ref.ID]
+         if !ok {
+            return nil, fmt.Errorf("message %q references missing item %q", id, ref.ID)
          }
-         t = strings.TrimSpace(t)
+         for _, p := range it.Data.Content {
+            if p.Text != "" {
+               parts = append(parts, p)
+            }
+         }
       }
-      if fenced && strings.HasSuffix(t, "```") {
-         t = strings.TrimSpace(t[:len(t)-3])
-      }
-      if t == strings.TrimSpace(s) {
-         return t
-      }
-      s = t
+      msgs = append(msgs, msg{key: id, label: m.Type, at: at, parts: parts})
    }
-   return strings.TrimSpace(s)
+
+   slices.SortStableFunc(msgs, func(a, b msg) int {
+      if c := a.at.Compare(b.at); c != 0 {
+         return c
+      }
+      return strings.Compare(a.key, b.key)
+   })
+   return msgs, nil
 }
 
-// unquoteJSON unwraps a JSON string literal, for output that reached the message
-// escaped rather than as raw JSON.
-func unquoteJSON(s string) (string, bool) {
-   if len(s) > 1 && s[0] == '"' && s[len(s)-1] == '"' {
-      if u, err := strconv.Unquote(s); err == nil {
-         return u, true
+// shieldAndUnnest expands the oldest message if it carries a previous run's
+// output, drops textless messages, and shields the oldest and the newest. Textless
+// messages go first, so an empty turn cannot steal the shield.
+func shieldAndUnnest(msgs []msg) ([]msg, error) {
+   first := msgs[0]
+   flat, nested := unnestFirst(first.parts)
+   if nested {
+      fmt.Printf("Oldest message %s [%s]: previous run's output unpacked into %d object(s)\n",
+         first.key, first.label, len(flat))
+      expanded := make([]msg, 0, len(msgs)+len(flat)-1)
+      for i, p := range flat {
+         key := first.key
+         if i > 0 {
+            key = fmt.Sprintf("%s:inner[%d]", first.key, i)
+         }
+         if p.Type == "" {
+            return nil, fmt.Errorf("message %s: inner part has no type", key)
+         }
+         expanded = append(expanded, msg{key: key, label: p.Type, at: first.at, parts: []textPart{p}})
+      }
+      msgs = append(expanded, msgs[1:]...)
+   }
+
+   nonEmpty := msgs[:0]
+   for _, m := range msgs {
+      if len(m.parts) > 0 {
+         nonEmpty = append(nonEmpty, m)
       }
    }
-   return "", false
-}
-
-// kv is one object member buffered so document order survives.
-type kv struct {
-   key string
-   val json.RawMessage
+   msgs = nonEmpty
+   if len(msgs) == 0 {
+      return nil, fmt.Errorf("no text found in any message")
+   }
+   msgs[0].protected, msgs[len(msgs)-1].protected = true, true
+   return msgs, nil
 }
 
 // textPart is one piece of text pulled out of an item, plus the "type" that
-// accompanied it in the source (input_text, output_text, thinking, ...).
-// Type is omitted when the source had none.
+// accompanied it in the source. Type is omitted when the source had none.
 type textPart struct {
    Type string `json:"type,omitempty"`
    Text string `json:"text"`
 }
 
-// parseExportArray parses s as this tool's flat output, strictly: a non-empty
-// array whose elements have only "text" and optional "type", with "text" a
-// string.
+// parseExportArray parses s as this tool's flat output: a non-empty array of text
+// parts. Extra keys are ignored; a missing text field means it is not our output.
 func parseExportArray(s string) ([]textPart, bool) {
-   var elems []json.RawMessage
+   var elems []struct {
+      Type string  `json:"type"`
+      Text *string `json:"text"`
+   }
    if err := json.Unmarshal([]byte(s), &elems); err != nil || len(elems) == 0 {
       return nil, false
    }
    parts := make([]textPart, 0, len(elems))
    for _, e := range elems {
-      var obj map[string]json.RawMessage
-      if err := json.Unmarshal(e, &obj); err != nil {
+      if e.Text == nil {
          return nil, false
       }
-      for k := range obj {
-         if k != "text" && k != "type" {
-            return nil, false // some other array-of-objects: not our output
-         }
-      }
-      var probe struct {
-         Type string  `json:"type"`
-         Text *string `json:"text"`
-      }
-      if err := json.Unmarshal(e, &probe); err != nil || probe.Text == nil {
-         return nil, false
-      }
-      parts = append(parts, textPart{Type: probe.Type, Text: *probe.Text})
+      parts = append(parts, textPart{Type: e.Type, Text: *e.Text})
    }
    return parts, true
 }
 
-// splitExport reports whether s is output written by this tool — a JSON array
-// whose elements carry only a string "text" and an optional string "type" — and
-// if so returns its elements as text parts. The array may arrive bare, as a JSON
-// string literal, or wrapped in markdown code fences, which is how such output
-// usually ends up pasted back in. A false result means s is ordinary text, i.e.
-// the original prompt.
+// splitExport reports whether s is output written by this tool and, if so, returns
+// its elements as text parts. The array may arrive bare, as a JSON string literal,
+// or padded with prose or a markdown fence; only the bracketed region is parsed,
+// taken from the string as given. Nothing is trimmed, collapsed, or rewritten.
+// False means s is ordinary text, i.e. the original prompt.
 func splitExport(s string) ([]textPart, bool) {
-   t := strings.TrimSpace(s)
-   if u, ok := unquoteJSON(t); ok {
-      t = strings.TrimSpace(u)
+   t := s
+   if len(t) > 0 && t[0] == '"' {
+      var u string
+      if err := json.Unmarshal([]byte(t), &u); err != nil {
+         // Quoted but not a JSON string literal: ordinary text, so
+         // "not our output" is the answer, not a failure to report.
+         return nil, false
+      }
+      t = u
    }
-   t = stripFences(t)
-   if len(t) < 2 || t[0] != '[' {
+   start := strings.IndexByte(t, '[')
+   end := strings.LastIndexByte(t, ']')
+   if start < 0 || end <= start {
       return nil, false
    }
-   if parts, ok := parseExportArray(t); ok {
-      return parts, true
-   }
-   // Tolerate trailing prose after the closing bracket.
-   if i := strings.LastIndexByte(t, ']'); i > 0 {
-      return parseExportArray(t[:i+1])
-   }
-   return nil, false
+   return parseExportArray(t[start : end+1])
 }
 
-// textParts returns every text block in an item, in document order.
-func textParts(raw json.RawMessage) ([]textPart, error) {
-   parts := make([]textPart, 0, 4)
-   if err := collectFromValue(raw, "", &parts); err != nil {
-      return nil, err
+// unnestFirst expands every part of the oldest message that is a previous run's
+// output into the messages it holds, in place, so index 0 stays the original
+// prompt. The result is always flat, so one pass is enough.
+func unnestFirst(ps []textPart) (flat []textPart, nested bool) {
+   flat = make([]textPart, 0, len(ps)+8)
+   for _, p := range ps {
+      msgs, ok := splitExport(p.Text)
+      if !ok {
+         flat = append(flat, p)
+         continue
+      }
+      nested = true
+      flat = append(flat, msgs...)
    }
-   return parts, nil
+   return flat, nested
 }
 
 // end extract.go
