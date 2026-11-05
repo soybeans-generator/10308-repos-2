@@ -16,7 +16,7 @@
 #   to the real ones.
 #
 #   The subtables are plain data in wbtool_img.bin, so 4-derive-plain.py reads
-#   them directly. The permutation is NOT stored as data anywhere (only 3
+#   them directly. The permutation is NOT stored as data anywhere (only three
 #   standalone 16-byte permutations exist in the whole image, none of them the
 #   right one) and brute force is infeasible: 16! = 20,922,789,888,000.
 #
@@ -33,9 +33,15 @@
 #   most 240 decrypt calls. Nibble 0x00 has no licence (zero scalar is invalid)
 #   and is recovered as the one leftover permutation value.
 #
-#   Phase 1 identifies WHICH of the eight 0x400-byte subtable clusters is on the
-#   live path, by running lic_01 against each and looking for a single hit.
-#   Phase 2 resolves the other 14 nibbles against that cluster.
+#   Phase 1 identifies WHICH subtable set is on the live path, by running lic_01
+#   against each and looking for a single hit. Phase 2 resolves the other 14
+#   nibbles against that set.
+#
+#   THE SETS ARE LOCATED BY STRUCTURE, NOT BY ADDRESS. A set is 64 consecutive
+#   16-byte blocks, each a permutation of 0x0..0xf. Because every byte in such a
+#   set is a nibble value, the whole 0x400 region is a run of bytes < 0x10 —
+#   which makes candidate runs cheap to find. This is what allows the script to
+#   run against a build whose addresses are unknown; nothing here is hardcoded.
 #
 # PIPELINE
 #   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
@@ -45,7 +51,7 @@
 #
 # INPUTS
 #   wbtool_img.bin         from 2-decrypt-img.py. Supplies the plaintext
-#                          bijection clusters and the plaintext code that the
+#                          bijection sets and the plaintext code that the
 #                          decrypt path executes.
 #   extracted.enc.prv      from the msprcore.bla extractor. The target identity's
 #                          obfuscated key; 0x41 bytes.
@@ -63,73 +69,102 @@
 #   16 values, a valid bijection, exactly one leftover, and — when the DLL sha
 #   matches the recorded build — a GOLD match against the permutation derived
 #   during development. Expected for the recorded build:
-#       live cluster: s4 0x8e2210   MAP[0xd] = 0x1
+#       live cluster: <label> 0x8e2210   MAP[0xd] = 0x1
 #       leftover mapped 0x1 -> real 0x0
 #       cross-check: matches the recorded permutation (GOLD match)
 #   End-to-end proof is 4-derive-plain.py printing pubkey MATCH.
 #
 # IF THE BUILD CHANGES
-#   Everything is per-build: which cluster is live, the permutation itself, and
-#   the W10/W11 XOR magic. A different DLL will produce a different map and will
-#   skip the GOLD comparison. That is expected, not an error — but it also means
-#   the map must be re-derived for each build, and 4-derive-plain.py's CLUSTER
-#   constant must be updated to whatever phase 1 reports.
+#   The live set is re-identified by phase 1 automatically and the candidate
+#   sets are re-discovered by structure, so this script needs no editing for a
+#   new build. The permutation itself and the W10/W11 XOR magic still differ,
+#   and the GOLD comparison will be skipped — expected, not an error.
+#   4-derive-plain.py's CLUSTER constant must be updated to whatever phase 1
+#   reports here.
 #
 # KNOWN PITFALLS
-#   - The control decrypt (cluster intact) must NOT return the sentinel. If it
-#     does, the key or the licences are wrong and every result would be garbage.
-#   - Patching a cluster that is not on the live path yields 16 identical
-#     outputs and zero hits — that is the signal used to rule it out.
+#   - The control decrypt (set intact) must NOT return the sentinel. If it does,
+#     the key or the licences are wrong and every result would be garbage.
+#   - Patching a set that is not on the live path yields 16 identical outputs and
+#     zero hits — that is the signal used to rule it out.
 #   - The subtable page's original protection must be restored around every
 #     patch, or the kernel rejects the WB call with 0xc000000d.
 #   - A fault in the decrypt path is reported with its RVA and then hard-exits;
 #     sys.exit cannot unwind out of a ctypes callback.
 # =============================================================================
 
-import base64, ctypes, hashlib, json, os, re, struct, subprocess, sys
+import ctypes, hashlib, json, os, re, struct, subprocess, sys
 
 # --- inputs / outputs --------------------------------------------------------
 DLL      = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"  # input (live)
 PRVF     = "extracted.enc.prv"   # input: from the msprcore.bla extractor
-OUTF     = "oracle_map.json"     # output: consumed by 3-derive-plain.py
+OUTF     = "oracle_map.json"     # output: consumed by 4-derive-plain.py
 LOG      = "derive_map.txt"      # output: log
 
-IMG      = "wbtool_img.bin"      # input: from 1-decrypt-img.py
-ORACLE   = "oracle"              # input dir: from oracle.py (lic_NN.blob)
+IMG      = "wbtool_img.bin"      # input: from 2-decrypt-img.py
+ORACLE   = "oracle"              # input dir: from 1-make-oracle.py (lic_NN.blob)
 
 DESC     = 0x491C0          # .enc.prv consumer (decrypt license blob)
-CLEN     = 0x400            # 64 per-nibble subtables x 16 bytes
+CBLK     = 16               # one subtable: a permutation of 0x0..0xf
+CN       = 64               # subtables per set
+CLEN     = CBLK * CN        # size of one set: 0x400
 RWX      = 0x40
 TIMEOUT  = 900
 
 # The decrypted licence output is (signature key || content key) XOR this magic.
 # W10 sequence; a W11 library needs the W11 sequence instead. Getting this wrong
-# makes every query look like a miss.
+# makes every query look like a miss. Not derivable — a published OS constant.
 MAGIC = bytes.fromhex("a77bece491a87ebcd8a2c62856b165b3"
                      "3ad2572cf88bdae3ddc79be816be3185")   # W10 blob XOR
 SENT  = b"HELLO MICROSOFT!" + b"\x00" * 16
 WANT  = bytes(a ^ b for a, b in zip(SENT, MAGIC))
 
-# The eight 0x400-byte nibble-permutation clusters in .rdata, as located by
-# scanning wbtool_img.bin. Only ONE of them is on the live decrypt path for a
-# given key format; phase 1 below determines which, by testing lic_01 against
-# each and looking for the sentinel.
-CLUSTERS = [("t3", 0x843720), ("t4", 0x862ee0), ("s1", 0x882920), ("s2", 0x8a23f0),
-            ("s3", 0x8c2470), ("s4", 0x8e2210), ("s5", 0x902180), ("s6", 0x922230)]
-
-# recorded result for DLL 10.0.19041.4780 — advisory cross-check only
+# Recorded results for DLL 10.0.19041.4780 — advisory cross-checks only.
 GOLD = {0x0: 0xe, 0x1: 0x0, 0x2: 0xb, 0x3: 0x4, 0x4: 0xa, 0x5: 0x7, 0x6: 0xc, 0x7: 0x3,
         0x8: 0x2, 0x9: 0x8, 0xa: 0x9, 0xb: 0x5, 0xc: 0xf, 0xd: 0x1, 0xe: 0x6, 0xf: 0xd}
+GOLD_SETS = [0x843720, 0x862ee0, 0x882920, 0x8a23f0,
+             0x8c2470, 0x8e2210, 0x902180, 0x922230]
 GOLD_DLL_SHA = "3cc6724d105e94bb0fb5971cc07ab2967dde2290ecebf4e0d4a910c80732ba7a"
+
+
+def find_sets(img):
+    """
+    Locate every bijection set by structure, not by address.
+
+    A set is CN consecutive CBLK-byte blocks, each a permutation of 0x0..0xf.
+    Every byte in such a set is therefore < 0x10, so the whole CLEN-byte region
+    is a run of low bytes. Finding those runs is cheap (regex, in C); only the
+    few offsets inside a run then need the permutation check.
+
+    Returns [(label, rva), ...] ascending by rva. An empty list means the image
+    is not decrypted, or does not have the expected layout.
+    """
+    bases = []
+    for m in re.finditer(rb"[\x00-\x0f]{%d,}" % CLEN, img):
+        lo, hi = m.start(), m.end()
+        o = lo
+        while o + CLEN <= hi:
+            # cheap first: most offsets fail on the first block
+            if len(set(img[o:o + CBLK])) != CBLK:
+                o += 1
+                continue
+            if all(len(set(img[o + i * CBLK:o + (i + 1) * CBLK])) == CBLK
+                   for i in range(CN)):
+                bases.append(o)
+                o += CLEN                  # don't re-accept overlapping offsets
+            else:
+                o += 1
+    bases.sort()
+    return [(f"set{i}", rva) for i, rva in enumerate(bases)]
 
 
 # ---------------------------------------------------------------- worker
 # Runs in its own process (see the --sweep entry point at the bottom) so that a
 # fault in the decrypt path cannot take down the driver, and so the loaded image
-# is discarded after every cluster / nibble.
+# is discarded after every query.
 def sweep(cbase, blobpath):
     PRV = open(PRVF, "rb").read()
-    img = open(IMG, "rb").read()     # from 1-decrypt-img.py
+    img = open(IMG, "rb").read()     # from 2-decrypt-img.py
     fb = open(DLL, "rb").read()
 
     # --- enumerate segment spans from the file, so the image can be prepared.
@@ -159,7 +194,7 @@ def sweep(cbase, blobpath):
         b = fb[rp:rp + rs]
         for off in range(0, max(0, len(b) - 0x40), 4):
             size = u32(b, off + 0x20)
-            # 0x200000 cap, matching 1-decrypt-img.py. A 0x2000 cap silently
+            # 0x200000 cap, matching 2-decrypt-img.py. A 0x2000 cap silently
             # skips the two large descriptors and breaks the decrypt path.
             if size < 0x40 or size > 0x200000 or off + size > len(b):
                 continue
@@ -220,13 +255,15 @@ def sweep(cbase, blobpath):
     for r, s in seg:
         rawb = raw_at(r, s)
         if rawb is None or img[r:r + s] == rawb:
-            continue                            # unmapped, or nothing was decrypted here
+            continue                            # unmapped, or nothing decrypted here
         if wr(r, img[r:r + s]):
             n += 1
 
     def onf(ep):
-        """Report where the decrypt path died, then hard-exit (sys.exit cannot
-        unwind out of a ctypes callback)."""
+        """
+        Report where the decrypt path died, then hard-exit. sys.exit cannot
+        unwind out of a ctypes callback, so os._exit is required.
+        """
         er = struct.unpack_from("<Q", ctypes.string_at(ep, 8))[0]
         c = struct.unpack_from("<I", ctypes.string_at(er, 4))[0]
         a = struct.unpack_from("<Q", ctypes.string_at(er + 0x10, 8))[0]
@@ -263,10 +300,9 @@ def sweep(cbase, blobpath):
 
     print(f"PATCHED {n}", flush=True)
 
-    # --- control run with the cluster intact. This must NOT produce the
-    # sentinel: the target key's scalar is not NN*0x111..1, so if the sentinel
-    # appears either the key or the licences are wrong and the whole sweep would
-    # be meaningless.
+    # --- control run with the set intact. This must NOT produce the sentinel:
+    # the target key's scalar is not NN*0x111..1, so if the sentinel appears
+    # either the key or the licences are wrong and the whole sweep is invalid.
     orig = ctypes.string_at(base + cbase, CLEN)
     rc, sd, out = decrypt()
     print(f"CONTROL nt=0x{rc:08x} st={sd.hex()} sentinel={'YES' if out == WANT else 'no'}",
@@ -306,7 +342,7 @@ for f in (IMG, PRVF):
     if not os.path.isfile(f):
         die(f"missing {f}")
 if not os.path.isdir(ORACLE):
-    die(f"missing {ORACLE}\\ - run oracle.py first")
+    die(f"missing {ORACLE}\\ - run 1-make-oracle.py first")
 
 blobs = {}
 for nib in range(1, 16):
@@ -323,6 +359,30 @@ log(f"sha256 {dll_sha}")
 log(f"image  {IMG}  ({os.path.getsize(IMG):,} bytes)")
 log(f"prv    {PRVF}  ({os.path.getsize(PRVF)} bytes)")
 log("")
+
+# --- locate the subtable sets by structure (no hardcoded addresses)
+IMG_BYTES = open(IMG, "rb").read()
+SETS = find_sets(IMG_BYTES)
+log(f"bijection sets found by structure: {len(SETS)}")
+for name, rva in SETS:
+    log(f"  {name}  0x{rva:06x}  first block {IMG_BYTES[rva:rva + CBLK].hex()}")
+log("")
+if not SETS:
+    die("no 64x16-byte permutation sets found - is wbtool_img.bin decrypted?")
+
+if dll_sha == GOLD_DLL_SHA:
+    got = [r for _, r in SETS]
+    if got == GOLD_SETS:
+        log("set locations: GOLD match (advisory)")
+    else:
+        log("set locations: differ from the recorded build")
+        log(f"  got  {[hex(x) for x in got]}")
+        log(f"  want {[hex(x) for x in GOLD_SETS]}")
+    log("")
+elif len(SETS) != 8:
+    log(f"NOTE: expected 8 sets on the recorded build, found {len(SETS)}.")
+    log("      continuing - phase 1 identifies the live one regardless.")
+    log("")
 
 def run(cbase, blobpath, tag):
     """Run one sweep in a child process and summarise what it reported."""
@@ -353,14 +413,14 @@ def run(cbase, blobpath, tag):
             f"  hits {[hex(h) for h in info['hits']]}")
     return info
 
-# ---- phase 1: which cluster is live?  (lic_01 -> real nibble 0x1)
-# lic_01's scalar is 0x11..11, so if the live cluster is forced to MM and the
-# sentinel appears, MAP[MM] = 1. Clusters not on this key format's path produce
-# 16 identical outputs (no HIT) because patching them changes nothing.
-log("phase 1: locate the live bijection cluster (lic_01 -> real nibble 0x1)")
+# ---- phase 1: which set is live?  (lic_01 -> real nibble 0x1)
+# lic_01's scalar is 0x11..11, so if the live set is forced to MM and the
+# sentinel appears, MAP[MM] = 1. Sets not on this key format's path produce 16
+# identical outputs (no HIT) because patching them changes nothing.
+log("phase 1: locate the live bijection set (lic_01 -> real nibble 0x1)")
 log("")
 live, seed = None, None
-for name, cbase in CLUSTERS:
+for name, cbase in SETS:
     info = run(cbase, blobs[1], f"{name} 0x{cbase:06x}")
     if info["fault"] or info["patched"] is None:
         continue
@@ -368,19 +428,19 @@ for name, cbase in CLUSTERS:
         die(f"{name}: control decrypt returned the sentinel - wrong key or blown oracle")
     if len(info["hits"]) == 1:
         if live is not None:
-            die(f"two live clusters: {live[0]} and {name}")   # ambiguity is fatal
+            die(f"two live sets: {live[0]} and {name}")   # ambiguity is fatal
         live, seed = (name, cbase), info["hits"][0]
     elif len(info["hits"]) > 1:
         die(f"{name}: {len(info['hits'])} hits for one nibble - table not a clean bijection")
     log("")
 
 if live is None:
-    die("no cluster produced the sentinel - wbtool_img.bin or the licences are wrong")
+    die("no set produced the sentinel - wbtool_img.bin or the licences are wrong")
 
 log(f"live cluster: {live[0]} 0x{live[1]:06x}   MAP[0x{seed:x}] = 0x1")
 log("")
 
-# ---- phase 2: remaining 14 nibbles on the live cluster
+# ---- phase 2: remaining 14 nibbles on the live set
 # Every real nibble must resolve to exactly one mapped value, and no two real
 # nibbles may claim the same mapped value - that would mean the table is not a
 # permutation and the result must not be written.

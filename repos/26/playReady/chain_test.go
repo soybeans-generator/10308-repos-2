@@ -33,8 +33,64 @@ var key_tests = []struct {
    },
 }
 
+func TestChain(t *testing.T) {
+   directories := []string{"ignore/SL2000", "ignore/SL3000"}
+   for _, baseDir := range directories {
+      paths := getPaths(baseDir)
+      data, err := os.ReadFile(paths.groupCert)
+      if err != nil {
+         t.Fatal(err)
+      }
+      chain_data, err := ParseChain(data)
+      if err != nil {
+         t.Fatal(err)
+      }
+      data, err = os.ReadFile(paths.zPriv)
+      if err != nil {
+         t.Fatal(err)
+      }
+      modelKey, err := ParseRawPrivateKey(data)
+      if err != nil {
+         t.Fatal(err)
+      }
+      signingKey, err := GenerateKey()
+      if err != nil {
+         t.Fatal(err)
+      }
+      encrypt_key, err := GenerateKey()
+      if err != nil {
+         t.Fatal(err)
+      }
+      err = chain_data.GenerateLeaf(modelKey, signingKey, encrypt_key)
+      if err != nil {
+         t.Fatal(err)
+      }
+      err = write_file(paths.devCert, chain_data.Bytes())
+      if err != nil {
+         t.Fatal(err)
+      }
+      data, err = PrivateKeyBytes(encrypt_key)
+      if err != nil {
+         t.Fatal(err)
+      }
+      err = write_file(paths.zPrivEncr, data)
+      if err != nil {
+         t.Fatal(err)
+      }
+      data, err = PrivateKeyBytes(signingKey)
+      if err != nil {
+         t.Fatal(err)
+      }
+      err = write_file(paths.zPrivSig, data)
+      if err != nil {
+         t.Fatal(err)
+      }
+   }
+}
+
 func TestKey(t *testing.T) {
-   paths := getPaths("ignore/SL2000")
+   paths := getPaths("ignore")
+   t.Logf("%+v", paths)
    data, err := os.ReadFile(paths.devCert)
    if err != nil {
       t.Fatal(err)
@@ -128,75 +184,25 @@ func write_file(name string, data []byte) error {
    return os.WriteFile(name, data, os.ModePerm)
 }
 
-func getPaths(baseDir string) testPaths {
-   return testPaths{
-      groupCert: baseDir + "/bgroupcert.dat",
-      zPriv:     baseDir + "/zgpriv.dat",
-      devCert:   baseDir + "/bdevcert.dat",
-      zPrivEncr: baseDir + "/zprivencr.dat",
-      zPrivSig:  baseDir + "/zprivsig.dat",
-   }
-}
-
-func TestChain(t *testing.T) {
-   directories := []string{"ignore/SL2000", "ignore/SL3000"}
-   for _, baseDir := range directories {
-      paths := getPaths(baseDir)
-      data, err := os.ReadFile(paths.groupCert)
-      if err != nil {
-         t.Fatal(err)
-      }
-      chain_data, err := ParseChain(data)
-      if err != nil {
-         t.Fatal(err)
-      }
-      data, err = os.ReadFile(paths.zPriv)
-      if err != nil {
-         t.Fatal(err)
-      }
-      modelKey, err := ParseRawPrivateKey(data)
-      if err != nil {
-         t.Fatal(err)
-      }
-      signingKey, err := GenerateKey()
-      if err != nil {
-         t.Fatal(err)
-      }
-      encrypt_key, err := GenerateKey()
-      if err != nil {
-         t.Fatal(err)
-      }
-      err = chain_data.GenerateLeaf(modelKey, signingKey, encrypt_key)
-      if err != nil {
-         t.Fatal(err)
-      }
-      err = write_file(paths.devCert, chain_data.Bytes())
-      if err != nil {
-         t.Fatal(err)
-      }
-      data, err = PrivateKeyBytes(encrypt_key)
-      if err != nil {
-         t.Fatal(err)
-      }
-      err = write_file(paths.zPrivEncr, data)
-      if err != nil {
-         t.Fatal(err)
-      }
-      data, err = PrivateKeyBytes(signingKey)
-      if err != nil {
-         t.Fatal(err)
-      }
-      err = write_file(paths.zPrivSig, data)
-      if err != nil {
-         t.Fatal(err)
-      }
-   }
-}
-
 type testPaths struct {
    groupCert string
    zPriv     string
    devCert   string
    zPrivEncr string
    zPrivSig  string
+}
+
+func getPaths(baseDir string) testPaths {
+   return testPaths{
+      groupCert: baseDir + "/bgroupcert.dat",
+      zPriv:     baseDir + "/zgpriv.dat",
+
+      //devCert:   baseDir + "/bdevcert.dat",
+      //zPrivEncr: baseDir + "/zprivencr.dat",
+      //zPrivSig:  baseDir + "/zprivsig.dat",
+
+      devCert:   baseDir + "/extracted.cert",
+      zPrivSig:  baseDir + "/extracted.sig.plain",
+      zPrivEncr: baseDir + "/extracted.enc.plain",
+   }
 }
