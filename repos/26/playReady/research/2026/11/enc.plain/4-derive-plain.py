@@ -8,7 +8,7 @@
 #   private scalar, in four steps:
 #
 #     stage 1  prv[0x00:0x20]  --stage-1 routine-->  OBF
-#     stage 2  OBF (mutated in place) --0x529250-->  mut
+#     stage 2  OBF (mutated in place) --stage-2 routine-->  mut
 #     stage 3  mut   --64 per-nibble bijection subtables-->  mapped
 #     stage 4  mapped --16-entry permutation from oracle_map.json-->  plain
 #
@@ -27,10 +27,10 @@
 #   OBF would still let stages 2-4 reach pubkey MATCH and would mask a broken
 #   stage 1, turning the only acceptance test into a false pass.
 #
-# STAGE 1 IS DISCOVERED, NOT HARDCODED
-#   The stage-1 routine is selected at runtime by the key's variant byte, so its
-#   address cannot be assumed. It is found by walking the code graph outward from
-#   the 0x41-byte key consumer:
+# NO ADDRESS IN THIS FILE IS HARDCODED
+#   Both stage routines are selected at runtime by the key's variant byte, so
+#   neither address can be assumed. They are found by walking the code graph
+#   outward from the 0x41-byte key consumer:
 #     - the consumer is located by its own input-size check,
 #       `cmp dword ptr [rcx+0x14], 0x41` (83 79 14 41), unique in the image;
 #     - from there, rip-relative lea targets and rel32 call/jmp targets are
@@ -38,14 +38,14 @@
 #       reach (descriptor refs land ~7 bytes off, hence the tolerance);
 #     - plain segment code is followed too, because the shim that issues the
 #       inner WB call lives there rather than in a WB block.
-#   That yields a superset of candidates. The public key then decides: each
-#   candidate is driven through the full chain and only the one whose scalar
-#   reproduces .enc.pub is accepted.
+#   That yields a superset containing both stages. The public key then decides:
+#   every (stage 1, stage 2) pairing is driven through the full chain and only
+#   the one whose scalar reproduces .enc.pub is accepted.
 #
-#   Candidates are tried in separate processes because a wrong candidate can
-#   fault inside the library (the 0x720-family routines take a pointer where the
+#   Each trial runs in its own process because a wrong candidate can fault
+#   inside the library (the 0x720-family routines take a pointer where the
 #   0x4f-family take a size). Isolation keeps one bad candidate from ending the
-#   search.
+#   search, and lets the fault be reported per candidate.
 #
 # PIPELINE
 #   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
@@ -59,8 +59,8 @@
 #                            [0x20:0x40]  second half  (stage 2 read-only input)
 #                            [0x40]       variant byte (selects the routine pair)
 #   extracted.enc.pub      from the same extractor, 64 bytes X||Y. Used ONLY to
-#                          verify the derived scalar, and to pick the stage-1
-#                          candidate - never as an input to the derivation.
+#                          verify the derived scalar and to pick the pairing -
+#                          never as an input to the derivation.
 #   wbtool_img.bin         from 2-decrypt-img.py. Supplies (a) the plaintext
 #                          segment blocks copied into the live image so stages
 #                          1 and 2 can execute, and (b) the live bijection set.
@@ -77,24 +77,25 @@
 # ACCEPTANCE CHECK
 #   Self-check d*G == .enc.pub, executed before writing. Expected for the
 #   recorded build:
-#       CODE_OBF 0x6c6f00   (descriptor 0x4abc0)
-#       OBF      69ef7582608af8d0df0fb4b515449be5a8d0c903741cbf3353be70eb460521f4
-#       plain    cdfb1d858ea5cfe062d0ba877cbe2ea731fdcd196d0c9be64699cf723cbcdcc1
-#       pubkey   MATCH
+#       stage 1   0x6c6f00  (descriptor 0x4abc0)
+#       OBF       69ef7582608af8d0df0fb4b515449be5a8d0c903741cbf3353be70eb460521f4
+#       stage 2   0x529250  (descriptor 0x8fcc0)
+#       plain     cdfb1d858ea5cfe062d0ba877cbe2ea731fdcd196d0c9be64699cf723cbcdcc1
+#       pubkey    MATCH
 #   A pass here means stages 1 through 4 all ran correctly, because each stage's
 #   output feeds the next and the final scalar must land on the exact public
 #   point. Independent cross-checks, run only when needed:
 #       ECIES-decrypt a real licence XMR with d; the AES-CMAC must match
 #       go run ./lictest       Go implementation, same content key
 #
-# PER-BUILD CONSTANTS
-#   CODE_MAP is the one address still hardcoded: it is the stage-2 routine, also
-#   selected by the variant byte. Everything else is either discovered at
-#   runtime (stage 1, bijection set) or read from oracle_map.json.
+# COST
+#   One process per (stage-1 candidate) plus one per surviving (OBF, stage-2
+#   candidate) pair, because each trial must load the library and patch the
+#   image. Typically a few dozen processes; a few minutes.
 #
 # HOW THE STAGES ARE CALLED
-#   Stages 1 and 2 are heap-exec routines, so they are invoked with the kernel's
-#   op=3 call. The argument block, as the routines see it (rcx = args+0x10):
+#   Both are heap-exec routines, invoked with the kernel's op=3 call. The
+#   argument block, as the routines see it (rcx = args+0x10):
 #       +0x00  -> status dword
 #       +0x08  -> key / writable input buffer
 #       +0x10  u32 size 0x20
@@ -133,26 +134,21 @@ LOG   = "derive_plain.txt"       # output: log
 IMG   = "wbtool_img.bin"         # input: from 2-decrypt-img.py
 MAPF  = "oracle_map.json"        # input: from 3-derive-map.py (permutation + cluster)
 
-# --- the one remaining per-build address --------------------------------------
-# Stage 2 routine. Selected at runtime by the key's variant byte alongside
-# stage 1, so it cannot be found by shape; identified by cross-referencing the
-# WB call trace on the recorded build.
-CODE_MAP = 0x529250    # stage 2: in = OBF (mutated in place), out = prv[0x20:0x40]
-
 RWX      = 0x40
 CURVE_N  = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 TIMEOUT  = 300
 
-# --- stage-1 discovery tuning ------------------------------------------------
+# --- discovery tuning --------------------------------------------------------
 TOL     = 0x20      # WB delta convention lands a descriptor ref ~7 bytes off
 WIN     = 0x400     # window scanned from a non-WB code target
 MAXHOPS = 5
 MAXBLK  = 400
 
 # ============================== worker =======================================
-# One candidate, one process. A wrong candidate can fault inside the library, so
-# each trial is isolated and reports its own outcome.
-def worker(desc_obf, desc_map):
+# One trial, one process. Modes:
+#   --s1 <desc>            stage 1 only -> OBF
+#   --s2 <desc> <obfhex>   stage 2 + chain -> mut, plain, match verdict
+def worker(mode, a, b):
     img = open(IMG, "rb").read()
     _raw = json.load(open(MAPF))
     MAP = {int(k): v for k, v in _raw["map"].items()}
@@ -163,7 +159,7 @@ def worker(desc_obf, desc_map):
     PY = int.from_bytes(PUB[32:], "big")
 
     fb = open(DLL, "rb").read()
-    u32 = lambda b, o: struct.unpack_from("<I", b, o)[0]
+    u32 = lambda x, o: struct.unpack_from("<I", x, o)[0]
     lf = u32(fb, 0x3C)
     nsec = struct.unpack_from("<H", fb, lf + 6)[0]
     optsz = struct.unpack_from("<H", fb, lf + 20)[0]
@@ -185,18 +181,18 @@ def worker(desc_obf, desc_map):
     # segment spans only; heap-exec blocks stay ciphertext for the kernel
     seg, seen = [], set()
     for va, rs, rp in secs:
-        b = fb[rp:rp + rs]
-        for off in range(0, max(0, len(b) - 0x40), 4):
-            size = u32(b, off + 0x20)
-            if size < 0x40 or size > 0x200000 or off + size > len(b):
+        blk = fb[rp:rp + rs]
+        for off in range(0, max(0, len(blk) - 0x40), 4):
+            size = u32(blk, off + 0x20)
+            if size < 0x40 or size > 0x200000 or off + size > len(blk):
                 continue
-            if hashlib.sha256(b[off + 0x20:off + size]).digest() != b[off:off + 32]:
+            if hashlib.sha256(blk[off + 0x20:off + size]).digest() != blk[off:off + 32]:
                 continue
             if size == 0xF0:
                 continue
             for k in range((size - 0xF4) // 0xC):
                 o = off + 0xF4 + k * 0xC
-                rva, sz = u32(b, o + 4), u32(b, o + 8)
+                rva, sz = u32(blk, o + 4), u32(blk, o + 8)
                 if rva < 0x1000 or sz < 8 or rva + sz > sizeImg or rva in seen:
                     continue
                 seen.add(rva); seg.append((rva, sz))
@@ -234,8 +230,8 @@ def worker(desc_obf, desc_map):
     def onf(ep):
         er = struct.unpack_from("<Q", ctypes.string_at(ep, 8))[0]
         c = struct.unpack_from("<I", ctypes.string_at(er, 4))[0]
-        a = struct.unpack_from("<Q", ctypes.string_at(er + 0x10, 8))[0]
-        print(f"RESULT FAULT 0x{c:08x} 0x{(a - base) & 0xFFFFFFFF:x}")
+        ad = struct.unpack_from("<Q", ctypes.string_at(er + 0x10, 8))[0]
+        print(f"RESULT FAULT 0x{c:08x} 0x{(ad - base) & 0xFFFFFFFF:x}")
         sys.stdout.flush(); os._exit(3)
 
     VEH = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
@@ -243,43 +239,45 @@ def worker(desc_obf, desc_map):
     k32.AddVectoredExceptionHandler(1, keep)
 
     def op3(desc_rva, ln, status, key, out):
-        a = ctypes.create_string_buffer(0x40)
-        struct.pack_into("<Q", a, 0x00, 3)
-        struct.pack_into("<Q", a, 0x08, base + desc_rva)
-        struct.pack_into("<Q", a, 0x10, ctypes.addressof(status))
-        struct.pack_into("<Q", a, 0x18, ctypes.addressof(key))
-        struct.pack_into("<I", a, 0x20, 0x20)
-        struct.pack_into("<Q", a, 0x24, ctypes.addressof(out))
+        args = ctypes.create_string_buffer(0x40)
+        struct.pack_into("<Q", args, 0x00, 3)
+        struct.pack_into("<Q", args, 0x08, base + desc_rva)
+        struct.pack_into("<Q", args, 0x10, ctypes.addressof(status))
+        struct.pack_into("<Q", args, 0x18, ctypes.addressof(key))
+        struct.pack_into("<I", args, 0x20, 0x20)
+        struct.pack_into("<Q", args, 0x24, ctypes.addressof(out))
         if ln >= 0x30:
-            struct.pack_into("<I", a, 0x2C, 0x20)
-        return Raw(0xB9, ctypes.cast(a, ctypes.c_void_p), ln, None) & 0xFFFFFFFF
+            struct.pack_into("<I", args, 0x2C, 0x20)
+        return Raw(0xB9, ctypes.cast(args, ctypes.c_void_p), ln, None) & 0xFFFFFFFF
 
-    # stage 1
-    st = ctypes.create_string_buffer(0x40)
-    kb = ctypes.create_string_buffer(PRV[0x00:0x20], 0x40)
-    ob = ctypes.create_string_buffer(0x40)
-    rc = op3(desc_obf, 0x2C, st, kb, ob)
-    sd = bytes(st.raw)[:4]
-    OBF = bytes(ob.raw)[:0x20]
-    if rc != 0 or sd != b"\0\0\0\0" or OBF == b"\0" * 0x20:
-        print(f"RESULT REJECT 0x{rc:08x} {sd.hex()}")
+    if mode == "--s1":
+        st = ctypes.create_string_buffer(0x40)
+        kb = ctypes.create_string_buffer(PRV[0x00:0x20], 0x40)
+        ob = ctypes.create_string_buffer(0x40)
+        rc = op3(a, 0x2C, st, kb, ob)
+        sd = bytes(st.raw)[:4]
+        OBF = bytes(ob.raw)[:0x20]
+        if rc != 0 or sd != b"\0\0\0\0" or OBF == b"\0" * 0x20:
+            print(f"S1 REJECT 0x{rc:08x} {sd.hex()}")
+        else:
+            print(f"S1 OK {OBF.hex()}")
         sys.stdout.flush(); os._exit(0)
 
-    # stage 2
+    # --s2
+    OBF = bytes.fromhex(b)
     st2 = ctypes.create_string_buffer(0x40)
     ib = ctypes.create_string_buffer(OBF, 0x40)
     ob2 = ctypes.create_string_buffer(PRV[0x20:0x40], 0x40)
-    rc2 = op3(desc_map, 0x30, st2, ib, ob2)
+    rc2 = op3(a, 0x30, st2, ib, ob2)
     sd2 = bytes(st2.raw)[:4]
     if rc2 != 0 or sd2 != b"\0\0\0\0":
-        print(f"RESULT REJECT2 0x{rc2:08x} {sd2.hex()}")
+        print(f"S2 REJECT 0x{rc2:08x} {sd2.hex()}")
         sys.stdout.flush(); os._exit(0)
     mut = bytes(ib.raw)[:0x20]
 
-    # bijection + permutation
     BLK = [img[CLUSTER + i * 16: CLUSTER + i * 16 + 16] for i in range(64)]
-    def nibs(b):
-        return [(b[i >> 1] >> (4 if i % 2 == 0 else 0)) & 0xF for i in range(64)]
+    def nibs(x):
+        return [(x[i >> 1] >> (4 if i % 2 == 0 else 0)) & 0xF for i in range(64)]
     def pack(ns):
         return bytes((ns[i] << 4) | ns[i + 1] for i in range(0, 64, 2))
     mapped = pack([BLK[i][nibs(mut)[i]] for i in range(64)])
@@ -291,12 +289,16 @@ def worker(desc_obf, desc_map):
     if 0 < d < CURVE_N:
         pn = ec.derive_private_key(d, ec.SECP256R1()).public_key().public_numbers()
         ok = (pn.x, pn.y) == (PX, PY)
-    print(f"RESULT {'MATCH' if ok else 'NOMATCH'} {OBF.hex()} {mut.hex()} {plain.hex()}")
+    print(f"S2 {'MATCH' if ok else 'NOMATCH'} {mut.hex()} {mapped.hex()} {plain.hex()}")
     sys.stdout.flush(); os._exit(0)
 
 
-if len(sys.argv) > 1 and sys.argv[1] == "--one":
-    worker(int(sys.argv[2], 0), int(sys.argv[3], 0))
+if len(sys.argv) > 1 and sys.argv[1] in ("--s1", "--s2"):
+    mode = sys.argv[1]
+    if mode == "--s1":
+        worker(mode, int(sys.argv[2], 0), None)
+    else:
+        worker(mode, int(sys.argv[2], 0), sys.argv[3])
     raise SystemExit
 
 # ============================== driver =======================================
@@ -334,7 +336,7 @@ PY = int.from_bytes(PUB[32:], "big")
 
 img = open(IMG, "rb").read()
 fb  = open(DLL, "rb").read()
-u32 = lambda b, o: struct.unpack_from("<I", b, o)[0]
+u32 = lambda x, o: struct.unpack_from("<I", x, o)[0]
 
 log(f"dll    {DLL}")
 log(f"sha256 {hashlib.sha256(fb).hexdigest()}")
@@ -355,24 +357,18 @@ for _ in range(nsec):
 
 heap_desc = {}
 for va, rs, rp in secs:
-    b = fb[rp:rp + rs]
-    for off in range(0, max(0, len(b) - 0xF0), 4):
-        if u32(b, off + 0x20) != 0xF0 or u32(b, off + 0x24) != 0xFFFFFF00:
+    blk = fb[rp:rp + rs]
+    for off in range(0, max(0, len(blk) - 0xF0), 4):
+        if u32(blk, off + 0x20) != 0xF0 or u32(blk, off + 0x24) != 0xFFFFFF00:
             continue
-        if hashlib.sha256(b[off + 0x20:off + 0xF0]).digest() != b[off:off + 32]:
+        if hashlib.sha256(blk[off + 0x20:off + 0xF0]).digest() != blk[off:off + 32]:
             continue
-        heap_desc[va + off] = (u32(b, off + 0x34) & 0x0FFFFFFF,
-                               u32(b, off + 0x38) & 0x0FFFFFFF)
-code2desc = {c: dv for dv, (c, n) in heap_desc.items()}
+        heap_desc[va + off] = (u32(blk, off + 0x34) & 0x0FFFFFFF,
+                               u32(blk, off + 0x38) & 0x0FFFFFFF)
 log(f"heap-exec descriptors {len(heap_desc)}")
-
-if CODE_MAP not in code2desc:
-    die(f"CODE_MAP 0x{CODE_MAP:06x} has no heap-exec descriptor")
-DESC_MAP = code2desc[CODE_MAP]
-log(f"stage 2: code 0x{CODE_MAP:06x}  descriptor 0x{DESC_MAP:06x}")
 log("")
 
-# --- stage 1 discovery: walk the code graph from the key consumer
+# --- discover the candidate set by walking the code graph from the key consumer
 def block_of(rva):
     for dv, (c, n) in heap_desc.items():
         if c <= rva < c + n:
@@ -438,50 +434,68 @@ while frontier and depth < MAXHOPS and len(visited) < MAXBLK:
     frontier = nxt
 
 CAND = sorted(CAND)
-log(f"stage-1 candidates: {[hex(x) for x in CAND]}")
+log(f"stage candidates: {[hex(x) for x in CAND]}")
 log("")
 if not CAND:
-    die("no stage-1 candidates - the lea/call idiom differs on this build")
+    die("no stage candidates - the lea/call idiom differs on this build")
 
-# --- try each candidate in its own process; the public key decides
+# --- phase 1: which candidates can act as stage 1 (accept prv[0:0x20])?
 me = os.path.abspath(__file__)
-found = None
+obfs = {}
 for dv in CAND:
     code = heap_desc[dv][0]
     try:
-        r = subprocess.run([sys.executable, me, "--one", hex(dv), hex(DESC_MAP)],
+        r = subprocess.run([sys.executable, me, "--s1", hex(dv)],
                            capture_output=True, text=True, timeout=TIMEOUT)
         line = next((x for x in (r.stdout or "").splitlines()
-                     if x.startswith("RESULT")), "")
+                     if x.startswith("S1")), "")
     except subprocess.TimeoutExpired:
-        line = "RESULT TIMEOUT"
-    log(f"  cand 0x{dv:06x} code 0x{code:06x}: {line or 'no output'}")
-    if " MATCH " in line and found is None:
-        f = line.split()
-        found = (dv, code, f[2], f[3], f[4])
+        line = "S1 TIMEOUT"
+    log(f"  s1 cand 0x{dv:06x} code 0x{code:06x}: {line or 'no output'}")
+    if line.startswith("S1 OK "):
+        obfs[dv] = line.split()[2]
+
+log("")
+log(f"stage-1 candidates that produced an OBF: {len(obfs)}")
+log("")
+if not obfs:
+    die("no candidate produced an OBF - stage 1 is not in the candidate set")
+
+# --- phase 2: pair each surviving OBF with every stage-2 candidate
+found = None
+for s1, obf in sorted(obfs.items()):
+    for s2 in CAND:
+        code2 = heap_desc[s2][0]
+        try:
+            r = subprocess.run([sys.executable, me, "--s2", hex(s2), obf],
+                               capture_output=True, text=True, timeout=TIMEOUT)
+            line = next((x for x in (r.stdout or "").splitlines()
+                         if x.startswith("S2")), "")
+        except subprocess.TimeoutExpired:
+            line = "S2 TIMEOUT"
+        if line.startswith("S2 REJECT"):
+            continue                       # silent: the common case
+        log(f"  pair s1 0x{s1:06x}(0x{heap_desc[s1][0]:06x}) "
+            f"s2 0x{s2:06x}(0x{code2:06x}): {line or 'no output'}")
+        if " MATCH " in line and found is None:
+            f = line.split()
+            found = (s1, s2, obf, f[2], f[3], f[4])
 
 log("")
 if not found:
-    die("no candidate reproduced extracted.enc.pub - "
+    die("no (stage 1, stage 2) pairing reproduced extracted.enc.pub - "
         "is oracle_map.json from the current build?")
 
-dv, code, OBF_H, MUT_H, PLAIN_H = found
+s1, s2, OBF_H, MUT_H, MAPPED_H, PLAIN_H = found
 OBF = bytes.fromhex(OBF_H)
 mut = bytes.fromhex(MUT_H)
 plain = bytes.fromhex(PLAIN_H)
 
-# --- report the winning chain
-log(f"stage 1   0x{code:06x}  (descriptor 0x{dv:06x})")
+log(f"stage 1   0x{heap_desc[s1][0]:06x}  (descriptor 0x{s1:06x})")
 log(f"OBF       {OBF.hex()}")
-log(f"stage 2   0x{CODE_MAP:06x}  (descriptor 0x{DESC_MAP:06x})")
+log(f"stage 2   0x{heap_desc[s2][0]:06x}  (descriptor 0x{s2:06x})")
 log(f"in-mutated {mut.hex()}")
-BLK = [img[CLUSTER + i * 16: CLUSTER + i * 16 + 16] for i in range(64)]
-def nibs(b):
-    return [(b[i >> 1] >> (4 if i % 2 == 0 else 0)) & 0xF for i in range(64)]
-def pack(ns):
-    return bytes((ns[i] << 4) | ns[i + 1] for i in range(0, 64, 2))
-mapped = pack([BLK[i][nibs(mut)[i]] for i in range(64)])
-log(f"mapped    {mapped.hex()}")
+log(f"mapped    {MAPPED_H}")
 log(f"plain     {plain.hex()}")
 
 # --- final check, then write
