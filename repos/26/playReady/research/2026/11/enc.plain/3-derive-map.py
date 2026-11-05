@@ -537,7 +537,7 @@ else:
     log("      so a different permutation is expected. GOLD comparison skipped.")
 
 with open(OUTF, "w") as fh:
-    json.dump({str(k): v for k, v in MAP.items()}, fh, indent=2)
+    json.dump({"cluster": live[1], "map": {str(k): v for k, v in MAP.items()}}, fh, indent=2)
 log("")
 log(f"written {OUTF}  (16 entries)")
 open(LOG, "w", encoding="utf-8").write("\n".join(L) + "\n")
