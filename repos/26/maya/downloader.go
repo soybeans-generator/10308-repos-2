@@ -1,4 +1,4 @@
-// downloader.go marker preserve
+// downloader.go begin
 package maya
 
 import (
@@ -213,4 +213,4 @@ func (t *tracker) update() {
    }
 }
 
-// downloader.go marker preserve
+// downloader.go end

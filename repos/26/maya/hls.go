@@ -1,4 +1,4 @@
-// hls.go marker preserve
+// hls.go begin
 package maya
 
 import (
@@ -134,4 +134,4 @@ func determineHlsType(mediaPl *hls.MediaPlaylist) (*typeInfo, error) {
    }, nil
 }
 
-// hls.go marker preserve
+// hls.go end

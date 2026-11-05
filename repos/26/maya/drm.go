@@ -1,4 +1,4 @@
-// drm.go marker preserve
+// drm.go begin
 package maya
 
 import (
@@ -233,4 +233,4 @@ func (optionsData *Options) getKeyFetcher() (keyFetcher, error) {
    }
 }
 
-// drm.go marker preserve
+// drm.go end

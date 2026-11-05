@@ -1,4 +1,4 @@
-// api.go marker preserve
+// api.go begin
 package maya
 
 import (
@@ -252,4 +252,4 @@ type Options struct {
    License func([]byte) ([]byte, error)
 }
 
-// api.go marker preserve
+// api.go end
