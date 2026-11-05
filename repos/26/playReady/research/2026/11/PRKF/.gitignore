@@ -1,7 +1,8 @@
+*.cert
 *.enc.prv
 *.enc.pub
+*.sig.plain
 *.sig.prv
-*.sig.prv.plain
 *.sig.pub
 findprsub.txt
 msprcore.bla

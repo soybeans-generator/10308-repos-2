@@ -1,5 +1,14 @@
 # ---------------------------------------------------------------------------
-# decrypt a PlayReady signing key (*.sig.prv -> plaintext)
+# decrypt a PlayReady signing key (extracted.sig.prv -> extracted.sig.plain)
+#
+# USAGE
+#   decrypt.py                      decrypt extracted.sig.prv -> extracted.sig.plain
+#   decrypt.py --known-good PATH    same, but first compare the plaintext with
+#                                   PATH; a mismatch aborts before any write
+#
+#   No positional arguments. Input and output names are fixed to the ones
+#   2-extract-keys.py produces. The output is written only after every
+#   available check passes.
 #
 # VERSION SUPPORT
 #   Verified on: Windows.Media.Protection.PlayReady.dll 10.0.19041.4780,
@@ -22,20 +31,24 @@
 #     it itself with `cmp dword ptr [rcx+10h], 20h`.
 #   - 0x34 is the size of the kernel's call-args struct.
 #
+#   prsubs.json is read from the CURRENT DIRECTORY, so run this from the same
+#   directory findprsub.py was run in.
+#
 #   Failure is loud, never silent:
 #     wrong desc_va     -> NTSTATUS 0xC0000095 (INTEGER_OVERFLOW)
 #     wrong arg layout  -> status dword 0x80070057 (E_INVALIDARG) and an
 #                          unwritten output buffer; findprsub.py would also
 #                          report zero accepted descriptors
 #     output == input   -> descriptor for the wrong routine
-#
-#   prsubs.json is read from the CURRENT DIRECTORY, so run this from the same
-#   directory findprsub.py was run in.
+#     scalar out of range -> plaintext is not a P-256 private key
 # ---------------------------------------------------------------------------
 
 import ctypes, hashlib, json, os, struct, sys
 
 DLL = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
+
+SRC = "extracted.sig.prv"          # written by 2-extract-keys.py
+DST = "extracted.sig.plain"        # 32-byte plaintext scalar
 
 # 32 bytes: the P-256 private scalar length, and the size the routine accepts.
 KEY_LEN = 0x20
@@ -44,6 +57,28 @@ KEY_LEN = 0x20
 # because the args it sees begin 0x10 into the kernel's WarbirdCallArgs.
 # The read is unaligned, so this value cannot be inferred from alignment.
 OUT_OFF = 0x24
+
+# Order of the P-256 group. A P-256 private scalar must be in [1, n-1];
+# anything else proves we ran the wrong routine, at zero cost.
+P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+
+USAGE = """\
+usage: decrypt.py [--known-good PATH]
+
+  (no arguments)    decrypt extracted.sig.prv -> extracted.sig.plain
+  --known-good PATH compare the plaintext with PATH; a mismatch aborts
+                    before anything is written
+  -h, --help        this text
+"""
+
+
+def _buf(data):
+    """Fixed-size, NUL-free buffer of exactly len(data) bytes.
+
+    create_string_buffer(data, len(data)) is not usable here: the C-string
+    helper wants room for a terminator and raises 'byte string too long'.
+    """
+    return (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
 
 
 def _prsubs():
@@ -100,9 +135,9 @@ def decrypt_signing_key(prv_path, out_path=None, _rec=None):
     # A random fill proves the routine actually wrote to the output buffer;
     # a fixed sentinel could collide with real key material.
     fill = os.urandom(KEY_LEN)
-    key_buf = ctypes.create_string_buffer(enc, KEY_LEN)
-    status  = ctypes.create_string_buffer(0x10)
-    out     = ctypes.create_string_buffer(fill, KEY_LEN)
+    key_buf = _buf(enc)
+    status  = ctypes.create_string_buffer(0x10)        # zero-filled
+    out     = _buf(fill)
 
     # Kernel WarbirdCallArgs for op=3 (WbHeapExecuteCall). The arguments the
     # routine itself sees begin at +0x10, which is why its documented +0x14
@@ -147,18 +182,80 @@ def decrypt_signing_key(prv_path, out_path=None, _rec=None):
     return res
 
 
-if __name__ == "__main__":
-    src = sys.argv[1] if len(sys.argv) > 1 else "fake.sig.prv"
-    dst = sys.argv[2] if len(sys.argv) > 2 else None
+def main(argv):
+    known_good = None
 
-    got = decrypt_signing_key(src, dst)
-    print(f"{src} -> {got.hex()}")
+    # ---- arguments: flags only, nothing positional --------------------
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help", "/?"):
+            print(USAGE)
+            return 0
+        name, eq, val = a.partition("=")
+        if name == "--known-good":
+            if not eq:
+                i += 1
+                if i >= len(argv):
+                    raise SystemExit(f"--known-good needs a value\n\n{USAGE}")
+                val = argv[i]
+            known_good = val
+        elif a.startswith("-"):
+            raise SystemExit(f"unknown option {a}\n\n{USAGE}")
+        else:
+            raise SystemExit(f"unexpected argument {a!r}: "
+                             f"this script takes options only\n\n{USAGE}")
+        i += 1
 
-    # Optional cross-check; the decryption above does not depend on these
-    # files existing.
-    ref = "fake.sig.prv.plain"
-    if os.path.isfile(ref):
-        with open(ref, "rb") as f:
+    if os.name != "nt":
+        raise SystemExit("this script drives "
+                         "Windows.Media.Protection.PlayReady.dll - Windows only")
+
+    if not os.path.isfile(SRC):
+        raise SystemExit(f"missing input: {SRC}\n  run 2-extract-keys.py first")
+
+    if known_good is not None and not os.path.isfile(known_good):
+        raise SystemExit(f"known-good file not found: {known_good}")
+
+    # ---- decrypt ------------------------------------------------------
+    got = decrypt_signing_key(SRC, None)
+    print(f"{SRC} ({KEY_LEN} bytes)")
+    print(f"plaintext {got.hex()}")
+
+    # ---- sanity: a real decrypt must land in the P-256 scalar range ----
+    if not 0 < int.from_bytes(got, "big") < P256_N:
+        raise SystemExit("plaintext is not a valid P-256 private scalar - "
+                         "descriptor or argument layout is wrong")
+    print("[ OK ] plaintext is in range for a P-256 private scalar")
+
+    # ---- comparison against a user-supplied known good ----------------
+    if known_good is None:
+        print("[ n/a] no --known-good given, comparison skipped")
+    else:
+        with open(known_good, "rb") as f:
             want = f.read()
-        print(f"{ref} -> {want.hex()}")
-        print(f"MATCH {got == want}")
+        if want == got:
+            print(f"[ OK ] == {known_good}")
+        else:
+            n = min(len(got), len(want))
+            d = next((j for j in range(n) if got[j] != want[j]), None)
+            print(f"[FAIL] != {known_good}")
+            if d is not None:
+                print(f"       first difference at offset {d:#x}")
+                print(f"       got : {got[max(d-8, 0):d+8].hex(' ')}")
+                print(f"       want: {want[max(d-8, 0):d+8].hex(' ')}")
+            else:
+                print(f"       common prefix identical over {n} bytes "
+                      f"(lengths {len(got)} vs {len(want)})")
+            raise SystemExit("not writing output - the plaintext does not "
+                             "match the known good")
+
+    # ---- write --------------------------------------------------------
+    with open(DST, "wb") as f:
+        f.write(got)
+    print(f"\nwrote {DST} ({len(got)} bytes)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
