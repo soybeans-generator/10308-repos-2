@@ -6,6 +6,10 @@
 //   B: [ artist, title, url, image? ]
 const D = 0; // row.A: timestamp
 const Y = 1; // row.A: year
+const ARTIST = 0; // row.B: artist
+const TITLE = 1;  // row.B: title
+const HREF = 2;   // row.B: url
+const THUMB = 3;  // row.B: image
 
 const formatter = new Intl.DateTimeFormat('en', {
    weekday: 'short',
@@ -24,9 +28,9 @@ function date(timestamp) {
 }
 
 function media(row) {
-   const [,, href, thumb] = row.B;
+   const href = row.B[HREF];
 
-   let image = thumb;
+   let image = row.B[THUMB];
    if (image === undefined) {
       // B[3] is omitted only for YouTube rows on the default thumbnail
       const video = new URL(href).searchParams.get('v');
@@ -43,13 +47,15 @@ const template = document.querySelector('template');
 const limit = 10;
 
 function label(row) {
-   const [R, T, I] = row.B;
+   const artist = row.B[ARTIST];
+   const title = row.B[TITLE];
+   const href = row.B[HREF];
 
-   const artist = I.startsWith('https://youtube.com/') && R.endsWith(' - Topic')
-      ? R.slice(0, -' - Topic'.length)
-      : R;
+   const name = href.startsWith('https://youtube.com/') && artist.endsWith(' - Topic')
+      ? artist.slice(0, -' - Topic'.length)
+      : artist;
 
-   return T.toLowerCase().includes(artist.toLowerCase()) ? T : artist + ' - ' + T;
+   return title.toLowerCase().includes(name.toLowerCase()) ? title : name + ' - ' + title;
 }
 
 function build(row) {
