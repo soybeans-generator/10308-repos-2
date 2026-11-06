@@ -29,7 +29,6 @@ import (
    "encoding/hex"
    "fmt"
    "os"
-   "path/filepath"
 )
 
 const (
@@ -52,13 +51,9 @@ func extractKeys() error {
       outs[k] = outFile(keysOut + "." + k)
    }
 
-   fail := func(format string, args ...any) error {
-      return fmt.Errorf(format, args...)
-   }
-
    b, err := os.ReadFile(keysSrc)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
-      return fail("%s: not a PRKF", keysSrc)
+      return fmt.Errorf("%s: not a PRKF", keysSrc)
    }
 
    var km section
@@ -71,7 +66,7 @@ func extractKeys() error {
       }
    }
    if !found {
-      return fail("no 0x1009 key-material section")
+      return fmt.Errorf("no 0x1009 key-material section")
    }
 
    var recs []*keyRecord
@@ -97,7 +92,7 @@ func extractKeys() error {
       }
    }
    if len(encC) != 1 {
-      return fail("%d records have a 65-byte private component (need 1)", len(encC))
+      return fmt.Errorf("%d records have a 65-byte private component (need 1)", len(encC))
    }
    enc := encC[0]
    fmt.Printf("encryption key: %#x  (65-byte private component)\n", enc.off)
@@ -115,20 +110,20 @@ func extractKeys() error {
       }
    }
    if i < 0 {
-      return fail("internal error: encryption record not found")
+      return fmt.Errorf("internal error: encryption record not found")
    }
    if i == 0 {
-      return fail("encryption key is the first record - nothing precedes it")
+      return fmt.Errorf("encryption key is the first record - nothing precedes it")
    }
 
    sig := recs[i-1]
    if sig.privlen != 32 {
-      return fail("record before the encryption key has a %d-byte private component, expected 32", sig.privlen)
+      return fmt.Errorf("record before the encryption key has a %d-byte private component, expected 32", sig.privlen)
    }
    fmt.Printf("signing key: %#x  (record preceding the encryption key)\n", sig.off)
 
-   if sig.off == enc.off || bytes.Equal(sig.pub, enc.pub) {
-      return fail("signing and encryption records are not distinct")
+   if bytes.Equal(sig.pub, enc.pub) {
+      return fmt.Errorf("signing and encryption records are not distinct")
    }
 
    data := map[string][]byte{
@@ -138,16 +133,11 @@ func extractKeys() error {
       "enc.prv": enc.priv,
    }
 
-   // main already created outDir; this keeps extractKeys usable on its own.
-   if err := os.MkdirAll(filepath.Dir(outs[outNames[0]]), 0o755); err != nil {
-      return fail("create output directory: %v", err)
-   }
-
    fmt.Println("\nwritten:")
    for _, k := range outNames {
       v := data[k]
       if err := os.WriteFile(outs[k], v, 0666); err != nil {
-         return fail("write %s: %v", outs[k], err)
+         return fmt.Errorf("write %s: %v", outs[k], err)
       }
       fmt.Printf("  %s  %2d B\n", outs[k], len(v))
    }
@@ -198,25 +188,23 @@ func parseRec(buf []byte, ps, pe int) *keyRecord {
    }
 }
 
+// section is a parsed PRKF section header. Only the type and the payload span
+// are retained: the tag, offset and total size are used while walking and
+// have no consumer afterwards.
 type section struct {
-   off, tag, typ, total int
-   ps, pe               int
+   typ, ps, pe int
 }
 
 func walk(buf []byte, start, end int) []section {
    var out []section
    off := start
    for off+8 <= end {
-      tag := int(binary.BigEndian.Uint16(buf[off:]))
       typ := int(binary.BigEndian.Uint16(buf[off+2:]))
       total := int(binary.BigEndian.Uint32(buf[off+4:]))
       if total < 8 || off+total > end {
          break
       }
-      out = append(out, section{
-         off: off, tag: tag, typ: typ, total: total,
-         ps: off + 8, pe: off + total,
-      })
+      out = append(out, section{typ: typ, ps: off + 8, pe: off + total})
       off += total
    }
    return out

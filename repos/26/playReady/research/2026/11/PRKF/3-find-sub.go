@@ -5,19 +5,25 @@
 //
 // Locates the signing-key routine's descriptor for this DLL build.
 //
-// Takes no arguments. It spawns `prkf -one <descVA>` once per candidate
+// Takes no arguments. It re-executes this binary once per candidate
 // descriptor, scanWorkers at a time, and reads the RESULT line each child
-// prints. The child mode is internal and hidden from `prkf -h`.
+// prints. The child learns which descriptor to probe from an environment
+// variable, so it takes no arguments and no flag of its own.
 //
-// The child process is not optional. Two failures it isolates are
-// unrecoverable in-process:
+// # WHY THE PROBE IS A SEPARATE PROCESS
 //
-//   - A fault in the descriptor's code is a Windows SEH exception inside
-//     native code, not a Go panic. recover() cannot catch it, and the process
-//     would die mid-scan, losing every result so far.
-//   - A hung descriptor call cannot be timed out. A goroutine blocked inside
-//     NtQuerySystemInformation cannot be cancelled or killed, so probeTimeout
-//     is only enforceable by killing a process.
+// This was measured, not assumed. An in-process version was tried: it printed
+// "heap descriptors: 981" and then died on a native exception before the first
+// progress line, having completed almost no descriptors. A fault in a
+// descriptor's code is a Windows SEH exception raised inside the DLL, not a Go
+// panic. The Go runtime only converts exceptions on Go-managed stacks into
+// panics, so recover() never runs and the whole process is terminated. Across
+// 981 arbitrary code blobs that is the normal case, not an edge case, and no
+// skip list can rescue it: each fault would have to be discovered by crashing.
+//
+// The second reason is timeouts. A goroutine blocked inside
+// NtQuerySystemInformation cannot be cancelled or killed, so probeTimeout is
+// only enforceable by killing a process.
 //
 // This program does NOT use sample key files. Discovery rests entirely on
 // properties of the routine itself, read from its disassembly:
@@ -102,6 +108,11 @@ const (
    // makes three calls, so this trades process-table pressure for wall clock;
    // 8 keeps a typical machine busy without starving it.
    scanWorkers = 8
+
+   // probeEnv carries a descriptor VA into a probe child. runChild sets it on
+   // the children it spawns and nothing else does; the environment is used
+   // instead of a flag so the child mode never appears in `prkf -h`.
+   probeEnv = "PRKF_PROBE_DESC"
 )
 
 // cmdFindSub is the entry point for prkf -3.
@@ -299,6 +310,21 @@ func inside(rva, length uint32, ranges []rng) bool {
    return false
 }
 
+// probeTarget reports whether this process was started as a probe child, and
+// for which descriptor. Called from main before the FlagSet exists.
+func probeTarget() (uint32, bool) {
+   s := os.Getenv(probeEnv)
+   if s == "" {
+      return 0, false
+   }
+   v, err := strconv.ParseUint(s, 0, 32)
+   if err != nil {
+      fmt.Fprintf(os.Stderr, "prkf: %s=%q: %v\n", probeEnv, s, err)
+      os.Exit(2)
+   }
+   return uint32(v), true
+}
+
 func runOne(descVA uint32) {
    // Two distinct 32-byte inputs: the routine must map them to distinct
    // outputs, which is what distinguishes a transform from a copy.
@@ -345,8 +371,11 @@ func runChild(self string, descVA uint32) childOut {
    ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
    defer cancel()
 
-   // Hidden worker mode, see isWorkerInvocation in 1-extract-cert.go.
-   cmd := exec.CommandContext(ctx, self, "-one", fmt.Sprintf("%#x", descVA))
+   // The descriptor travels in the environment (see probeEnv); the child gets
+   // no arguments at all.
+   cmd := exec.CommandContext(ctx, self)
+   cmd.Env = append(os.Environ(), probeEnv+"="+fmt.Sprintf("%#x", descVA))
+
    var stdout, stderr bytes.Buffer
    cmd.Stdout = &stdout
    cmd.Stderr = &stderr
@@ -460,7 +489,6 @@ func heapDescs(data []byte, secs []peSection, ranges []rng) []descriptor {
 // ---------------------------------------------------------------- PE layout
 
 type peSection struct {
-   name                          string
    vaddr, vsize, rawPtr, rawSize uint32
 }
 
@@ -468,7 +496,6 @@ func peSections(f *pe.File) []peSection {
    out := make([]peSection, 0, len(f.Sections))
    for _, s := range f.Sections {
       out = append(out, peSection{
-         name:    s.Name,
          vaddr:   s.VirtualAddress,
          vsize:   s.VirtualSize,
          rawPtr:  s.Offset, // PointerToRawData

@@ -14,9 +14,10 @@
 // it, and -4 consumes what -2 wrote. Every file the pipeline creates lands in
 // testdata/, so a run is disposable and the working directory stays clean.
 //
-// There is one hidden mode: `prkf -one <descVA>`, which -3 spawns for each
-// candidate descriptor. It lives on its own FlagSet so it never appears in
-// `prkf -h`. See 3-find-sub.go for why it is a separate process at all.
+// -3 also re-executes this binary, one child per candidate descriptor, to
+// probe it. The child is selected by an environment variable rather than a
+// flag or an argument, so `prkf -h` lists the four steps and nothing else.
+// See 3-find-sub.go for why the probe must be a separate process.
 //
 // The four files share one namespace, so a handful of identifiers had to be
 // renamed: see the note at the top of each file.
@@ -30,8 +31,6 @@ import (
    "fmt"
    "os"
    "path/filepath"
-   "strconv"
-   "strings"
 )
 
 // ------------------------------------------------------- step 1: the chain
@@ -47,8 +46,8 @@ const (
 // ------------------------------------------------------------------ driver
 
 // outDir is where every file this program creates is written. Inputs are
-// still read from the working directory (msprcore.bla, fake.sig.*); only
-// outputs are redirected here.
+// still read from the working directory (msprcore.bla); only outputs are
+// redirected here.
 //
 // Nothing else in the pipeline should spell a directory: write through
 // outFile so the whole run can be thrown away with `rm -rf testdata`.
@@ -183,24 +182,12 @@ func hexSpace(b []byte) string {
    return sb.String()
 }
 
-// isWorkerInvocation reports whether argv asks for the internal worker mode
-// (`prkf -one <descVA>`). Only -3 produces this, and only through
-// exec.Command, so the check is deliberately narrow: it matches -one and
-// --one, with or without =value, and nothing else.
-func isWorkerInvocation(argv []string) bool {
-   if len(argv) == 0 {
-      return false
-   }
-   a := argv[0]
-   return a == "-one" || a == "--one" ||
-      strings.HasPrefix(a, "-one=") || strings.HasPrefix(a, "--one=")
-}
-
 func main() {
-   // The single-descriptor worker is checked before the main FlagSet exists,
-   // so it stays out of `prkf -h`. It is spawned by -3, never by hand.
-   if isWorkerInvocation(os.Args[1:]) {
-      workerMain(os.Args[1:])
+   // A probe child spawned by -3 announces itself through the environment,
+   // so it needs no flag and no argument. Checked first, before the FlagSet
+   // exists, so it never appears in the usage text.
+   if va, ok := probeTarget(); ok {
+      runOne(va) // never returns: emit() exits
       return
    }
 
@@ -266,46 +253,11 @@ func u32be(buf []byte, off int) (uint32, bool) {
    return binary.BigEndian.Uint32(buf[off:]), true
 }
 
-// workerMain probes exactly one descriptor and exits. Its whole output is the
-// RESULT line the driver parses; nothing is written to disk.
-//
-// It runs on a private FlagSet so that -one never shows up in the usage text
-// of the four real steps.
-func workerMain(argv []string) {
-   fs := flag.NewFlagSet("prkf -one", flag.ContinueOnError)
-   fs.SetOutput(os.Stderr)
-   one := fs.String("one", "", "descriptor VA (hex) to probe")
-
-   if err := fs.Parse(argv); err != nil {
-      os.Exit(2)
-   }
-   if fs.NArg() != 0 {
-      fmt.Fprintln(os.Stderr, "prkf -one: takes no positional arguments")
-      os.Exit(2)
-   }
-
-   v, err := strconv.ParseUint(*one, 0, 32)
-   if err != nil {
-      fmt.Fprintf(os.Stderr, "prkf -one: bad value %q: %v\n", *one, err)
-      os.Exit(2)
-   }
-
-   runOne(uint32(v)) // never returns: emit() exits
-}
-
-type certEntry struct {
-   off    int
-   total  uint32
-   length uint32
-}
-
 type chain struct {
    base        int
-   version     uint32
    totalLength uint32
    flags       uint32
    certCount   uint32
-   certs       []certEntry
    warnings    []string
    prefix      uint32
    hasPrefix   bool
@@ -313,16 +265,19 @@ type chain struct {
 }
 
 // parseChain is a self-validating parse of a CHAI chain at base.
+//
+// Only the header fields that are actually used are decoded: the certificate
+// version is not needed to locate anything, and the per-certificate lengths
+// are consumed in the loop rather than retained.
 func parseChain(buf []byte, base int) (*chain, bool) {
    if base < 0 || base+4 > len(buf) || !bytes.Equal(buf[base:base+4], magicCHAI) {
       return nil, false
    }
 
-   version, ok1 := u32be(buf, base+4)
-   totalLength, ok2 := u32be(buf, base+8)
-   flags, ok3 := u32be(buf, base+12)
-   certCount, ok4 := u32be(buf, base+16)
-   if !ok1 || !ok2 || !ok3 || !ok4 {
+   totalLength, okTL := u32be(buf, base+8)
+   flags, okFl := u32be(buf, base+12)
+   certCount, okCC := u32be(buf, base+16)
+   if !okTL || !okFl || !okCC {
       return nil, false
    }
    if totalLength < chaiHdr || int(totalLength) > len(buf)-base {
@@ -331,7 +286,6 @@ func parseChain(buf []byte, base int) (*chain, bool) {
 
    c := &chain{
       base:        base,
-      version:     version,
       totalLength: totalLength,
       flags:       flags,
       certCount:   certCount,
@@ -344,12 +298,12 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       if off+certHdr > end || !bytes.Equal(buf[off:off+4], magicCERT) {
          return nil, false
       }
-      _, okA := u32be(buf, off+4) // certificate version (unused)
-      cTot, okB := u32be(buf, off+8)
-      cLen, okC := u32be(buf, off+12)
-      if !okA || !okB || !okC {
-         return nil, false
-      }
+
+      // No bounds check needed on these reads: off+certHdr <= end <= len(buf)
+      // was just established, so both fields lie inside the chain.
+      cTot := binary.BigEndian.Uint32(buf[off+8:])
+      cLen := binary.BigEndian.Uint32(buf[off+12:])
+
       if cTot < certHdr || off+int(cTot) > end {
          return nil, false
       }
@@ -366,7 +320,6 @@ func parseChain(buf []byte, base int) (*chain, bool) {
             n, off, cLen, cTot-certHdr))
       }
 
-      c.certs = append(c.certs, certEntry{off: off, total: cTot, length: cLen})
       off += int(cTot)
    }
    if off != end { // entries must tile the chain exactly
