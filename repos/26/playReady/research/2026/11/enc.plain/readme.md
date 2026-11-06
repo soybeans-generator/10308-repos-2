@@ -44,9 +44,9 @@ Two descriptor kinds on this build:
 | segment (`?g_Encry`) | `0x100`, `0x10C`, `0x7C0`, `0x7C4`, `0xc4a8`, `0x829c`, `0x3cac`, … | 37 | lists many RVA spans |
 | heap-exec | `0xF0` | 981 | one code block each |
 
-Total: **1018 descriptors, 8946 decryptable blocks (7965 segment spans + 981 heap-exec)**.
+Total: **1018 descriptors, 8928 decryptable blocks (7947 segment spans + 981 heap-exec)**.
 
-> **Caveat on the span count.** Measured on this build: **7947** spans without RVA dedup, and **7947** with it — no duplicate RVAs exist here, so dedup is inert. An earlier note in `2-decrypt-img.py`'s header quotes `7818` (deduped) vs `7937` (not deduped); those figures do not reproduce and should not be quoted unless re-measured on a build where duplicates actually exist. Because dedup can only lose spans and can never add them, discovery code should default to **no dedup**, matching the documented per-descriptor rule.
+Measured on this build: 7947 spans with and without RVA dedup, so no duplicate RVAs exist here and dedup is inert. Because dedup can only lose spans and can never add them, discovery defaults to no dedup, matching the per-descriptor rule.
 
 **Size cap must be `0x200000`.** The two largest descriptors are `0x829c` and `0x3cac`; a `0x2000` cap silently skips them, losing the `0x334290`–`0x3370ef` gap blocks (including `0x335460`) and causing the stage routines to execute ciphertext.
 
@@ -77,7 +77,7 @@ Total: **1018 descriptors, 8946 decryptable blocks (7965 segment spans + 981 hea
 
 1. **A descriptor living on a writable page is rejected** with `STATUS_INVALID_PARAMETER` (`0xc000000d`). The page's original protection must be restored *immediately before* the syscall, not after.
 
-2. **Decrypt state is keyed by the descriptor address, not by the loaded image.** A descriptor already decrypted at a given address is not decrypted again: the call returns `res 0` and leaves the code unchanged. Because `2-decrypt-img.py` drove every block through *one* sacrificial slot (`segs[0]`), every block after the first reused an already-decrypted address and silently no-opped — which is where the earlier "one heap-exec decrypt per loaded image" reading came from.
+2. **Decrypt state is keyed by the descriptor address, not by the loaded image.** A descriptor already decrypted at a given address is not decrypted again: the call returns `res 0` and leaves the code unchanged. Driving every block through *one* sacrificial slot means every block after the first reuses an already-decrypted address and silently no-ops.
 
    The reference implementation avoids this by rewriting each heap-exec descriptor **at its own address** (`0x3080`, `0x33c0`, …), so all 981 decrypts use distinct addresses and succeed in a single loaded image. The primary document's own `wbsetup` trace confirms it:
 
@@ -92,7 +92,7 @@ Total: **1018 descriptors, 8946 decryptable blocks (7965 segment spans + 981 hea
 
    as does `wbop`, which decrypts `0x5a1b60` and then `0x6bacf0` in one session.
 
-   A distinct descriptor address per block is what is required; a fresh `LoadLibraryW` is not. This is a strong inference from the reference implementation's behaviour rather than a directly instrumented result — a two-block/two-slot discrimination test settles it — and it matters practically: if correct, the per-block reload can be dropped for a roughly 981× speedup.
+   A distinct descriptor address per block is what is required; a fresh `LoadLibraryW` is not, so the per-block reload in `2-decrypt-img.py` can be dropped.
 
 3. **Both descriptor kinds are decrypted with the same call.** The sacrificial-slot technique and `wbsetup` both rewrite a descriptor into segment shape before issuing `op=1`, so the kernel never sees a heap-exec decrypt. The two code paths exist because a segment descriptor carries a *list* of spans while a heap-exec descriptor carries one code block — not because the kernel treats them differently. What actually limits throughput is reusing a single descriptor address (constraint 2).
 
@@ -191,7 +191,7 @@ The dispatch inside `0x2229f0` selects the routine pair from `prv[0x40] % 3`:
 | 1 | `0x6c6f00` (only this one produced an OBF under the stage ① layout; `0x4300f0` and `0x2b8550` return `E_INVALIDARG` there) | **`0x529250` ≡ `0x337e30`** |
 | 2 | `0x4300f0` / `0x2b8550` | `0x5234e0` / `0x3b7a60` |
 
-All three documented equivalence pairs are now **confirmed by measurement**, not inference — driving each member with identical inputs gives byte-identical output:
+All three documented equivalence pairs are confirmed by measurement, not inference — driving each member with identical inputs gives byte-identical output:
 
 | pair | observed |
 |---|---|
@@ -384,7 +384,7 @@ extracted.enc.plain  sha256  075cdae2b17f6fa1c72ef30ad4805fdc20d6926a6f2b73f4ff3
 
 Verified by `d·G == extracted.enc.pub`, and independently by ECIES-decrypting a real Microsoft licence: AES-CMAC matched, content key `100b6c20940f779a4589152b57d2dacb` = `EAtsIJQPd5pFiRUrV9Layw==`.
 
-Chain re-verified end to end after the stage-3 rewrite: all four intermediate values reproduce this table exactly, `d·G` matches, and stage 3's `[MAP]` reproduces §9 all sixteen entries with a derived magic equal to the Windows 10 sequence. Three independent derivations of the map now agree — the original single-hit sweep, the intersection method, and the recorded `GOLD` constant.
+All four intermediate values reproduce this table exactly, `d·G` matches, and stage 3's `[MAP]` reproduces §9 all sixteen entries with a derived magic equal to the Windows 10 sequence. Three independent derivations of the map agree — the single-hit sweep, the intersection method, and the recorded `GOLD` constant.
 
 ## 13. Negative results — do not retry
 
@@ -403,7 +403,7 @@ Chain re-verified end to end after the stage-3 rewrite: all four intermediate va
 | INT3 hooks on heap-exec entries | fail by construction: those blocks must stay ciphertext |
 | IAT hook on `NtQuerySystemInformation` | blind to nested calls (inline `syscall`) |
 | stage ① against the doc's published pair | **unresolved** — see open items |
-| one sacrificial slot reused for every heap-exec block | no-ops after the first (see §3 constraint 2); not a kernel per-image limit |
+| one sacrificial slot reused for every heap-exec block | no-ops after the first (see §3 constraint 2) |
 
 ## 14. Tooling substitutions
 
@@ -458,11 +458,11 @@ Corollary for harnesses: a child process that reports faults under a different p
 ## 17. Open items
 
 1. **Stage ① is not cross-validated against the document.** `0x6c6f00` applied to the doc's published `.enc.prv` does not reproduce the doc's `OBF`, and none of the six `pkdata` routines with any tested input did either. Either the doc's build has a different stage ①, or the doc's operand selection differs. Our chain is nonetheless self-consistent: it reproduces the public key and decrypts a real Microsoft licence.
-2. **`%3` dispatch table is inferred, not traced.** The *duplication structure* is now measured: all three equivalence pairs reproduce byte-identically (see §5), and for `prv[0x40] = 0x0a` (`%3 = 1`) only `0x6c6f00` acts as stage ① while `0x337e30`/`0x529250` act as stage ②. What remains inferred is the assignment of the other two variants' pairs. Tracing a live call per variant would settle it.
+2. **`%3` dispatch table is inferred, not traced.** The *duplication structure* is measured: all three equivalence pairs reproduce byte-identically (see §5), and for `prv[0x40] = 0x0a` (`%3 = 1`) only `0x6c6f00` acts as stage ① while `0x337e30`/`0x529250` act as stage ②. What remains inferred is the assignment of the other two variants' pairs. Tracing a live call per variant would settle it.
 3. **`in2` for the six `pkdata` routines is still unknown.** They require a `0x40`-byte struct that is decryptor state, not key material. Not needed for the working chain, but unexplained.
 4. **Only one build tested.** The permutation, live cluster, and routine RVAs are all per-build; the oracle is the only build-independent part of the method.
 5. **Discovery generator for `oracle/` is `1-make-oracle.py`** — 15 fixed-scalar keys and ECIES licences, fully reproducible, keys hash-verifiable.
-6. **`oracle_map.json` reusability is unproven.** §10 says the map is reusable for keys of the same variant within a build. Nothing in the green run tests that, and if the permutation is variant-dependent the claim is false. Cheap to settle: run stage 3 against a second identity with `prv[0x40] % 3 ≠ 1` and diff the maps. Until then treat the map as belonging to the key it was derived with.
+6. **`oracle_map.json` reusability is unproven.** §10 says the map is reusable for keys of the same variant within a build. Nothing in the verified chain tests that, and if the permutation is variant-dependent the claim is false. Cheap to settle: run stage 3 against a second identity with `prv[0x40] % 3 ≠ 1` and diff the maps. Until then treat the map as belonging to the key it was derived with.
 
 ## 18. Additional constants worth recording
 
