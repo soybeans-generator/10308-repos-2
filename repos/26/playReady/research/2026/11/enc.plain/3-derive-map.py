@@ -1,341 +1,251 @@
 # =============================================================================
-# 3-derive-map.py
+# 3-derive-map.py  (oracle2) -- magic-independent stage 3
 #
-# Stage 3 of the chain: recover this build's 16-entry nibble permutation, i.e.
-# the transformation from the "mapped" obfuscated key to the real private
-# scalar. Writes oracle_map.json for 4-derive-plain.py.
+# Replaces the previous stage 3. Same inputs, same outputs, same JSON schema,
+# so 1-make-oracle.py, 2-decrypt-img.py and 4-derive-plain.py are unchanged.
 #
-# THE PROBLEM
-#   A PlayReady private encryption key on disk (.enc.prv) is 65 bytes:
-#       [0x00:0x20]  first half
-#       [0x20:0x40]  second half
-#       [0x40]       variant byte, selects the routine/table pair for the build
-#   After the library's own deobfuscation the scalar exists in "mapped" form,
-#   where each of the 64 nibbles has been passed through one of 64 per-nibble
-#   bijection subtables. A further fixed 16-entry permutation maps those nibbles
-#   to the real ones.
+# WHY THIS VERSION
+#   The previous stage 3 decided HIT/MISS by comparing the 32-byte output to
+#   SENT XOR MAGIC, with MAGIC hardcoded to the Windows 10 sequence. On a build
+#   using a different sequence every query reads MISS even when the table patch
+#   worked. Symptom: no fault, status 0, N misses in a row - indistinguishable
+#   from "the set is not live".
 #
-#   The subtables are plain data in wbtool_img.bin, so 4-derive-plain.py reads
-#   them directly. The permutation is NOT stored as data anywhere (only three
-#   standalone 16-byte permutations exist in the whole image, none of them the
-#   right one) and brute force is infeasible: 16! = 20,922,789,888,000.
+# DISCRIMINATOR (no magic needed)
+#   For set S, forced mapped nibble m, licence NN:
+#       O(S,m,NN) = X(C2 - d'(m)*C1) XOR magic
+#   with d'(m) the scalar whose every nibble is MAP[m]. Decryption reaches the
+#   sentinel iff MAP[m] == NN. Hence
+#     - S not live : 16 outputs identical per licence (equal to control), and
+#                    different between licences.
+#     - S live     : 16 outputs vary, and exactly one is the SAME 32 bytes for
+#                    every licence (the sentinel X, which is licence-independent).
+#   So |intersection over licences| == 1  <=>  S is live, and the shared value
+#   is SENT XOR magic. magic is then recovered rather than assumed.
 #
-#   So the permutation is measured rather than found, using a chosen-key oracle.
+#   If NO set yields a shared value, the sentinel is never produced: the blob /
+#   ECC encoding is wrong, not the table.
 #
-# HOW THE ORACLE WORKS
-#   The live subtable set is overwritten with a constant byte so that every
-#   mapped nibble becomes the same value M. Then lic_NN.blob — a licence built
-#   for the key whose private scalar is nibble NN repeated 64 times — is
-#   decrypted with the unknown target key. The known sentinel appears in the
-#   output only when M maps to NN, i.e. MAP[M] = NN.
+# PHASES
+#   1  all discovered sets x licences 01/02/03  -> live set + magic
+#   2  live set x licences 01..0f               -> full permutation
 #
-#   Needed per query: 15 licences (NN = 0x01..0x0f) and 16 forced values, so at
-#   most 240 decrypt calls. Nibble 0x00 has no licence (zero scalar is invalid)
-#   and is recovered as the one leftover permutation value.
-#
-#   Phase 1 identifies WHICH subtable set is on the live path, by running lic_01
-#   against each and looking for a single hit. Phase 2 resolves the other 14
-#   nibbles against that set.
-#
-# NOTHING HERE IS ADDRESSED BY CONSTANT
-#   - the bijection sets are located by structure: a set is 64 consecutive
-#     16-byte blocks, each a permutation of 0x0..0xf, so every byte in the
-#     0x400-byte region is < 0x10 and the region is found as a run of low bytes;
-#   - the descriptor of the 0x41-byte key consumer is located by its own
-#     input-size check, `cmp dword ptr [rcx+0x14], 0x41` (83 79 14 41), which is
-#     unique in the decrypted image, then mapped to the heap-exec descriptor
-#     that owns that code.
-#   The script therefore runs unmodified on any build with these two shapes.
-#
-# PIPELINE
-#   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
-#   2-decrypt-img.py   ->  wbtool_img.bin
-#   3-derive-map.py    ->  oracle_map.json                    (this script)
-#   4-derive-plain.py  ->  extracted.enc.plain
-#
-# INPUTS
-#   wbtool_img.bin         from 2-decrypt-img.py. Supplies the plaintext
-#                          bijection sets and the plaintext code that the
-#                          decrypt path executes.
-#   extracted.enc.prv      from the msprcore.bla extractor. The target identity's
-#                          obfuscated key; 0x41 bytes.
-#   oracle/lic_NN.blob     from 1-make-oracle.py. 15 files, 0x80 bytes each.
-#   PlayReady.dll          read directly; used to enumerate descriptors so the
-#                          loaded image can be prepared, and loaded so the
-#                          decrypt path can be driven.
-#
-# OUTPUT
-#   oracle_map.json        {"0":14,"1":0,…} — mapped nibble -> real nibble.
-#                          Reusable for every .enc.prv from the same build.
-#   derive_map.txt         log.
-#
-# ACCEPTANCE CHECK
-#   16 values, a valid bijection, exactly one leftover, and — when the DLL sha
-#   matches the recorded build — a GOLD match against the permutation derived
-#   during development. Expected for the recorded build:
-#       live cluster: MAP[0xd] = 0x1
-#       leftover mapped 0x1 -> real 0x0
-#       cross-check: matches the recorded permutation (GOLD match)
-#   End-to-end proof is 4-derive-plain.py printing pubkey MATCH.
-#
-# IF THE BUILD CHANGES
-#   Candidate sets, the live set and the key-consumer descriptor are all
-#   re-derived at runtime, so this script needs no editing. The permutation and
-#   the W10/W11 XOR magic still differ, and the GOLD comparison is skipped —
-#   expected, not an error. 4-derive-plain.py's CLUSTER constant, which is still
-#   an address, must be updated to whatever phase 1 reports here.
-#
-# KNOWN PITFALLS
-#   - The control decrypt (set intact) must NOT return the sentinel. If it does,
-#     the key or the licences are wrong and every result would be garbage.
-#   - Patching a set that is not on the live path yields 16 identical outputs and
-#     zero hits — that is the signal used to rule it out.
-#   - The subtable page's original protection must be restored around every
-#     patch, or the kernel rejects the WB call with 0xc000000d.
-#   - A fault in the decrypt path is reported with its RVA and then hard-exits;
-#     sys.exit cannot unwind out of a ctypes callback.
-#   - The key-consumer discovery assumes the routine still tests `+0x14` against
-#     `0x41`. If a future build changes that argument offset, the scan finds
-#     zero sites and the script stops rather than guessing.
+# OUTPUT  oracle_map.json  {"cluster": rva, "magic": hex, "map": {...}}
+#         derive_map.txt
 # =============================================================================
 
 import ctypes, hashlib, json, os, re, struct, subprocess, sys
 
-# --- inputs / outputs --------------------------------------------------------
-DLL      = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"  # input (live)
-PRVF     = "extracted.enc.prv"   # input: from the msprcore.bla extractor
-OUTF     = "oracle_map.json"     # output: consumed by 4-derive-plain.py
-LOG      = "derive_map.txt"      # output: log
+DLL    = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
+IMG    = "wbtool_img.bin"
+PRVF   = "extracted.enc.prv"
+ORACLE = "oracle"
+OUTF   = "oracle_map.json"
+LOG    = "derive_map.txt"
 
-IMG      = "wbtool_img.bin"      # input: from 2-decrypt-img.py
-ORACLE   = "oracle"              # input dir: from 1-make-oracle.py (lic_NN.blob)
+CBLK, CN, CLEN = 16, 64, 0x400
+RWX  = 0x40
+PAT  = b"\x83\x79\x14\x41"            # cmp dword ptr [rcx+0x14], 0x41
+SENT = b"HELLO MICROSOFT!" + b"\x00" * 16
 
-CBLK     = 16               # one subtable: a permutation of 0x0..0xf
-CN       = 64               # subtables per set
-CLEN     = CBLK * CN        # size of one set: 0x400
-RWX      = 0x40
-TIMEOUT  = 900
+W10 = bytes.fromhex("a77bece491a87ebcd8a2c62856b165b3"
+                    "3ad2572cf88bdae3ddc79be816be3185")
+W11 = bytes.fromhex("c3cd57691eff156c95d946d534121dfb"
+                    "81738adb5b4bb4223faad89cbb459bec")
 
-# The decrypted licence output is (signature key || content key) XOR this magic.
-# W10 sequence; a W11 library needs the W11 sequence instead. Getting this wrong
-# makes every query look like a miss. Not derivable — a published OS constant.
-MAGIC = bytes.fromhex("a77bece491a87ebcd8a2c62856b165b3"
-                     "3ad2572cf88bdae3ddc79be816be3185")   # W10 blob XOR
-SENT  = b"HELLO MICROSOFT!" + b"\x00" * 16
-WANT  = bytes(a ^ b for a, b in zip(SENT, MAGIC))
-
-# Recorded permutation for DLL 10.0.19041.4780 — advisory cross-check only.
-GOLD = {0x0: 0xe, 0x1: 0x0, 0x2: 0xb, 0x3: 0x4, 0x4: 0xa, 0x5: 0x7, 0x6: 0xc, 0x7: 0x3,
-        0x8: 0x2, 0x9: 0x8, 0xa: 0x9, 0xb: 0x5, 0xc: 0xf, 0xd: 0x1, 0xe: 0x6, 0xf: 0xd}
-GOLD_DLL_SHA = "3cc6724d105e94bb0fb5971cc07ab2967dde2290ecebf4e0d4a910c80732ba7a"
+u16 = lambda b, o: struct.unpack_from("<H", b, o)[0]
+u32 = lambda b, o: struct.unpack_from("<I", b, o)[0]
 
 
-def find_sets(img):
-    """
-    Locate every bijection set by structure, not by address.
-
-    A set is CN consecutive CBLK-byte blocks, each a permutation of 0x0..0xf.
-    Every byte in such a set is therefore < 0x10, so the whole CLEN-byte region
-    is a run of low bytes. Finding those runs is cheap (regex, in C); only the
-    few offsets inside a run then need the permutation check.
-
-    Returns [(label, rva), ...] ascending by rva. An empty list means the image
-    is not decrypted, or does not have the expected layout.
-    """
-    bases = []
-    for m in re.finditer(rb"[\x00-\x0f]{%d,}" % CLEN, img):
-        lo, hi = m.start(), m.end()
-        o = lo
-        while o + CLEN <= hi:
-            # cheap first: most offsets fail on the first block
-            if len(set(img[o:o + CBLK])) != CBLK:
-                o += 1
-                continue
-            if all(len(set(img[o + i * CBLK:o + (i + 1) * CBLK])) == CBLK
-                   for i in range(CN)):
-                bases.append(o)
-                o += CLEN                  # don't re-accept overlapping offsets
-            else:
-                o += 1
-    bases.sort()
-    return [(f"set{i}", rva) for i, rva in enumerate(bases)]
-
-
-def find_key_consumer(img, fb):
-    """
-    Locate the descriptor of the 0x41-byte key consumer, by its own input-size
-    check rather than by address.
-
-    The routine tests the size field of its argument struct early:
-        cmp dword ptr [rcx+0x14], 0x41      bytes: 83 79 14 41
-    That sequence is unique in the decrypted image on the recorded build. The
-    code containing it is owned by exactly one heap-exec descriptor, and that
-    descriptor is what the oracle has to drive.
-
-    Returns (descriptorRva, codeRva, nSites). descriptorRva is None if the
-    pattern was not unique or its owner could not be resolved.
-    """
-    PAT = b"\x83\x79\x14\x41"
-    sites, i = [], img.find(PAT)
-    while i != -1:
-        sites.append(i)
-        i = img.find(PAT, i + 1)
-    if len(sites) != 1:
-        return None, (sites[0] if sites else None), len(sites)
-
-    u32 = lambda b, o: struct.unpack_from("<I", b, o)[0]
+def pe(fb):
     lf = u32(fb, 0x3C)
-    nsec = struct.unpack_from("<H", fb, lf + 6)[0]
-    optsz = struct.unpack_from("<H", fb, lf + 20)[0]
-    p = lf + 24 + optsz
-    owner = None
-    for _ in range(nsec):
-        vs, va, rs, rp = struct.unpack_from("<IIII", fb, p + 8)
-        b = fb[rp:rp + rs]
-        for off in range(0, max(0, len(b) - 0xF0), 4):
-            if u32(b, off + 0x20) != 0xF0:
-                continue
-            if hashlib.sha256(b[off + 0x20:off + 0xF0]).digest() != b[off:off + 32]:
-                continue
-            code = u32(b, off + 0x34) & 0x0FFFFFFF
-            ln   = u32(b, off + 0x38) & 0x0FFFFFFF
-            if code <= sites[0] < code + ln:
-                owner = va + off
-        p += 40
-    return owner, sites[0], len(sites)
-
-
-# ---------------------------------------------------------------- worker
-# Runs in its own process (see the --sweep entry point at the bottom) so that a
-# fault in the decrypt path cannot take down the driver, and so the loaded image
-# is discarded after every query.
-def sweep(cbase, blobpath, desc):
-    PRV = open(PRVF, "rb").read()
-    img = open(IMG, "rb").read()     # from 2-decrypt-img.py
-    fb = open(DLL, "rb").read()
-
-    # --- enumerate segment spans from the file, so the image can be prepared.
-    # Only segment descriptors are used; heap-exec blocks stay ciphertext and
-    # the kernel decrypts them itself on the op=3 call below.
-    u32 = lambda b, o: struct.unpack_from("<I", b, o)[0]
-    lf, nsec = u32(fb, 0x3C), struct.unpack_from("<H", fb, u32(fb, 0x3C) + 6)[0]
-    optsz = struct.unpack_from("<H", fb, lf + 20)[0]
+    nsec, optsz = u16(fb, lf + 6), u16(fb, lf + 20)
     sizeImg = u32(fb, lf + 24 + 56)
-    p = lf + 24 + optsz
-    secs = []
+    p, secs = lf + 24 + optsz, []
     for _ in range(nsec):
         vs, va, rs, rp = struct.unpack_from("<IIII", fb, p + 8)
         secs.append((va, rs, rp)); p += 40
+    return sizeImg, secs
 
-    def raw_at(rva, n):
-        """Ciphertext from the on-disk file for this RVA, or None if unmapped."""
-        for va, rs, rp in secs:
-            if va <= rva < va + rs:
-                if rp + (rva - va) + n > len(fb):
-                    return None
-                return fb[rp + (rva - va):rp + (rva - va) + n]
-        return None
 
-    seg, seen = [], set()
+def census(fb, secs, sizeImg):
+    segs, heaps, spans = [], [], []
     for va, rs, rp in secs:
         b = fb[rp:rp + rs]
         for off in range(0, max(0, len(b) - 0x40), 4):
             size = u32(b, off + 0x20)
-            # 0x200000 cap, matching 2-decrypt-img.py. A 0x2000 cap silently
-            # skips the two large descriptors and breaks the decrypt path.
             if size < 0x40 or size > 0x200000 or off + size > len(b):
                 continue
             if hashlib.sha256(b[off + 0x20:off + size]).digest() != b[off:off + 32]:
                 continue
-            if size == 0xF0:                       # heap-exec: kernel decrypts on op=3
-                continue
-            for k in range((size - 0xF4) // 0xC):
-                o = off + 0xF4 + k * 0xC
-                rva, sz = u32(b, o + 4), u32(b, o + 8)
-                if rva < 0x1000 or sz < 8 or rva + sz > sizeImg or rva in seen:
-                    continue
-                seen.add(rva); seg.append((rva, sz))
+            if size == 0xF0:
+                heaps.append(dict(desc=va + off, fo=rp + off,
+                                  rva=u32(b, off + 0x34) & 0x0FFFFFFF,
+                                  size=u32(b, off + 0x38) & 0x0FFFFFFF))
+            else:
+                segs.append(dict(desc=va + off, fo=rp + off, size=size))
+    for s in segs:                       # per descriptor, NOT deduped by RVA
+        b = fb[s["fo"]:s["fo"] + s["size"]]
+        for k in range((s["size"] - 0xF4) // 0xC):
+            o = 0xF4 + k * 0xC
+            rva, sz = u32(b, o + 4), u32(b, o + 8)
+            if rva >= 0x1000 and sz >= 8 and rva + sz <= sizeImg:
+                spans.append((rva, sz))
+    return segs, heaps, spans
+
+
+def raw_at(fb, secs, rva, n):
+    for va, rs, rp in secs:
+        if va <= rva < va + rs and rp + (rva - va) + n <= len(fb):
+            return fb[rp + (rva - va):rp + (rva - va) + n]
+    return None
+
+
+def find_sets(img):
+    out = []
+    for m in re.finditer(rb"[\x00-\x0f]{%d,}" % CLEN, img):
+        lo, hi, o = m.start(), m.end(), m.start()
+        while o + CLEN <= hi:
+            if len(set(img[o:o + CBLK])) != CBLK:
+                o += 1; continue
+            if all(len(set(img[o + i * CBLK:o + (i + 1) * CBLK])) == CBLK
+                   for i in range(CN)):
+                out.append(o); o += CLEN
+            else:
+                o += 1
+    out.sort()
+    return [(f"set{i}", rva) for i, rva in enumerate(out)]
+
+
+def find_consumer(img, heaps):
+    sites, i = [], img.find(PAT)
+    while i != -1:
+        sites.append(i); i = img.find(PAT, i + 1)
+    if len(sites) != 1:
+        return None, sites
+    owner = None
+    for h in heaps:
+        if h["size"] and h["rva"] <= sites[0] < h["rva"] + h["size"]:
+            owner = h["desc"]
+    return owner, sites
+
+
+# ================================ worker =====================================
+if len(sys.argv) > 1 and sys.argv[1] == "--sweep":
+    SETRVA = int(sys.argv[2], 0)
+    DESC   = int(sys.argv[3], 0)
+    LICS   = [int(x, 16) for x in sys.argv[4].split(",")]
+
+    fb = open(DLL, "rb").read()
+    img = open(IMG, "rb").read()
+    PRV = open(PRVF, "rb").read()
+    sizeImg, secs = pe(fb)
+    segs, heaps, spans = census(fb, secs, sizeImg)
 
     k32 = ctypes.WinDLL("kernel32")
     k32.LoadLibraryW.restype = ctypes.c_void_p
     k32.VirtualProtect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong,
                                    ctypes.POINTER(ctypes.c_ulong)]
-    k32.ReadProcessMemory.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-                                      ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
-    k32.ReadProcessMemory.restype = ctypes.c_int
+    k32.K32GetMappedFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                          ctypes.c_wchar_p, ctypes.c_ulong]
     nt = ctypes.WinDLL("ntdll")
     Raw = nt.NtQuerySystemInformation
     Raw.argtypes = [ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p]
     Raw.restype = ctypes.c_long
-    base = k32.LoadLibraryW(DLL)
-    DUM, ME = ctypes.c_ulong(0), ctypes.c_void_p(-1)
 
-    def rd(addr, n):
-        """Read the caller's own memory without raising on bad pointers."""
-        if not addr or addr < 0x10000 or addr > 0x7FFFFFFFFFFF:
-            return b""
-        buf = ctypes.create_string_buffer(n)
-        got = ctypes.c_size_t(0)
-        if not k32.ReadProcessMemory(ME, ctypes.c_void_p(addr), buf, n, ctypes.byref(got)):
-            return b""
-        return buf.raw[:got.value]
+    base = k32.LoadLibraryW(DLL)
+    if not base:
+        print("LOADFAIL"); sys.stdout.flush(); os._exit(4)
 
     def wr(rva, data):
-        """
-        Write into the loaded image, RESTORING THE PAGE'S ORIGINAL PROTECTION
-        afterwards. Leaving the page writable makes the kernel reject the WB
-        descriptor with 0xc000000d, so this restore is mandatory.
-        """
         data = bytes(data)
-        addr = ctypes.c_void_p(base + rva)
         span = (len(data) + 0xFFF) & ~0xFFF
         old = ctypes.c_ulong(0)
-        if not k32.VirtualProtect(addr, span, RWX, ctypes.byref(old)):
+        a = ctypes.c_void_p(base + rva)
+        if not k32.VirtualProtect(a, span, RWX, ctypes.byref(old)):
             return False
-        ctypes.memmove(addr, data, len(data))
-        k32.VirtualProtect(addr, span, old.value, ctypes.byref(DUM))
+        ctypes.memmove(a, data, len(data))
+        k32.VirtualProtect(a, span, old.value, ctypes.byref(ctypes.c_ulong(0)))
         return True
 
-    # --- prepare the image: copy every decrypted segment span over the live
-    # ciphertext, so the decrypt path executes real code rather than noise.
-    n = 0
-    for r, s in seg:
-        rawb = raw_at(r, s)
-        if rawb is None or img[r:r + s] == rawb:
-            continue                            # unmapped, or nothing decrypted here
-        if wr(r, img[r:r + s]):
-            n += 1
+    # --- prep: patch segment plaintext, but never over a heap-exec block.
+    # The kernel decrypts those itself on op=3; pre-filling them causes a
+    # double decrypt and the routine executes garbage.
+    blocks = sorted((h["rva"], h["rva"] + h["size"]) for h in heaps if h["size"])
+    merged = []
+    for lo, hi in blocks:
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    los = [b[0] for b in merged]
+
+    def carve(r, s):
+        """Subtract heap-exec blocks from [r, r+s); return the remaining runs."""
+        out, cur, e = [], r, r + s
+        i = 0
+        for j, lo in enumerate(los):
+            if lo <= r:
+                i = j
+            else:
+                break
+        for lo, hi in merged[i:]:
+            if hi <= cur:
+                continue
+            if lo >= e:
+                break
+            if lo > cur:
+                out.append((cur, min(lo, e)))
+            cur = max(cur, hi)
+            if cur >= e:
+                break
+        if cur < e:
+            out.append((cur, e))
+        return [(a, b - a) for a, b in out if b > a]
+
+    patched = skipped = 0
+    for r, s in spans:
+        if r + s > len(img):
+            continue
+        c = raw_at(fb, secs, r, s)
+        if c is None or img[r:r + s] == c:
+            continue
+        for a, n in carve(r, s):
+            if wr(a, img[a:a + n]):
+                patched += 1
+            else:
+                skipped += 1
+    print(f"PATCHED {patched} skipped {skipped}", flush=True)
+    print(f"VARIANT prv[0x40]=0x{PRV[0x40]:02x} %3={PRV[0x40] % 3}", flush=True)
 
     def onf(ep):
-        """
-        Report where the decrypt path died, then hard-exit. sys.exit cannot
-        unwind out of a ctypes callback, so os._exit is required.
-        """
         er = struct.unpack_from("<Q", ctypes.string_at(ep, 8))[0]
-        c = struct.unpack_from("<I", ctypes.string_at(er, 4))[0]
-        a = struct.unpack_from("<Q", ctypes.string_at(er + 0x10, 8))[0]
-        print(f"FAULT 0x{c:08x} rva 0x{(a - base) & 0xFFFFFFFF:x}", flush=True)
+        code = u32(ctypes.string_at(er, 4), 0)
+        ad = struct.unpack_from("<Q", ctypes.string_at(er + 0x10, 8))[0]
+        nm = ctypes.create_unicode_buffer(512)
+        try:
+            k32.K32GetMappedFileNameW(ctypes.c_void_p(-1), ctypes.c_void_p(ad), nm, 512)
+        except Exception:
+            pass
+        mod = nm.value.rsplit("\\", 1)[-1] if nm.value else "-"
+        print(f"FAULT 0x{code:08x} addr=0x{ad:016x} off={ad - base:+#x} module={mod}",
+              flush=True)
         os._exit(3)
 
     VEH = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
-    kv = VEH(onf)
-    k32.AddVectoredExceptionHandler(1, kv)
+    keep = VEH(onf)
+    k32.AddVectoredExceptionHandler(1, keep)
 
-    blob = open(blobpath, "rb").read()            # oracle/lic_NN.blob
+    orig = ctypes.string_at(base + SETRVA, CLEN)
 
-    # --- one decrypt of the given licence blob with the target .enc.prv.
-    # Argument block layout for the key consumer (op=3), as the routine sees it:
-    #   rcx+0x00 status ptr   rcx+0x08 mode        rcx+0x0c key ptr (0x41 bytes)
-    #   rcx+0x14 size = 0x41  rcx+0x18 blob ptr    rcx+0x20 output ptr
-    # The output is (signature key || content key) XOR MAGIC.
-    def decrypt():
+    def decrypt(blob):
         st = ctypes.create_string_buffer(0x40)
-        o = ctypes.create_string_buffer(0x100)
+        o  = ctypes.create_string_buffer(0x100)
         kb = ctypes.create_string_buffer(PRV, 0x48)
         cb = ctypes.create_string_buffer(blob, len(blob))
-        a = ctypes.create_string_buffer(0x40)
+        a  = ctypes.create_string_buffer(0x40)
         struct.pack_into("<Q", a, 0x00, 3)
-        struct.pack_into("<Q", a, 0x08, base + desc)
+        struct.pack_into("<Q", a, 0x08, base + DESC)
         struct.pack_into("<Q", a, 0x10, ctypes.addressof(st))
         struct.pack_into("<I", a, 0x18, 0)
         struct.pack_into("<Q", a, 0x1C, ctypes.addressof(kb))
@@ -345,35 +255,22 @@ def sweep(cbase, blobpath, desc):
         rc = Raw(0xB9, ctypes.cast(a, ctypes.c_void_p), 0x38, None) & 0xFFFFFFFF
         return rc, bytes(st.raw)[:4], bytes(o.raw)[:0x20]
 
-    print(f"PATCHED {n}", flush=True)
-
-    # --- control run with the set intact. This must NOT produce the sentinel:
-    # the target key's scalar is not NN*0x111..1, so if the sentinel appears
-    # either the key or the licences are wrong and the whole sweep is invalid.
-    orig = ctypes.string_at(base + cbase, CLEN)
-    rc, sd, out = decrypt()
-    print(f"CONTROL nt=0x{rc:08x} st={sd.hex()} sentinel={'YES' if out == WANT else 'no'}",
-          flush=True)
-
-    # --- the oracle proper: force every mapped nibble to MM, look for the
-    # sentinel. A HIT means MAP[MM] == this licence's real nibble.
-    for mm in range(16):
-        wr(cbase, bytes([mm]) * CLEN)
-        try:
-            rc, sd, out = decrypt()
-        finally:
-            wr(cbase, orig)                     # always restore, even on fault
-        hit = (rc == 0 and sd == b"\0\0\0\0" and out == WANT)
-        print(f"RESULT {mm:02x} {'HIT' if hit else 'MISS'}", flush=True)
+    for nn in LICS:
+        blob = open(os.path.join(ORACLE, f"lic_{nn:02x}.blob"), "rb").read()
+        rc, sd, out = decrypt(blob)
+        print(f"CTRL {nn:02x} rc=0x{rc:08x} st={sd.hex()} {out.hex()}", flush=True)
+        for mm in range(16):
+            wr(SETRVA, bytes([mm]) * CLEN)
+            try:
+                rc, sd, out = decrypt(blob)
+            finally:
+                wr(SETRVA, orig)
+            print(f"OUT {nn:02x} {mm:02x} rc=0x{rc:08x} st={sd.hex()} {out.hex()}",
+                  flush=True)
     os._exit(0)
 
 
-if len(sys.argv) > 1 and sys.argv[1] == "--sweep":
-    sweep(int(sys.argv[2], 0), sys.argv[3], int(sys.argv[4], 0))
-    raise SystemExit
-
-
-# ---------------------------------------------------------------- driver
+# ================================ driver =====================================
 L = []
 def log(s=""):
     L.append(str(s)); print(s, flush=True)
@@ -383,161 +280,155 @@ def die(msg):
     open(LOG, "w", encoding="utf-8").write("\n".join(L) + "\n")
     sys.exit(1)
 
-# --- preflight: refuse to run with anything missing or stunted, because a
-# partial run would still emit a plausible-looking permutation.
 for f in (IMG, PRVF):
     if not os.path.isfile(f):
         die(f"missing {f}")
 if not os.path.isdir(ORACLE):
     die(f"missing {ORACLE}\\ - run 1-make-oracle.py first")
 
-blobs = {}
-for nib in range(1, 16):
-    path = os.path.join(ORACLE, f"lic_{nib:02x}.blob")
-    if not os.path.isfile(path):
-        die(f"missing {path}")
-    if os.path.getsize(path) != 0x80:
-        die(f"{path} is not 0x80 bytes")
-    blobs[nib] = path
+fb = open(DLL, "rb").read()
+img = open(IMG, "rb").read()
+sizeImg, secs = pe(fb)
+segs, heaps, spans = census(fb, secs, sizeImg)
 
-FB = open(DLL, "rb").read()
-dll_sha = hashlib.sha256(FB).hexdigest()
-IMG_BYTES = open(IMG, "rb").read()
-
-log(f"dll    {DLL}")
-log(f"sha256 {dll_sha}")
-log(f"image  {IMG}  ({len(IMG_BYTES):,} bytes)")
-log(f"prv    {PRVF}  ({os.path.getsize(PRVF)} bytes)")
+log(f"dll      {DLL}")
+log(f"sha256   {hashlib.sha256(fb).hexdigest()}")
+log(f"size     {len(fb):,}   SizeOfImage 0x{sizeImg:x}")
+log(f"image    {IMG}  {len(img):,} bytes")
+log(f"segments {len(segs)}  heap-exec {len(heaps)}  spans {len(spans)}")
 log("")
 
-# --- locate the bijection sets by structure (no hardcoded addresses)
-SETS = find_sets(IMG_BYTES)
-log(f"bijection sets found by structure: {len(SETS)}")
-for name, rva in SETS:
-    log(f"  {name}  0x{rva:06x}  first block {IMG_BYTES[rva:rva + CBLK].hex()}")
+SETS = find_sets(img)
+log(f"bijection sets: {len(SETS)}")
+for n, r in SETS:
+    log(f"  {n}  0x{r:06x}  {img[r:r + 16].hex()}")
 log("")
 if not SETS:
-    die("no 64x16-byte permutation sets found - is wbtool_img.bin decrypted?")
+    die("no permutation sets found - is wbtool_img.bin decrypted?")
 
-# --- locate the 0x41-byte key consumer by its own size check (no address)
-DESC, DESC_AT, NSITES = find_key_consumer(IMG_BYTES, FB)
+DESC, sites = find_consumer(img, heaps)
+log(f"size-check sites: {[hex(x) for x in sites]}")
 if DESC is None:
-    if NSITES == 0:
-        die("key consumer not found: no 'cmp dword ptr [rcx+0x14], 0x41' in image")
-    if NSITES > 1:
-        die(f"key consumer ambiguous: {NSITES} sites of 83 79 14 41 in image")
-    die(f"key consumer found at 0x{DESC_AT:06x} but no heap-exec descriptor owns it")
-log(f"key consumer: descriptor 0x{DESC:06x}  (size check at 0x{DESC_AT:06x})")
+    die(f"consumer not unique ({len(sites)} sites)")
+h = next(x for x in heaps if x["desc"] == DESC)
+log(f"consumer descriptor 0x{DESC:06x}  code 0x{h['rva']:06x}+0x{h['size']:x}")
 log("")
 
-def run(cbase, blobpath, tag):
-    """Run one sweep in a child process and summarise what it reported."""
+
+def sweep(setrva, lics):
     p = subprocess.run([sys.executable, os.path.abspath(__file__),
-                        "--sweep", hex(cbase), blobpath, hex(DESC)],
-                       capture_output=True, text=True, timeout=TIMEOUT)
-    lines = [x for x in (p.stdout or "").splitlines() if x.strip()]
-    info = {"patched": None, "control": None, "hits": [], "fault": None}
-    for x in lines:
-        if x.startswith("PATCHED "):
-            info["patched"] = int(x.split()[1])
-        elif x.startswith("CONTROL "):
-            info["control"] = x
-        elif x.startswith("RESULT "):
-            f = x.split()
-            if len(f) >= 3 and f[2] == "HIT":
-                info["hits"].append(int(f[1], 16))
-        elif x.startswith("FAULT "):
-            info["fault"] = x
-    if info["fault"]:
-        log(f"  {tag}: {info['fault']}")
-    elif info["patched"] is None:
-        log(f"  {tag}: no output (rc {p.returncode})")
-        if p.stderr.strip():
-            log(f"      {p.stderr.strip().splitlines()[-1]}")
-    else:
-        log(f"  {tag}: patched {info['patched']}  {info['control'] or ''}"
-            f"  hits {[hex(h) for h in info['hits']]}")
-    return info
+                        "--sweep", hex(setrva), hex(DESC),
+                        ",".join(f"{x:02x}" for x in lics)],
+                       capture_output=True, text=True, timeout=1800)
+    ctrl, outs, meta, fault = {}, {}, [], None
+    for x in (p.stdout or "").splitlines():
+        f = x.split()
+        if not f:
+            continue
+        if f[0] in ("PATCHED", "VARIANT"):
+            meta.append(x)
+        elif f[0] == "CTRL":
+            ctrl[int(f[1], 16)] = f[-1]
+        elif f[0] == "OUT":
+            outs.setdefault(int(f[1], 16), {})[int(f[2], 16)] = f[-1]
+        elif f[0] == "FAULT":
+            fault = x
+    return dict(ctrl=ctrl, outs=outs, meta=meta, fault=fault, rc=p.returncode)
 
-# ---- phase 1: which set is live?  (lic_01 -> real nibble 0x1)
-# lic_01's scalar is 0x11..11, so if the live set is forced to MM and the
-# sentinel appears, MAP[MM] = 1. Sets not on this key format's path produce 16
-# identical outputs (no HIT) because patching them changes nothing.
-log("phase 1: locate the live bijection set (lic_01 -> real nibble 0x1)")
-log("")
-live, seed = None, None
-for name, cbase in SETS:
-    info = run(cbase, blobs[1], f"{name} 0x{cbase:06x}")
-    if info["fault"] or info["patched"] is None:
+
+# ---- phase 1: live set + magic, using three licences
+P1 = [1, 2, 3]
+log(f"phase 1: {len(SETS)} sets x licences {P1}")
+log(f"{'set':<6}{'rva':<12}{'distinct':<26}{'shared':<8}verdict")
+live, magic_hex, table = None, None, {}
+for name, rva in SETS:
+    r = sweep(rva, P1)
+    if r["fault"]:
+        log(f"{name:<6}0x{rva:06x}  {r['fault']}")
         continue
-    if info["control"] and "sentinel=YES" in info["control"]:
-        die(f"{name}: control decrypt returned the sentinel - wrong key or blown oracle")
-    if len(info["hits"]) == 1:
+    if any(nn not in r["outs"] for nn in P1):
+        log(f"{name:<6}0x{rva:06x}  incomplete (rc {r['rc']})")
+        continue
+    sets = {nn: set(r["outs"][nn].values()) for nn in P1}
+    distinct = {nn: len(sets[nn]) for nn in P1}
+    shared = set.intersection(*sets.values())
+    verdict = "LIVE" if len(shared) == 1 and min(distinct.values()) > 1 else "not live"
+    log(f"{name:<6}0x{rva:06x}  {str(distinct):<26}{len(shared):<8}{verdict}")
+    if verdict == "LIVE":
         if live is not None:
-            die(f"two live sets: {live[0]} and {name}")   # ambiguity is fatal
-        live, seed = (name, cbase), info["hits"][0]
-    elif len(info["hits"]) > 1:
-        die(f"{name}: {len(info['hits'])} hits for one nibble - table not a clean bijection")
-    log("")
+            die(f"two live sets: {live[0]} and {name}")
+        live, magic_hex, table = (name, rva), next(iter(shared)), r
+log("")
 
 if live is None:
-    die("no set produced the sentinel - wbtool_img.bin or the licences are wrong")
-
-log(f"live cluster: {live[0]} 0x{live[1]:06x}   MAP[0x{seed:x}] = 0x1")
-log("")
-
-# ---- phase 2: remaining 14 nibbles on the live set
-# Every real nibble must resolve to exactly one mapped value, and no two real
-# nibbles may claim the same mapped value - that would mean the table is not a
-# permutation and the result must not be written.
-log("phase 2: resolve the remaining real nibbles")
-log("")
-MAP = {seed: 1}
-for nib in range(2, 16):
-    info = run(live[1], blobs[nib], f"nibble 0x{nib:x}")
-    if info["fault"] or info["patched"] is None:
-        die(f"nibble 0x{nib:x}: sweep failed")
-    if len(info["hits"]) != 1:
-        die(f"nibble 0x{nib:x}: {len(info['hits'])} hits, expected exactly 1")
-    mm = info["hits"][0]
-    if mm in MAP:
-        die(f"nibble 0x{nib:x}: mapped value 0x{mm:x} already taken by real 0x{MAP[mm]:x}")
-    MAP[mm] = nib
+    log("no set produced a shared plaintext across licences.")
     log("")
+    log("That rules out both wrong-magic and wrong-live-set: if the sentinel were")
+    log("ever produced, the shared value would appear. So the sentinel is never")
+    log("reached at all, which points at the blob/ECC encoding rather than at the")
+    log("tables. Check, in order:")
+    log("  1. lic_NN.blob point order - C1||C2 vs C2||C1. The oracle writes")
+    log("     C1=(rG) then C2=(M+rQ); a build that reads C2 first never lands on M.")
+    log("  2. Whether the consumer really is the 0x41 licence consumer on this")
+    log("     build. Compare the 'distinct' column: all-1 means the patch has no")
+    log("     effect on the output, so that descriptor is not reading the table.")
+    log("  3. Whether prv[0x40]%3 selects a routine family whose table is not among")
+    log("     the discovered sets - the VARIANT line above records the value.")
+    die("no live set")
 
-# ---- leftover -> real 0x0
-# Real nibble 0x0 cannot be expressed as a private scalar (zero is not a valid
-# key), so it is never queried; it is whatever mapped value remains unused.
-# Exactly one must remain - if not, some nibble was mis-resolved.
+MAGIC = bytes(a ^ b for a, b in zip(bytes.fromhex(magic_hex), SENT))
+
+log(f"live set   {live[0]} 0x{live[1]:06x}")
+log(f"magic      {MAGIC.hex()}")
+if MAGIC == W10:
+    log("           == the Windows 10 sequence")
+elif MAGIC == W11:
+    log("           == the Windows 11 sequence")
+else:
+    log("           == NEITHER published sequence: this build uses a third one,")
+    log("              which is why a hardcoded W10 constant would never match.")
+log("")
+for m in table["meta"]:
+    log(f"  {m}")
+
+# ---- phase 2: full permutation on the live set
+log("")
+log("phase 2: full permutation on the live set")
+r = sweep(live[1], list(range(1, 16)))
+if r["fault"]:
+    die(r["fault"])
+if any(nn not in r["outs"] for nn in range(1, 16)):
+    die(f"incomplete sweep (rc {r['rc']})")
+
+TARGET = magic_hex          # the shared sentinel output, as hex
+MAP = {}
+for nn in range(1, 16):
+    hits = [mm for mm, v in r["outs"][nn].items() if v == TARGET]
+    if len(hits) != 1:
+        die(f"nibble 0x{nn:x}: {len(hits)} hits, expected 1")
+    mm = hits[0]
+    if mm in MAP:
+        die(f"nibble 0x{nn:x}: mapped 0x{mm:x} already used by real 0x{MAP[mm]:x}")
+    MAP[mm] = nn
+    log(f"  real 0x{nn:x} <- mapped 0x{mm:x}")
+
 left = [m for m in range(16) if m not in MAP]
 if len(left) != 1:
-    die(f"expected exactly one leftover, got {[hex(x) for x in left]}")
+    die(f"expected one leftover, got {[hex(x) for x in left]}")
 MAP[left[0]] = 0
-log(f"leftover mapped 0x{left[0]:x} -> real 0x0")
+log(f"  leftover mapped 0x{left[0]:x} -> real 0x0")
 log("")
 
 if sorted(MAP.values()) != list(range(16)):
-    die("result is not a 16-entry bijection")
+    die("not a bijection")
 
 log("[MAP]  mapped -> real")
 for m in range(16):
     log(f"  {m:x} -> {MAP[m]:x}")
-log("")
 
-# --- advisory cross-check. GOLD is the permutation recorded for this exact DLL
-# build; a mismatch on a matching build means one of the two runs is wrong.
-if dll_sha == GOLD_DLL_SHA:
-    if MAP == GOLD:
-        log("cross-check: matches the recorded permutation for this DLL (GOLD match)")
-    else:
-        log("NOTE: DLL sha matches the recorded build but the permutation differs.")
-        log("      one of the two runs is wrong - investigate before trusting this file.")
-else:
-    log(f"cross-check: DLL differs from the recorded build ({GOLD_DLL_SHA[:16]}...),")
-    log("      so a different permutation is expected. GOLD comparison skipped.")
-
-with open(OUTF, "w") as fh:
-    json.dump({"cluster": live[1], "map": {str(k): v for k, v in MAP.items()}}, fh, indent=2)
+json.dump({"cluster": live[1], "magic": MAGIC.hex(),
+           "map": {str(k): v for k, v in MAP.items()}},
+          open(OUTF, "w"), indent=2)
 log("")
-log(f"written {OUTF}  (16 entries)")
+log(f"written {OUTF}")
 open(LOG, "w", encoding="utf-8").write("\n".join(L) + "\n")
