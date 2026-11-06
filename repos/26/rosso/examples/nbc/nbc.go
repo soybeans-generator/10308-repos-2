@@ -1,0 +1,91 @@
+package main
+
+import (
+   "41.neocities.org/maya"
+   "41.neocities.org/rosso/nbc"
+   "log"
+   "os"
+)
+
+func main() {
+   log.SetFlags(log.Ltime)
+   err := new(client).do()
+   if err != nil {
+      log.Fatal(err)
+   }
+}
+
+type client struct {
+   Widevine maya.FlagString
+   address  maya.FlagString
+   dash_id  maya.FlagString
+
+   cache maya.Cache
+}
+
+func (*client) CachePath() string {
+   return "rosso/examples/nbc/client"
+}
+
+func (c *client) do() error {
+   if err := c.cache.Setup(); err != nil {
+      return err
+   }
+   if err := c.cache.Decode(c); err != nil {
+      return c.cache.Encode(c)
+   }
+   flags := maya.FlagSet{
+      {Name: "widevine-folder", Value: &c.Widevine},
+      {Name: "address", Value: &c.address},
+      {Name: "dash-id", Value: &c.dash_id},
+   }
+   if err := flags.Parse(os.Args[1:]); err != nil {
+      return err
+   }
+   switch {
+   case flags.IsSet(&c.Widevine):
+      return c.cache.Encode(c)
+   case c.address != "":
+      return c.do_address()
+   case c.dash_id != "":
+      return c.do_dash_id()
+   }
+   return flags.Usage(os.Stderr, "nbc")
+}
+
+func (c *client) do_address() error {
+   name, err := nbc.GetName(string(c.address))
+   if err != nil {
+      return err
+   }
+   metadata, err := nbc.FetchMetadata(name)
+   if err != nil {
+      return err
+   }
+   stream, err := metadata.FetchStream()
+   if err != nil {
+      return err
+   }
+   address, err := stream.GetManifest()
+   if err != nil {
+      return err
+   }
+   manifest, err := maya.DashList(address)
+   if err != nil {
+      return err
+   }
+   return c.cache.Encode(manifest)
+}
+
+func (c *client) do_dash_id() error {
+   var manifest maya.Manifest
+   err := c.cache.Decode(&manifest)
+   if err != nil {
+      return err
+   }
+   return maya.DashDownload(string(c.dash_id), &manifest, &maya.Options{
+      Device:  string(c.Widevine),
+      Drm:     maya.DrmWidevine,
+      License: nbc.FetchWidevine,
+   })
+}
