@@ -1,17 +1,20 @@
 // 4-decrypt.go begin
 //go:build windows
 
-// Decrypts a PlayReady signing key (extracted.sig.prv -> extracted.sig.plain).
+// cmdDecrypt implements prkf -4.
+//
+// Decrypts a PlayReady signing key (testdata/extracted.sig.prv ->
+// testdata/extracted.sig.plain).
 //
 // Takes no arguments. Input, output and public-key names are fixed to the
-// ones 2-extract-keys.go produces. The output is written only after every
-// available check passes.
+// ones prkf -2 produces, inside testdata/. The output is written only after
+// every available check passes.
 //
 // # VERSION SUPPORT
 //
 // Only ONE value differs between DLL builds: the RVA of the heap descriptor
-// holding the signing-key routine. It comes from prsubs.json, keyed by the
-// DLL sha256 and produced by 3-find-sub.go, which does not use sample keys.
+// holding the signing-key routine. It comes from testdata/prsubs.json, keyed
+// by the DLL sha256 and produced by prkf -3, which does not use sample keys.
 // This program refuses to run if the cache does not match the DLL.
 //
 // Everything else is hardcoded because it cannot drift with the DLL:
@@ -25,15 +28,15 @@
 //     it itself with `cmp dword ptr [rcx+10h], 20h`.
 //   - 0x34 is the size of the kernel's call-args struct.
 //
-// prsubs.json is read from the CURRENT DIRECTORY, so run this from the same
-// directory 3-find-sub.go was run in.
+// prsubs.json is read from testdata/, so run prkf -3 first; both steps agree
+// on the directory because both go through outFile.
 //
 // # VERIFICATION
 //
 // The check is cryptographic and needs no secret reference: the plaintext d,
 // read big-endian, must satisfy d*G == Q, where Q is the P-256 public key
-// that 2-extract-keys.go wrote next to the ciphertext. A wrong descriptor, a
-// wrong output offset, a wrong argument layout or a wrong input file cannot
+// that prkf -2 wrote next to the ciphertext. A wrong descriptor, a wrong
+// output offset, a wrong argument layout or a wrong input file cannot
 // produce a scalar whose public point lands on Q. Cost: a few milliseconds.
 //
 // This single check subsumes scalar-range validation: a d outside [1, n-1]
@@ -43,7 +46,7 @@
 //
 //   wrong desc_va     -> NTSTATUS 0xC0000095 (INTEGER_OVERFLOW)
 //   wrong arg layout  -> status dword 0x80070057 (E_INVALIDARG) and an
-//                        unwritten output buffer; 3-find-sub.go would also
+//                        unwritten output buffer; prkf -3 would also
 //                        report zero accepted descriptors
 //   output == input   -> descriptor for the wrong routine
 //   d*G != sig.pub    -> descriptor, argument layout or input is wrong
@@ -66,26 +69,23 @@ import (
 )
 
 const (
-   dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
-
-   srcName = "extracted.sig.prv"   // written by 2-extract-keys.go
-   pubName = "extracted.sig.pub"   // written by 2-extract-keys.go
-   dstName = "extracted.sig.plain" // 32-byte plaintext scalar
-
-   // keyLen is the P-256 private scalar length, and the size the routine
-   // accepts.
-   keyLen = 0x20
-
-   // outOff is where the routine reads its output pointer from args+0x14 -
-   // i.e. struct+0x24, because the args it sees begin 0x10 into the kernel's
-   // WarbirdCallArgs. The read is unaligned, so this value cannot be
-   // inferred from alignment.
-   outOff = 0x24
+   // dllPath, keyLen and outOff are declared once for the whole package, in
+   // 3-find-sub.go: the four steps are one program now, so they share one
+   // namespace and one set of values.
 
    // warbirdOp is op=3 (WbHeapExecuteCall); argsLen is the size of the
    // kernel's call-args struct.
    warbirdOp = 3
    argsLen   = 0x34
+)
+
+// File names this step reads and writes. They are vars, not consts, only
+// because outFile resolves outDir; outDir is itself a constant, so the values
+// are fixed for the life of the process.
+var (
+   srcName = outFile("extracted.sig.prv")   // written by prkf -2
+   pubName = outFile("extracted.sig.pub")   // written by prkf -2
+   dstName = outFile("extracted.sig.plain") // 32-byte plaintext scalar
 )
 
 // ---- P-256 domain parameters ---------------------------------------------
@@ -100,6 +100,12 @@ var (
    // (p+1)/4; p == 3 (mod 4), so a square root is one exponentiation.
    p256SqrtExp = new(big.Int).Rsh(new(big.Int).Add(p256P, big.NewInt(1)), 2)
 )
+
+// ---- entry point ---------------------------------------------------------
+
+func cmdDecrypt(args []string) error {
+   return runDecrypt(args)
+}
 
 // ---- the kernel call -----------------------------------------------------
 
@@ -189,7 +195,7 @@ func decryptSigningKey(prvPath, outPath string) ([]byte, error) {
 
    if !bytes.Equal(status[:4], []byte{0, 0, 0, 0}) {
       return nil, fmt.Errorf("routine returned %s - the argument layout no "+
-         "longer matches this build; re-run 3-find-sub.go",
+         "longer matches this build; re-run prkf -3",
          hex.EncodeToString(status[:4]))
    }
 
@@ -212,15 +218,6 @@ func decryptSigningKey(prvPath, outPath string) ([]byte, error) {
 func isFile(p string) bool {
    fi, err := os.Stat(p)
    return err == nil && fi.Mode().IsRegular()
-}
-
-// ---- main ----------------------------------------------------------------
-
-func main() {
-   if err := run(os.Args[1:]); err != nil {
-      fmt.Fprintln(os.Stderr, err)
-      os.Exit(1)
-   }
 }
 
 func mustHex(s string) *big.Int {
@@ -249,19 +246,18 @@ func pointsEqual(p1, p2 *point) bool {
    return p1.x.Cmp(p2.x) == 0 && p1.y.Cmp(p2.y) == 0
 }
 
-func run(argv []string) error {
+func runDecrypt(argv []string) error {
    // ---- arguments: nothing positional, nothing optional --------------
    if len(argv) > 0 {
-      return fmt.Errorf("unexpected argument %q: this program takes no arguments",
+      return fmt.Errorf("unexpected argument %q: prkf -4 takes no arguments",
          argv[0])
    }
 
    if !isFile(srcName) {
-      return fmt.Errorf("missing input: %s\n  run 2-extract-keys.go first", srcName)
+      return fmt.Errorf("missing input: %s\n  run prkf -2 first", srcName)
    }
    if !isFile(pubName) {
-      return fmt.Errorf("missing public key: %s\n"+
-         "  run 2-extract-keys.go first", pubName)
+      return fmt.Errorf("missing public key: %s\n  run prkf -2 first", pubName)
    }
 
    // ---- decrypt ------------------------------------------------------
@@ -439,27 +435,27 @@ func loadPrsubs() (*prsubsRecord, error) {
    sum := sha256.Sum256(dll)
    sha := hex.EncodeToString(sum[:])
 
-   if !isFile("prsubs.json") {
-      return nil, errors.New("no prsubs.json in the current directory - " +
-         "run 3-find-sub.go here first")
+   cache := outFile("prsubs.json")
+   if !isFile(cache) {
+      return nil, fmt.Errorf("no %s - run prkf -3 first", cache)
    }
-   raw, err := os.ReadFile("prsubs.json")
+   raw, err := os.ReadFile(cache)
    if err != nil {
       return nil, err
    }
    var rec prsubsRecord
    if err := json.Unmarshal(raw, &rec); err != nil {
-      return nil, fmt.Errorf("prsubs.json: %v", err)
+      return nil, fmt.Errorf("%s: %v", cache, err)
    }
 
    if rec.SHA256 != sha {
-      return nil, fmt.Errorf("prsubs.json was built for a different DLL\n"+
+      return nil, fmt.Errorf("%s was built for a different DLL\n"+
          "  cache : %s...\n"+
          "  actual: %s...\n"+
-         "  re-run 3-find-sub.go", short(rec.SHA256), short(sha))
+         "  re-run prkf -3", cache, short(rec.SHA256), short(sha))
    }
    if rec.DescVA == 0 {
-      return nil, errors.New("cache has no desc_va - re-run 3-find-sub.go")
+      return nil, fmt.Errorf("%s has no desc_va - re-run prkf -3", cache)
    }
    return &rec, nil
 }

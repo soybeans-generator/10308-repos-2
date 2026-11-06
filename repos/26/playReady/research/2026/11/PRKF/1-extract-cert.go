@@ -1,79 +1,90 @@
 // 1-extract-cert.go begin
+//go:build windows
 
-// Carves the CHAI certificate chain out of msprcore.bla.
+// prkf is the PlayReady key-extraction pipeline: four steps, one binary, one
+// package, one folder. Each step is selected by a flag and keeps its
+// implementation in the file it was always in:
 //
-// It scans for CHAI headers, keeps only chains that parse self-consistently
-// (the certificate entries must tile the chain exactly), prefers a chain
-// whose preceding u32 big-endian length prefix equals its total length, and
-// writes the carved bytes to extracted.cert.
+//   prkf -1    1-extract-cert.go   carve the CHAI certificate chain
+//   prkf -2    2-extract-keys.go   extract the sig/enc key components
+//   prkf -3    3-find-sub.go       locate the signing-key routine descriptor
+//   prkf -4    4-decrypt.go        decrypt the signing key
 //
-// fake.cert is optional: when present, the carve is cross-checked against it
-// and any mismatch aborts before anything is written. When absent, the carve
-// is written unconditionally, because the structural parse is already a
-// strong check on its own.
+// Run the steps in order, in one directory: -3 writes prsubs.json, -4 reads
+// it, and -4 consumes what -2 wrote. Every file the pipeline creates lands in
+// testdata/, so a run is disposable and the working directory stays clean.
 //
-// No arguments. All names are fixed below.
+// There is one hidden mode: `prkf -one <descVA>`, which -3 spawns for each
+// candidate descriptor. It lives on its own FlagSet so it never appears in
+// `prkf -h`. See 3-find-sub.go for why it is a separate process at all.
+//
+// The four files share one namespace, so a handful of identifiers had to be
+// renamed: see the note at the top of each file.
 package main
 
 import (
    "bytes"
    "encoding/binary"
+   "errors"
+   "flag"
    "fmt"
    "os"
+   "path/filepath"
+   "strconv"
+   "strings"
 )
 
+// ------------------------------------------------------- step 1: the chain
+
 const (
-   corePath = "msprcore.bla"
-   refPath  = "fake.cert" // optional: verification only
-   outPath  = "extracted.cert"
+   corePath = "msprcore.bla" // input, working directory
+   certOut  = "extracted.cert"
 
    chaiHdr = 20 // magic(4) version(4) total_length(4) flags(4) cert_count(4)
    certHdr = 16 // magic(4) version(4) total_length(4) certificate_length(4)
 )
+
+// ------------------------------------------------------------------ driver
+
+// outDir is where every file this program creates is written. Inputs are
+// still read from the working directory (msprcore.bla, fake.sig.*); only
+// outputs are redirected here.
+//
+// Nothing else in the pipeline should spell a directory: write through
+// outFile so the whole run can be thrown away with `rm -rf testdata`.
+const outDir = "testdata"
 
 var (
    magicCHAI = []byte("CHAI")
    magicCERT = []byte("CERT")
 )
 
-func die(v ...any) {
-   fmt.Fprintln(os.Stderr, v...)
-   os.Exit(1)
-}
-
-func hexSpace(b []byte) string {
-   var sb bytes.Buffer
-   for i, v := range b {
-      if i > 0 {
-         sb.WriteByte(' ')
-      }
-      fmt.Fprintf(&sb, "%02x", v)
+// cmdCert implements prkf -1.
+//
+// Carves the CHAI certificate chain out of msprcore.bla.
+//
+// It scans for CHAI headers, keeps only chains that parse self-consistently
+// (the certificate entries must tile the chain exactly), prefers a chain
+// whose preceding u32 big-endian length prefix equals its total length, and
+// writes the carved bytes to testdata/extracted.cert.
+//
+// The structural parse is the only check. A candidate must be internally
+// consistent to be considered at all, and no reference file is consulted.
+//
+// Takes no arguments. All names are fixed below.
+func cmdCert(args []string) error {
+   if len(args) != 0 {
+      return fmt.Errorf("prkf -1 takes no arguments, got %q", args[0])
    }
-   return sb.String()
-}
 
-func main() {
    if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
-      die("missing input: " + corePath)
+      return errors.New("missing input: " + corePath)
    }
    buf, err := os.ReadFile(corePath)
    if err != nil {
-      die(err)
+      return err
    }
    fmt.Printf("%s : %d bytes\n", corePath, len(buf))
-
-   var reference []byte
-   haveRef := false
-   if fi, err := os.Stat(refPath); err == nil && fi.Mode().IsRegular() {
-      reference, err = os.ReadFile(refPath)
-      if err != nil {
-         die(err)
-      }
-      haveRef = true
-      fmt.Printf("%s : %d bytes\n", refPath, len(reference))
-   } else {
-      fmt.Printf("%s : absent -> skipping verification (carve is self-validating)\n", refPath)
-   }
 
    // ---- collect every structurally valid candidate -----------------
    var candidates []*chain
@@ -90,7 +101,7 @@ func main() {
    }
 
    if len(candidates) == 0 {
-      die("no valid CHAI chain found")
+      return errors.New("no valid CHAI chain found")
    }
 
    fmt.Printf("\n%d valid CHAI candidate(s):\n", len(candidates))
@@ -146,73 +157,105 @@ func main() {
       fmt.Printf("warning: %s\n", w)
    }
 
-   // ---- optional cross-check against fake.cert ----------------------
-   verdict := ""
+   // ---- write ------------------------------------------------------
+   out := outFile(certOut)
+   if err := os.WriteFile(out, blob, 0o644); err != nil {
+      return err
+   }
+   fmt.Printf("\nwrote %s (%d bytes)\n", out, len(blob))
+   return nil
+}
+
+// ensureOutDir creates outDir if it does not exist. Called once from main
+// before dispatch, so no step has to care.
+func ensureOutDir() error {
+   return os.MkdirAll(outDir, 0o755)
+}
+
+func hexSpace(b []byte) string {
+   var sb bytes.Buffer
+   for i, v := range b {
+      if i > 0 {
+         sb.WriteByte(' ')
+      }
+      fmt.Fprintf(&sb, "%02x", v)
+   }
+   return sb.String()
+}
+
+// isWorkerInvocation reports whether argv asks for the internal worker mode
+// (`prkf -one <descVA>`). Only -3 produces this, and only through
+// exec.Command, so the check is deliberately narrow: it matches -one and
+// --one, with or without =value, and nothing else.
+func isWorkerInvocation(argv []string) bool {
+   if len(argv) == 0 {
+      return false
+   }
+   a := argv[0]
+   return a == "-one" || a == "--one" ||
+      strings.HasPrefix(a, "-one=") || strings.HasPrefix(a, "--one=")
+}
+
+func main() {
+   // The single-descriptor worker is checked before the main FlagSet exists,
+   // so it stays out of `prkf -h`. It is spawned by -3, never by hand.
+   if isWorkerInvocation(os.Args[1:]) {
+      workerMain(os.Args[1:])
+      return
+   }
+
+   step1 := flag.Bool("1", false,
+      "carve the CHAI certificate chain ("+outFile("extracted.cert")+")")
+   step2 := flag.Bool("2", false,
+      "extract the key components ("+outFile("extracted")+".{sig,enc}.{pub,prv})")
+   step3 := flag.Bool("3", false,
+      "locate the signing-key routine ("+outFile("prsubs.json")+", "+outFile("findprsub.txt")+")")
+   step4 := flag.Bool("4", false,
+      "decrypt the signing key ("+outFile("extracted.sig.plain")+")")
+
+   flag.Parse()
+
+   n := 0
+   for _, on := range []bool{*step1, *step2, *step3, *step4} {
+      if on {
+         n++
+      }
+   }
    switch {
-   case !haveRef:
-      fmt.Println("\nno reference file - writing carved chain unconditionally")
-      verdict = "unverified"
-
-   case bytes.Equal(reference, blob):
-      fmt.Println("\nEXTRACTION OK - carved chain is byte-identical to fake.cert")
-      verdict = "exact"
-
-   case len(reference) == len(blob)+1 && bytes.Equal(reference[1:], blob):
-      lead := reference[0]
-      prev := -1 // -1 means "no byte available"
-      if base >= 1 {
-         prev = int(buf[base-1])
-      }
-      fmt.Printf("\nfake.cert = leading byte 0x%02x + chain (chain matches exactly)\n", lead)
-      if prev >= 0 && lead == byte(prev) {
-         fmt.Printf("leading byte == %s[0x%x] (0x%02x)\n", corePath, base-1, prev)
-         fmt.Println("-> fake.cert is a verbatim span of the core starting one byte before CHAI")
-         verdict = "leading-byte"
-      } else {
-         idx := base - 1
-         if idx < 0 {
-            idx = 0
-         }
-         if prev >= 0 {
-            fmt.Printf("but %s[0x%x] = %d - leading byte unexplained\n", corePath, idx, prev)
-         } else {
-            fmt.Printf("but %s[0x%x] = n/a - leading byte unexplained\n", corePath, idx)
-         }
-         verdict = "mismatch"
-      }
-
-   default:
-      fmt.Println("\nMISMATCH - neither exact nor 1-leading-byte match")
-      n := len(blob)
-      if len(reference) < n {
-         n = len(reference)
-      }
-      diff := -1
-      for j := 0; j < n; j++ {
-         if blob[j] != reference[j] {
-            diff = j
-            break
-         }
-      }
-      if diff >= 0 {
-         fmt.Printf("  first difference at offset 0x%x\n", diff)
-         fmt.Printf("    carved: %s\n", hexSpace(blob[max(diff-8, 0):min(diff+8, len(blob))]))
-         fmt.Printf("    ref   : %s\n", hexSpace(reference[max(diff-8, 0):min(diff+8, len(reference))]))
-      } else {
-         fmt.Printf("  common prefix identical over %d bytes (lengths differ: %d vs %d)\n",
-            n, len(blob), len(reference))
-      }
-      verdict = "mismatch"
+   case n == 0:
+      fmt.Fprintln(os.Stderr, "prkf: no step selected")
+      flag.Usage()
+      os.Exit(2)
+   case n > 1:
+      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 -2 -3 -4")
+      os.Exit(2)
    }
 
-   if verdict == "mismatch" {
-      die("not writing output - investigate the mismatch first")
+   if err := ensureOutDir(); err != nil {
+      fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
+      os.Exit(1)
    }
 
-   if err := os.WriteFile(outPath, blob, 0o644); err != nil {
-      die(err)
+   var err error
+   switch {
+   case *step1:
+      err = cmdCert(flag.Args())
+   case *step2:
+      err = cmdKeys(flag.Args())
+   case *step3:
+      err = cmdFindSub(flag.Args())
+   case *step4:
+      err = cmdDecrypt(flag.Args())
    }
-   fmt.Printf("\nwrote %s (%d bytes, verdict: %s)\n", outPath, len(blob), verdict)
+   if err != nil {
+      fmt.Fprintln(os.Stderr, err)
+      os.Exit(1)
+   }
+}
+
+// outFile returns the path inside outDir for a pipeline-written file.
+func outFile(name string) string {
+   return filepath.Join(outDir, name)
 }
 
 // u32be reads a big-endian uint32 at off, reporting whether it fit.
@@ -221,6 +264,33 @@ func u32be(buf []byte, off int) (uint32, bool) {
       return 0, false
    }
    return binary.BigEndian.Uint32(buf[off:]), true
+}
+
+// workerMain probes exactly one descriptor and exits. Its whole output is the
+// RESULT line the driver parses; nothing is written to disk.
+//
+// It runs on a private FlagSet so that -one never shows up in the usage text
+// of the four real steps.
+func workerMain(argv []string) {
+   fs := flag.NewFlagSet("prkf -one", flag.ContinueOnError)
+   fs.SetOutput(os.Stderr)
+   one := fs.String("one", "", "descriptor VA (hex) to probe")
+
+   if err := fs.Parse(argv); err != nil {
+      os.Exit(2)
+   }
+   if fs.NArg() != 0 {
+      fmt.Fprintln(os.Stderr, "prkf -one: takes no positional arguments")
+      os.Exit(2)
+   }
+
+   v, err := strconv.ParseUint(*one, 0, 32)
+   if err != nil {
+      fmt.Fprintf(os.Stderr, "prkf -one: bad value %q: %v\n", *one, err)
+      os.Exit(2)
+   }
+
+   runOne(uint32(v)) // never returns: emit() exits
 }
 
 type certEntry struct {
@@ -283,11 +353,19 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       if cTot < certHdr || off+int(cTot) > end {
          return nil, false
       }
-      if cLen != cTot-certHdr {
+
+      // An entry is header + certificate body + trailer, and the trailer is
+      // not zero: every entry in a real chain carries a fixed-size signature
+      // block after the certificate (144 bytes in msprcore.bla, 288 for the
+      // leaf, which carries two). So certificate_length is expected to be
+      // smaller than the entry - requiring equality would warn on every
+      // valid chain. The only real defect is a body that does not fit.
+      if cLen > cTot-certHdr {
          c.warnings = append(c.warnings, fmt.Sprintf(
-            "cert %d @ 0x%x: certificate_length %d != entry %d - %d",
-            n, off, cLen, cTot, certHdr))
+            "cert %d @ 0x%x: certificate_length %d exceeds the entry body (%d)",
+            n, off, cLen, cTot-certHdr))
       }
+
       c.certs = append(c.certs, certEntry{off: off, total: cTot, length: cLen})
       off += int(cTot)
    }

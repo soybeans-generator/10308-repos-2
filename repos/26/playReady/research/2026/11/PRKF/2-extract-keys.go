@@ -1,21 +1,26 @@
 // 2-extract-keys.go begin
+//go:build windows
 
+// cmdKeys implements prkf -2.
+//
 // Extracts the signing and encryption key components from a PRKF container.
 //
-// Three optional arguments, in order: the PRKF path (default msprcore.bla),
-// the reference stem (default fake) and the output stem (default extracted).
-// It finds the 0x1009 key-material section, parses every 0x100f record inside
-// it, and writes four components:
+// Takes no arguments; the names are fixed below. It reads msprcore.bla from
+// the working directory, finds the 0x1009 key-material section, parses every
+// 0x100f record inside it, and writes four components into testdata/:
 //
-//   <outstem>.sig.pub   signing public key
-//   <outstem>.sig.prv   signing private component (32 bytes, still obfuscated)
-//   <outstem>.enc.pub   encryption public key
-//   <outstem>.enc.prv   encryption private component (65 bytes)
+//   testdata/extracted.sig.pub   signing public key
+//   testdata/extracted.sig.prv   signing private component (32 bytes, still obfuscated)
+//   testdata/extracted.enc.pub   encryption public key
+//   testdata/extracted.enc.prv   encryption private component (65 bytes)
 //
 // The signing record is the one immediately preceding the unique 65-byte
 // encryption record; see the comment at that site for why no header field can
-// discriminate. <refstem>.sig.* (default fake.sig.*) is compared when present:
-// absence is not an error, a mismatch is.
+// discriminate.
+//
+// The structural parse is the only check. No sample key files are consulted:
+// the record layout and the uniqueness of the 65-byte private component are
+// what identify the two keys.
 package main
 
 import (
@@ -27,76 +32,33 @@ import (
    "path/filepath"
 )
 
-func abs(p string) string {
-   a, err := filepath.Abs(p)
-   if err != nil {
-      return p
+const (
+   keysSrc = "msprcore.bla" // input, read from the working directory
+   keysOut = "extracted"    // output stem, inside outDir
+)
+
+// cmdKeys is the entry point for prkf -2.
+func cmdKeys(args []string) error {
+   if len(args) != 0 {
+      return fmt.Errorf("prkf -2 takes no arguments, got %q", args[0])
    }
-   return a
+   return extractKeys()
 }
 
-func main() {
-   src, refstem, outstem := "msprcore.bla", "fake", "extracted"
-
-   args := os.Args[1:]
-   if len(args) > 0 {
-      src = args[0]
-   }
-   if len(args) > 1 {
-      refstem = args[1]
-   }
-   if len(args) > 2 {
-      outstem = args[2]
-   }
-
-   code, err := run(src, refstem, outstem)
-   if err != nil {
-      fmt.Fprintln(os.Stderr, err)
-      os.Exit(1)
-   }
-   os.Exit(code)
-}
-
-func pubHex(pub []byte) string {
-   n := len(pub)
-   if n > 8 {
-      n = 8
-   }
-   return hex.EncodeToString(pub[:n])
-}
-
-func run(src, refstem, outstem string) (int, error) {
+func extractKeys() error {
    outNames := []string{"sig.pub", "sig.prv", "enc.pub", "enc.prv"}
    outs := make(map[string]string, len(outNames))
    for _, k := range outNames {
-      outs[k] = outstem + "." + k
+      outs[k] = outFile(keysOut + "." + k)
    }
 
-   refNames := []string{"sig.pub", "sig.prv"}
-   refs := make(map[string]string, len(refNames))
-   for _, k := range refNames {
-      refs[k] = refstem + "." + k
+   fail := func(format string, args ...any) error {
+      return fmt.Errorf(format, args...)
    }
 
-   fail := func(format string, args ...any) (int, error) {
-      return 1, fmt.Errorf(format, args...)
-   }
-
-   absSrc := abs(src)
-   absRefs := make(map[string]bool, len(refNames))
-   for _, k := range refNames {
-      absRefs[abs(refs[k])] = true
-   }
-   for _, k := range outNames {
-      ao := abs(outs[k])
-      if ao == absSrc || absRefs[ao] {
-         return fail("refusing to overwrite %s - pick another outstem", outs[k])
-      }
-   }
-
-   b, err := os.ReadFile(src)
+   b, err := os.ReadFile(keysSrc)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
-      return fail("%s: not a PRKF", src)
+      return fail("%s: not a PRKF", keysSrc)
    }
 
    var km section
@@ -112,7 +74,7 @@ func run(src, refstem, outstem string) (int, error) {
       return fail("no 0x1009 key-material section")
    }
 
-   var recs []*record
+   var recs []*keyRecord
    for _, s := range walk(b, km.ps, km.pe) {
       if s.typ == 0x100f {
          if r := parseRec(b, s.ps, s.pe); r != nil {
@@ -128,7 +90,7 @@ func run(src, refstem, outstem string) (int, error) {
    }
 
    // --- encryption key: the unique 65-byte private component
-   var encC []*record
+   var encC []*keyRecord
    for _, r := range recs {
       if r.privlen == 65 {
          encC = append(encC, r)
@@ -176,6 +138,11 @@ func run(src, refstem, outstem string) (int, error) {
       "enc.prv": enc.priv,
    }
 
+   // main already created outDir; this keeps extractKeys usable on its own.
+   if err := os.MkdirAll(filepath.Dir(outs[outNames[0]]), 0o755); err != nil {
+      return fail("create output directory: %v", err)
+   }
+
    fmt.Println("\nwritten:")
    for _, k := range outNames {
       v := data[k]
@@ -185,36 +152,18 @@ func run(src, refstem, outstem string) (int, error) {
       fmt.Printf("  %s  %2d B\n", outs[k], len(v))
    }
 
-   // --- optional verification: only if the reference files happen to exist.
-   //     Their absence is not an error; a mismatch is.
-   ok := true
-   fmt.Printf("\nverified against %s.sig.* :\n", refstem)
-   for _, k := range refNames {
-      ref, err := os.ReadFile(refs[k])
-      if err != nil {
-         fmt.Printf("  [ n/a] %s not present\n", refs[k])
-         continue
-      }
-
-      same := bytes.Equal(data[k], ref)
-      ok = ok && same
-
-      if same {
-         fmt.Printf("  [ OK ] %s == %s\n", outs[k], refs[k])
-      } else {
-         fmt.Printf("  [FAIL] %s != %s\n", outs[k], refs[k])
-      }
-   }
-
-   if ok {
-      fmt.Println("\nPASS")
-      return 0, nil
-   }
-   fmt.Println("\nFAIL")
-   return 1, nil
+   return nil
 }
 
-type record struct {
+func pubHex(pub []byte) string {
+   n := len(pub)
+   if n > 8 {
+      n = 8
+   }
+   return hex.EncodeToString(pub[:n])
+}
+
+type keyRecord struct {
    off     int
    publen  int
    pub     []byte
@@ -222,7 +171,7 @@ type record struct {
    priv    []byte
 }
 
-func parseRec(buf []byte, ps, pe int) *record {
+func parseRec(buf []byte, ps, pe int) *keyRecord {
    if ps+8 > pe {
       return nil
    }
@@ -243,7 +192,7 @@ func parseRec(buf []byte, ps, pe int) *record {
    }
 
    priv := buf[q+12 : q+12+privlen]
-   return &record{
+   return &keyRecord{
       off: ps, publen: publen, pub: pub,
       privlen: privlen, priv: priv,
    }

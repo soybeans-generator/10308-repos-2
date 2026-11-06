@@ -1,9 +1,2 @@
-*.cert
-*.enc.prv
-*.enc.pub
-*.sig.plain
-*.sig.prv
-*.sig.pub
-findprsub.txt
 msprcore.bla
-prsubs.json
+testdata

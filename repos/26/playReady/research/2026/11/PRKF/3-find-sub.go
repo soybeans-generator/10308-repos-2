@@ -1,11 +1,23 @@
 // 3-find-sub.go begin
 //go:build windows
 
+// cmdFindSub implements prkf -3.
+//
 // Locates the signing-key routine's descriptor for this DLL build.
 //
-// Takes no arguments. The --one flag is internal: the driver re-executes this
-// binary once per candidate descriptor so that a faulting routine kills only
-// the worker, not the scan. Do not invoke it by hand.
+// Takes no arguments. It spawns `prkf -one <descVA>` once per candidate
+// descriptor, scanWorkers at a time, and reads the RESULT line each child
+// prints. The child mode is internal and hidden from `prkf -h`.
+//
+// The child process is not optional. Two failures it isolates are
+// unrecoverable in-process:
+//
+//   - A fault in the descriptor's code is a Windows SEH exception inside
+//     native code, not a Go panic. recover() cannot catch it, and the process
+//     would die mid-scan, losing every result so far.
+//   - A hung descriptor call cannot be timed out. A goroutine blocked inside
+//     NtQuerySystemInformation cannot be cancelled or killed, so probeTimeout
+//     is only enforceable by killing a process.
 //
 // This program does NOT use sample key files. Discovery rests entirely on
 // properties of the routine itself, read from its disassembly:
@@ -26,7 +38,7 @@
 //
 // Property 4 is the discriminating one - it collapses the large set of
 // descriptors that merely return success. Verification against a real key is
-// 4-decrypt.go's job, not this program's.
+// prkf -4's job, not this program's.
 //
 // The ONLY value that differs between DLL builds is the RVA of the heap
 // descriptor holding the routine.
@@ -34,10 +46,13 @@
 // A result of ZERO accepted descriptors, or more than one, is an error to
 // investigate - there is no fallback path.
 //
-// Outputs, in the CURRENT DIRECTORY:
+// Outputs, both in testdata/:
 //
 //   prsubs.json     build-specific values, keyed by the DLL sha256
 //   findprsub.txt   per-descriptor probe results, for diagnosing a failure
+//
+// NOTE: this file owns the package-wide dllPath, keyLen and outOff constants;
+// prkf -4 uses the same ones rather than redeclaring them.
 package main
 
 import (
@@ -57,6 +72,7 @@ import (
    "sort"
    "strconv"
    "strings"
+   "sync"
    "syscall"
    "time"
    "unsafe"
@@ -81,7 +97,20 @@ const (
 
    // Per-descriptor wall-clock budget for the worker subprocess.
    probeTimeout = 40 * time.Second
+
+   // How many probe subprocesses run at once. Each child loads the DLL and
+   // makes three calls, so this trades process-table pressure for wall clock;
+   // 8 keeps a typical machine busy without starving it.
+   scanWorkers = 8
 )
+
+// cmdFindSub is the entry point for prkf -3.
+func cmdFindSub(args []string) error {
+   if len(args) != 0 {
+      return fmt.Errorf("prkf -3 takes no arguments, got %q", args[0])
+   }
+   return driver()
+}
 
 // comma renders n with thousands separators: 10348448 -> 10,348,448.
 func comma(n int) string {
@@ -113,7 +142,8 @@ func driver() error {
    secs := peSections(f)
    ranges := sectionRanges(secs)
 
-   logf, err := os.Create("findprsub.txt")
+   logPath := outFile("findprsub.txt")
+   logf, err := os.Create(logPath)
    if err != nil {
       return err
    }
@@ -136,19 +166,64 @@ func driver() error {
       return err
    }
 
+   // Probe every descriptor, scanWorkers at a time. Each probe is its own
+   // process (see the file comment), so the children share nothing and the
+   // parent only collects stdout. Results are stored by descriptor index, so
+   // the log and the ACCEPT lines below stay in descriptor order no matter
+   // which child finishes first.
+   results := make([]childOut, len(descs))
+
+   var (
+      mu       sync.Mutex
+      done     int
+      accepted int
+   )
+
+   nw := scanWorkers
+   if nw > len(descs) {
+      nw = len(descs)
+   }
+   if nw < 1 {
+      nw = 1
+   }
+
+   jobs := make(chan int)
+   var wg sync.WaitGroup
+   wg.Add(nw)
+   for i := 0; i < nw; i++ {
+      go func() {
+         defer wg.Done()
+         for i := range jobs {
+            res := runChild(self, descs[i].descVA)
+            results[i] = res // distinct index per job: no shared write
+
+            mu.Lock()
+            done++
+            if strings.Contains(res.line, " ACCEPT ") {
+               accepted++
+            }
+            if done%100 == 0 || done == len(descs) {
+               fmt.Printf("  %d/%d  accepted=%d\n", done, len(descs), accepted)
+            }
+            mu.Unlock()
+         }
+      }()
+   }
+   for i := range descs {
+      jobs <- i
+   }
+   close(jobs)
+   wg.Wait()
+
    var acc []descriptor
-   for i, d := range descs {
-      res := runChild(self, d.descVA)
+   for i, res := range results {
       w(res.line)
       if res.stderr != "" {
          w("  stderr: " + res.stderr)
       }
       if strings.Contains(res.line, " ACCEPT ") {
-         acc = append(acc, d)
+         acc = append(acc, descs[i])
          fmt.Println("ACCEPT " + res.line)
-      }
-      if (i+1)%100 == 0 {
-         fmt.Printf("  %d/%d  accepted=%d\n", i+1, len(descs), len(acc))
       }
    }
 
@@ -159,10 +234,10 @@ func driver() error {
    }
 
    if len(acc) == 0 {
-      return errors.New("no descriptor satisfied the signing-key routine's properties.\n" +
-         "  See the per-descriptor probe results in findprsub.txt\n" +
+      return errors.New("no descriptor satisfied the signing-key routine's properties\n" +
+         "  See the per-descriptor probe results in " + logPath + "\n" +
          "  Either the hardcoded argument layout no longer matches this build,\n" +
-         "  or this library does not contain the routine.")
+         "  or this library does not contain the routine")
    }
    if len(acc) > 1 {
       return fmt.Errorf("%d descriptors satisfied every property - genuinely "+
@@ -170,7 +245,7 @@ func driver() error {
    }
 
    d := acc[0]
-   rec := record{
+   rec := subRecord{
       SHA256:  shaHex,
       DLLSize: len(data),
       DescVA:  d.descVA,
@@ -182,7 +257,8 @@ func driver() error {
    if err != nil {
       return err
    }
-   if err := os.WriteFile("prsubs.json", pretty, 0o644); err != nil {
+   cachePath := outFile("prsubs.json")
+   if err := os.WriteFile(cachePath, pretty, 0o644); err != nil {
       return err
    }
    compact, err := json.Marshal(rec)
@@ -192,7 +268,8 @@ func driver() error {
 
    w("")
    w("cache: " + string(compact))
-   fmt.Println("written findprsub.txt")
+   fmt.Println("written " + logPath)
+   fmt.Println("written " + cachePath)
    fmt.Printf("cache: %s\n", compact)
    return nil
 }
@@ -220,23 +297,6 @@ func inside(rva, length uint32, ranges []rng) bool {
       }
    }
    return false
-}
-
-func main() {
-   if len(os.Args) >= 3 && os.Args[1] == "--one" {
-      v, err := strconv.ParseUint(os.Args[2], 0, 32)
-      if err != nil {
-         fmt.Fprintf(os.Stderr, "bad --one value %q: %v\n", os.Args[2], err)
-         os.Exit(2)
-      }
-      runOne(uint32(v))
-      return
-   }
-
-   if err := driver(); err != nil {
-      fmt.Fprintln(os.Stderr, err)
-      os.Exit(1)
-   }
 }
 
 func runOne(descVA uint32) {
@@ -285,7 +345,8 @@ func runChild(self string, descVA uint32) childOut {
    ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
    defer cancel()
 
-   cmd := exec.CommandContext(ctx, self, "--one", fmt.Sprintf("%#x", descVA))
+   // Hidden worker mode, see isWorkerInvocation in 1-extract-cert.go.
+   cmd := exec.CommandContext(ctx, self, "-one", fmt.Sprintf("%#x", descVA))
    var stdout, stderr bytes.Buffer
    cmd.Stdout = &stdout
    cmd.Stderr = &stderr
@@ -336,7 +397,7 @@ type descriptor struct {
 //
 // Only descriptors whose code segment lies entirely inside a mapped section
 // are returned, sorted by code RVA.
-func heapDescs(data []byte, secs []section, ranges []rng) []descriptor {
+func heapDescs(data []byte, secs []peSection, ranges []rng) []descriptor {
    type key struct{ va, rva, ln uint32 }
    found := make(map[key]struct{})
    le := binary.LittleEndian
@@ -396,6 +457,27 @@ func heapDescs(data []byte, secs []section, ranges []rng) []descriptor {
    return out
 }
 
+// ---------------------------------------------------------------- PE layout
+
+type peSection struct {
+   name                          string
+   vaddr, vsize, rawPtr, rawSize uint32
+}
+
+func peSections(f *pe.File) []peSection {
+   out := make([]peSection, 0, len(f.Sections))
+   for _, s := range f.Sections {
+      out = append(out, peSection{
+         name:    s.Name,
+         vaddr:   s.VirtualAddress,
+         vsize:   s.VirtualSize,
+         rawPtr:  s.Offset, // PointerToRawData
+         rawSize: s.Size,   // SizeOfRawData
+      })
+   }
+   return out
+}
+
 // ------------------------------------------------------- worker: the probes
 
 type probeResult struct {
@@ -405,19 +487,9 @@ type probeResult struct {
    fill     []byte
 }
 
-// ---------------------------------------------------------------- driver
-
-type record struct {
-   SHA256  string `json:"sha256"`
-   DLLSize int    `json:"dll_size"`
-   DescVA  uint32 `json:"desc_va"`
-   CodeRVA uint32 `json:"code_rva"`
-   SegLen  uint32 `json:"seg_len"`
-}
-
 type rng struct{ lo, hi uint64 }
 
-func sectionRanges(secs []section) []rng {
+func sectionRanges(secs []peSection) []rng {
    out := make([]rng, 0, len(secs))
    for _, s := range secs {
       extent := uint64(s.vsize)
@@ -429,25 +501,14 @@ func sectionRanges(secs []section) []rng {
    return out
 }
 
-// ---------------------------------------------------------------- PE layout
+// ---------------------------------------------------------------- driver
 
-type section struct {
-   name                          string
-   vaddr, vsize, rawPtr, rawSize uint32
-}
-
-func peSections(f *pe.File) []section {
-   out := make([]section, 0, len(f.Sections))
-   for _, s := range f.Sections {
-      out = append(out, section{
-         name:    s.Name,
-         vaddr:   s.VirtualAddress,
-         vsize:   s.VirtualSize,
-         rawPtr:  s.Offset, // PointerToRawData
-         rawSize: s.Size,   // SizeOfRawData
-      })
-   }
-   return out
+type subRecord struct {
+   SHA256  string `json:"sha256"`
+   DLLSize int    `json:"dll_size"`
+   DescVA  uint32 `json:"desc_va"`
+   CodeRVA uint32 `json:"code_rva"`
+   SegLen  uint32 `json:"seg_len"`
 }
 
 type worker struct {
