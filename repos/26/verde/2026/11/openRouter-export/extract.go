@@ -83,23 +83,10 @@ func compact(msgs []msg, outPath string, removeN int) error {
    if err := os.WriteFile(outPath, finalBytes, 0o644); err != nil {
       return fmt.Errorf("writing output: %w", err)
    }
-   fmt.Printf("Output: %d text object(s) from %d message(s), %s\n",
-      len(out), len(kept), humanSize(len(finalBytes)))
+   fmt.Printf("Output: %d text object(s) from %d message(s), %d bytes\n",
+      len(out), len(kept), len(finalBytes))
    fmt.Printf("Wrote %s\n", outPath)
    return nil
-}
-
-func humanSize(n int) string {
-   const KB = 1024
-   const MB = KB * 1024
-   switch {
-   case n >= MB:
-      return fmt.Sprintf("%.2f MB (%d bytes)", float64(n)/float64(MB), n)
-   case n >= KB:
-      return fmt.Sprintf("%.2f KB (%d bytes)", float64(n)/float64(KB), n)
-   default:
-      return fmt.Sprintf("%d bytes", n)
-   }
 }
 
 // isReasoningPart reports whether a part's type marks it as chain-of-thought:
@@ -158,8 +145,11 @@ type item struct {
 
 // itemData holds an item's content parts. Status, role and id are not needed:
 // the message carries the role and the timestamp, and the part carries its type.
+// Content stays raw because the export writes it in more than one shape: an array
+// of parts for ordinary messages, a bare string for some items, and no content at
+// all for others (the st_* ones).
 type itemData struct {
-   Content []textPart `json:"content"`
+   Content json.RawMessage `json:"content"`
 }
 
 // itemRef points at an item by id. The array order is the order the parts belong
@@ -200,8 +190,8 @@ func readMsgs(inPath string) ([]msg, error) {
    if len(ex.Messages) == 0 {
       return nil, fmt.Errorf("input has no messages")
    }
-   fmt.Printf("Input: %d message(s), %d item(s), %s\n",
-      len(ex.Messages), len(ex.Items), humanSize(len(raw)))
+   fmt.Printf("Input: %d message(s), %d item(s), %d bytes\n",
+      len(ex.Messages), len(ex.Items), len(raw))
 
    msgs := make([]msg, 0, len(ex.Messages))
    for id, m := range ex.Messages {
@@ -222,7 +212,21 @@ func readMsgs(inPath string) ([]msg, error) {
          if !ok {
             return nil, fmt.Errorf("message %q references missing item %q", id, ref.ID)
          }
-         for _, p := range it.Data.Content {
+         // No content key at all: the item holds no text, so it contributes none.
+         if len(it.Data.Content) == 0 {
+            continue
+         }
+         var content []textPart
+         errArray := json.Unmarshal(it.Data.Content, &content)
+         if errArray != nil {
+            // A bare string becomes one untyped part, taken exactly as it decodes.
+            var s string
+            if err := json.Unmarshal(it.Data.Content, &s); err != nil {
+               return nil, fmt.Errorf("item %q content: %w", ref.ID, errArray)
+            }
+            content = []textPart{{Text: s}}
+         }
+         for _, p := range content {
             if p.Text != "" {
                parts = append(parts, p)
             }
@@ -310,22 +314,21 @@ func parseExportArray(s string) ([]textPart, bool) {
 // taken from the string as given. Nothing is trimmed, collapsed, or rewritten.
 // False means s is ordinary text, i.e. the original prompt.
 func splitExport(s string) ([]textPart, bool) {
-   t := s
-   if len(t) > 0 && t[0] == '"' {
+   if len(s) > 0 && s[0] == '"' {
       var u string
-      if err := json.Unmarshal([]byte(t), &u); err != nil {
+      if err := json.Unmarshal([]byte(s), &u); err != nil {
          // Quoted but not a JSON string literal: ordinary text, so
          // "not our output" is the answer, not a failure to report.
          return nil, false
       }
-      t = u
+      s = u
    }
-   start := strings.IndexByte(t, '[')
-   end := strings.LastIndexByte(t, ']')
+   start := strings.IndexByte(s, '[')
+   end := strings.LastIndexByte(s, ']')
    if start < 0 || end <= start {
       return nil, false
    }
-   return parseExportArray(t[start : end+1])
+   return parseExportArray(s[start : end+1])
 }
 
 // unnestFirst expands every part of the oldest message that is a previous run's
