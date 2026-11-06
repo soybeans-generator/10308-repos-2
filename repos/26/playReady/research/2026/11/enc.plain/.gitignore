@@ -1,0 +1,7 @@
+*.bin
+*.enc.plain
+*.enc.prv
+*.enc.pub
+*.json
+*.txt
+oracle
