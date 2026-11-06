@@ -33,14 +33,16 @@
 //
 // # VERIFICATION
 //
-// The check is cryptographic and needs no secret reference: the plaintext d,
-// read big-endian, must satisfy d*G == Q, where Q is the P-256 public key
-// that prkf -1 wrote next to the ciphertext. A wrong descriptor, a wrong
-// output offset, a wrong argument layout or a wrong input file cannot
-// produce a scalar whose public point lands on Q. Cost: a few milliseconds.
+// The check is cryptographic and needs no secret reference: the plaintext d
+// must satisfy d*G == Q, where Q is the P-256 public key that prkf -1 wrote
+// next to the ciphertext. A wrong descriptor, a wrong output offset, a wrong
+// argument layout or a wrong input file cannot produce a scalar whose public
+// point lands on Q. Cost: a few milliseconds.
 //
-// This single check subsumes scalar-range validation: a d outside [1, n-1]
-// cannot yield Q, so no separate range test is performed.
+// crypto/ecdh covers both directions: NewPublicKey rejects a published point
+// that is off the curve or at infinity, and NewPrivateKey rejects a scalar
+// outside [1, n-1] before the base-point multiply is reached. That range
+// rejection is why no separate range test appears below.
 //
 // Failure is loud, never silent:
 //
@@ -58,6 +60,7 @@ package main
 
 import (
    "bytes"
+   "crypto/ecdh"
    "crypto/rand"
    "crypto/sha256"
    "encoding/binary"
@@ -65,7 +68,6 @@ import (
    "encoding/json"
    "errors"
    "fmt"
-   "math/big"
    "os"
    "runtime"
    "syscall"
@@ -88,19 +90,6 @@ var (
    dstName = outFile("extracted.sig.plain") // 32-byte plaintext scalar
 )
 
-// ---- P-256 domain parameters ---------------------------------------------
-
-var (
-   p256P  = mustHex("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
-   p256A  = new(big.Int).Sub(p256P, big.NewInt(3))
-   p256B  = mustHex("5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b")
-   p256Gx = mustHex("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")
-   p256Gy = mustHex("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")
-
-   // (p+1)/4; p == 3 (mod 4), so a square root is one exponentiation.
-   p256SqrtExp = new(big.Int).Rsh(new(big.Int).Add(p256P, big.NewInt(1)), 2)
-)
-
 func cmdDecrypt() error {
    if !isFile(srcName) {
       return fmt.Errorf("missing input: %s\n  run prkf -1 first", srcName)
@@ -110,7 +99,7 @@ func cmdDecrypt() error {
    }
 
    // ---- decrypt ------------------------------------------------------
-   got, err := decryptSigningKey(srcName, "")
+   got, err := decryptSigningKey(srcName)
    if err != nil {
       return err
    }
@@ -127,13 +116,20 @@ func cmdDecrypt() error {
       return fmt.Errorf("%s: %v", pubName, err)
    }
 
-   if !pointsEqual(pubkeyOf(new(big.Int).SetBytes(got)), want) {
+   // An out-of-range d makes NewPrivateKey fail, leaving gotPub nil, which
+   // falls through to the same verdict as a mismatched point.
+   var gotPub []byte
+   if priv, err := ecdh.P256().NewPrivateKey(got); err == nil {
+      gotPub = priv.PublicKey().Bytes()
+   }
+   if !bytes.Equal(gotPub, want) {
       return fmt.Errorf("d*G != %s - the plaintext is not the private key for\n"+
          "that public key; the descriptor, the argument layout or the\n"+
          "input file is wrong; nothing was written", pubName)
    }
    fmt.Printf("[ OK ] d*G == %s\n", pubName)
-   fmt.Printf("       Q = (%064x,\n            %064x)\n", want.x, want.y)
+   fmt.Printf("       Q = (%s,\n            %s)\n",
+      hex.EncodeToString(want[1:33]), hex.EncodeToString(want[33:65]))
 
    // ---- write --------------------------------------------------------
    if err := os.WriteFile(dstName, got, 0o666); err != nil {
@@ -145,13 +141,10 @@ func cmdDecrypt() error {
 
 // ---- the kernel call -----------------------------------------------------
 
-// decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key.
-//
-//   prvPath : file holding the 32-byte *.sig.prv component
-//   outPath : optional path for the 32-byte plaintext key ("" writes nothing)
-//
-// It returns the 32-byte plaintext private key.
-func decryptSigningKey(prvPath, outPath string) ([]byte, error) {
+// decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key,
+// reading the *.sig.prv component from prvPath and returning the 32-byte
+// plaintext. Nothing is written; cmdDecrypt writes after validating.
+func decryptSigningKey(prvPath string) ([]byte, error) {
    rec, err := loadPrsubs()
    if err != nil {
       return nil, err
@@ -235,20 +228,14 @@ func decryptSigningKey(prvPath, outPath string) ([]byte, error) {
          hex.EncodeToString(status[:4]))
    }
 
-   res := out
-   if bytes.Equal(res, fill) {
+   if bytes.Equal(out, fill) {
       return nil, errors.New("output buffer untouched - out_off is wrong")
    }
-   if bytes.Equal(res, enc) {
+   if bytes.Equal(out, enc) {
       return nil, errors.New("output equals input - desc_va is the wrong routine")
    }
 
-   if outPath != "" {
-      if err := os.WriteFile(outPath, res, 0o666); err != nil {
-         return nil, err
-      }
-   }
-   return res, nil
+   return out, nil
 }
 
 func isFile(p string) bool {
@@ -256,30 +243,22 @@ func isFile(p string) bool {
    return err == nil && fi.Mode().IsRegular()
 }
 
-func mustHex(s string) *big.Int {
-   n, ok := new(big.Int).SetString(s, 16)
-   if !ok {
-      panic("bad hex constant " + s)
-   }
-   return n
-}
+// ---- P-256 validation ----------------------------------------------------
 
-// p256RHS returns x^3 + a*x + b mod p.
-func p256RHS(x *big.Int) *big.Int {
-   t := new(big.Int).Mul(x, x)
-   t.Mul(t, x)
-   t.Mod(t, p256P)
-   t.Add(t, new(big.Int).Mul(p256A, x))
-   t.Add(t, p256B)
-   t.Mod(t, p256P)
-   return t
-}
-
-func pointsEqual(p1, p2 *point) bool {
-   if p1 == nil || p2 == nil {
-      return p1 == nil && p2 == nil
+// parsePubkey normalizes a P-256 public key to the uncompressed 65-byte SEC 1
+// form. ecdh.P256().NewPublicKey accepts the uncompressed and compressed
+// encodings and rejects anything off the curve or at infinity, so the on-curve
+// check is not repeated here.
+func parsePubkey(blob []byte) ([]byte, error) {
+   n := len(blob)
+   if n == 64 { // raw x||y: add the uncompressed prefix
+      blob = append([]byte{0x04}, blob...)
    }
-   return p1.x.Cmp(p2.x) == 0 && p1.y.Cmp(p2.y) == 0
+   k, err := ecdh.P256().NewPublicKey(blob)
+   if err != nil {
+      return nil, fmt.Errorf("%d-byte P-256 point: %v", n, err)
+   }
+   return k.Bytes(), nil
 }
 
 func short(s string) string {
@@ -290,121 +269,6 @@ func short(s string) string {
       return "?"
    }
    return s
-}
-
-// ---- P-256 arithmetic, for validating the plaintext ----------------------
-
-// point is an affine P-256 point; nil is the point at infinity.
-type point struct{ x, y *big.Int }
-
-// ecAdd is affine point addition on P-256.
-func ecAdd(p1, p2 *point) *point {
-   if p1 == nil {
-      return p2
-   }
-   if p2 == nil {
-      return p1
-   }
-   x1, y1 := p1.x, p1.y
-   x2, y2 := p2.x, p2.y
-
-   var lam *big.Int
-   if x1.Cmp(x2) == 0 {
-      sum := new(big.Int).Add(y1, y2)
-      sum.Mod(sum, p256P)
-      if sum.Sign() == 0 {
-         return nil // P + (-P), and y == 0
-      }
-      // lambda = (3*x1*x1 + a) / (2*y1)
-      num := new(big.Int).Mul(x1, x1)
-      num.Mul(num, big.NewInt(3))
-      num.Add(num, p256A)
-
-      den := new(big.Int).Lsh(y1, 1) // 2*y1
-      den.Mod(den, p256P)
-
-      lam = num.Mul(num, new(big.Int).ModInverse(den, p256P))
-      lam.Mod(lam, p256P)
-   } else {
-      // lambda = (y2 - y1) / (x2 - x1)
-      num := new(big.Int).Sub(y2, y1)
-      den := new(big.Int).Sub(x2, x1)
-      den.Mod(den, p256P)
-
-      lam = num.Mul(num, new(big.Int).ModInverse(den, p256P))
-      lam.Mod(lam, p256P)
-   }
-
-   x3 := new(big.Int).Mul(lam, lam)
-   x3.Sub(x3, x1)
-   x3.Sub(x3, x2)
-   x3.Mod(x3, p256P)
-
-   y3 := new(big.Int).Sub(x1, x3)
-   y3.Mul(y3, lam)
-   y3.Sub(y3, y1)
-   y3.Mod(y3, p256P)
-
-   return &point{x3, y3}
-}
-
-// ecMul is right-to-left double-and-add; ~384 modular inversions for k < 2^256.
-func ecMul(k *big.Int, pt *point) *point {
-   k = new(big.Int).Set(k) // never mutate the caller's scalar
-   var acc *point
-   for k.Sign() > 0 {
-      if k.Bit(0) == 1 {
-         acc = ecAdd(acc, pt)
-      }
-      pt = ecAdd(pt, pt)
-      k.Rsh(k, 1)
-   }
-   return acc
-}
-
-// parsePubkey decodes an uncompressed (65B), raw (64B) or compressed (33B)
-// P-256 point, and verifies that it really lies on the curve.
-func parsePubkey(blob []byte) (*point, error) {
-   var x, y *big.Int
-
-   switch {
-   case len(blob) == 65 && blob[0] == 0x04:
-      x = new(big.Int).SetBytes(blob[1:33])
-      y = new(big.Int).SetBytes(blob[33:65])
-   case len(blob) == 64:
-      x = new(big.Int).SetBytes(blob[:32])
-      y = new(big.Int).SetBytes(blob[32:])
-   case len(blob) == 33 && (blob[0] == 0x02 || blob[0] == 0x03):
-      x = new(big.Int).SetBytes(blob[1:])
-      y = new(big.Int).Exp(p256RHS(x), p256SqrtExp, p256P) // p == 3 (mod 4)
-      if y.Bit(0) != uint(blob[0]&1) {
-         y.Sub(p256P, y)
-      }
-   default:
-      prefix := blob
-      if len(prefix) > 1 {
-         prefix = prefix[:1]
-      }
-      return nil, fmt.Errorf("%d bytes, prefix %s - not a P-256 point encoding",
-         len(blob), hex.EncodeToString(prefix))
-   }
-
-   if x.Cmp(p256P) >= 0 || y.Cmp(p256P) >= 0 {
-      return nil, errors.New("coordinate outside the field")
-   }
-   lhs := new(big.Int).Mul(y, y)
-   lhs.Mod(lhs, p256P)
-   if lhs.Cmp(p256RHS(x)) != 0 {
-      return nil, errors.New("point is not on the P-256 curve")
-   }
-   if x.Sign() == 0 && y.Sign() == 0 {
-      return nil, errors.New("point at infinity")
-   }
-   return &point{x, y}, nil
-}
-
-func pubkeyOf(d *big.Int) *point {
-   return ecMul(d, &point{p256Gx, p256Gy})
 }
 
 // ---- prsubs.json ---------------------------------------------------------

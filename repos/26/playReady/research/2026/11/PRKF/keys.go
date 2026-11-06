@@ -24,7 +24,9 @@
 //
 // NOTE: this file has no entry point of its own. main.go's cmdExtract calls
 // cmdCert and then this, so the two halves of -1 cannot be run separately and
-// cannot disagree about whether the chain was carved.
+// cannot disagree about whether the chain was carved. The input path is
+// corePath, declared in main.go: one constant for the one file both halves
+// read.
 package main
 
 import (
@@ -35,21 +37,14 @@ import (
    "os"
 )
 
-const (
-   keysSrc = "msprcore.bla" // input, read from the working directory
-   keysOut = "extracted"    // output stem, inside outDir
-)
+const keysOut = "extracted" // output stem, inside outDir
 
 func cmdKeys() error {
    outNames := []string{"sig.pub", "sig.prv", "enc.pub", "enc.prv"}
-   outs := make(map[string]string, len(outNames))
-   for _, k := range outNames {
-      outs[k] = outFile(keysOut + "." + k)
-   }
 
-   b, err := os.ReadFile(keysSrc)
+   b, err := os.ReadFile(corePath)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
-      return fmt.Errorf("%s: not a PRKF", keysSrc)
+      return fmt.Errorf("%s: not a PRKF", corePath)
    }
 
    var km section
@@ -131,11 +126,12 @@ func cmdKeys() error {
 
    fmt.Println("\nwritten:")
    for _, k := range outNames {
+      p := outFile(keysOut + "." + k)
       v := data[k]
-      if err := os.WriteFile(outs[k], v, 0666); err != nil {
-         return fmt.Errorf("write %s: %v", outs[k], err)
+      if err := os.WriteFile(p, v, 0666); err != nil {
+         return fmt.Errorf("write %s: %v", p, err)
       }
-      fmt.Printf("  %s  %2d B\n", outs[k], len(v))
+      fmt.Printf("  %s  %2d B\n", p, len(v))
    }
 
    return nil

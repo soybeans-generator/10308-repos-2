@@ -116,19 +116,16 @@ func cmdCert() error {
    }
 
    // prefer the length-prefix-confirmed chain; fall back to first valid
-   var confirmed []*chain
+   ch := candidates[0]
    for _, c := range candidates {
       if c.prefixOK {
-         confirmed = append(confirmed, c)
+         ch = c
+         break
       }
-   }
-   ch := candidates[0]
-   if len(confirmed) > 0 {
-      ch = confirmed[0]
    }
    if len(candidates) > 1 {
       how := "first valid, unconfirmed"
-      if len(confirmed) > 0 {
+      if ch.prefixOK {
          how = "length prefix"
       }
       fmt.Printf("\nselected 0x%x (%s)\n", ch.base, how)
@@ -143,7 +140,7 @@ func cmdCert() error {
       lo = 0
    }
    fmt.Printf("\nbytes 0x%x..0x%x (before CHAI):\n", lo, base)
-   fmt.Println("  " + hexSpace(buf[lo:base]))
+   fmt.Printf("  % x\n", buf[lo:base])
    switch {
    case !ch.hasPrefix:
       fmt.Println("  (chain starts before offset 4 - no length prefix possible)")
@@ -187,17 +184,6 @@ func cmdExtract() error {
 // before dispatch, so no step has to care.
 func ensureOutDir() error {
    return os.MkdirAll(outDir, 0o755)
-}
-
-func hexSpace(b []byte) string {
-   var sb bytes.Buffer
-   for i, v := range b {
-      if i > 0 {
-         sb.WriteByte(' ')
-      }
-      fmt.Fprintf(&sb, "%02x", v)
-   }
-   return sb.String()
 }
 
 func main() {

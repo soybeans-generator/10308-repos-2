@@ -117,23 +117,10 @@ const (
 
 // cmdFindSub is the entry point for prkf -2.
 func cmdFindSub() error {
-   return driver()
-}
+   // Taken before the DLL is read so the reported total covers the whole
+   // step: read, PE parse, descriptor scan, every probe, and the write.
+   start := time.Now()
 
-// comma renders n with thousands separators: 10348448 -> 10,348,448.
-func comma(n int) string {
-   s := strconv.Itoa(n)
-   var b strings.Builder
-   for i := 0; i < len(s); i++ {
-      if i > 0 && (len(s)-i)%3 == 0 && s[i-1] != '-' {
-         b.WriteByte(',')
-      }
-      b.WriteByte(s[i])
-   }
-   return b.String()
-}
-
-func driver() error {
    data, err := os.ReadFile(dllPath)
    if err != nil {
       return err
@@ -160,9 +147,19 @@ func driver() error {
    // it is written - useful when the scan dies partway through.
    w := func(s string) { fmt.Fprintln(logf, s) }
 
+   // Deferred, not printed inline: the two error returns below (zero accepted,
+   // ambiguous) are exactly when the total time is worth knowing. Registered
+   // after logf's Close, so it still has an open file to write to.
+   defer func() {
+      el := time.Since(start).Round(time.Millisecond)
+      w("elapsed " + el.String())
+      fmt.Printf("elapsed %s\n", el)
+   }()
+
    w("dll    " + dllPath)
    w("sha256 " + shaHex)
-   w("size   " + comma(len(data)))
+   w("size   " + strconv.Itoa(len(data)))
+   w("start  " + start.Format("2006-01-02 15:04:05"))
    w("")
 
    descs := heapDescs(data, secs, ranges)
@@ -540,15 +537,12 @@ type worker struct {
    base   uintptr
    descVA uint32
    got    map[string]*probeResult
-   cur    string
 }
 
 func (w *worker) emit(inputA, inputB []byte) {
+   // All three probes ran: probe() either stores its result or kills the
+   // process, so every key is present here.
    a, b, c := w.got["A"], w.got["B"], w.got["C"]
-   if a == nil || b == nil || c == nil {
-      fmt.Printf("RESULT %#x REJECT INCOMPLETE (probe %s)\n", w.descVA, w.cur)
-      os.Exit(0)
-   }
 
    okAccept := sawSuccess(a) && !bytes.Equal(a.out, a.fill) && !bytes.Equal(a.out, inputA)
    okAccept2 := sawSuccess(b) && !bytes.Equal(b.out, b.fill) && !bytes.Equal(b.out, inputB)
@@ -587,7 +581,6 @@ func (w *worker) emit(inputA, inputB []byte) {
 //   +0x20  u32 key size
 //   +0x24  -> output buffer
 func (w *worker) probe(tag string, data []byte, size uint32) {
-   w.cur = tag
    // Announce progress on stdout. If the descriptor's code faults, this
    // process dies before it can report, and the driver attributes the crash
    // to the last tag seen.
