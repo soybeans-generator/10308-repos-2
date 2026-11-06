@@ -1,3 +1,4 @@
+// 2-extract-keys.go [prkf] [refstem] [outstem]   defaults: msprcore.bla fake extracted
 package main
 
 import (
@@ -109,6 +110,7 @@ func run(src, refstem, outstem string) (int, error) {
          r.off, r.publen, r.privlen, pubHex(r.pub))
    }
 
+   // --- encryption key: the unique 65-byte private component
    var encC []*record
    for _, r := range recs {
       if r.privlen == 65 {
@@ -121,6 +123,11 @@ func run(src, refstem, outstem string) (int, error) {
    enc := encC[0]
    fmt.Printf("encryption key: %#x  (65-byte private component)\n", enc.off)
 
+   // --- signing key: the 32-byte record immediately preceding the encryption
+   //     key.  No field in the PRKF separates it from the other 32-byte record:
+   //     ver/flags/z1/z2 are identical across all three (0x0001 / 0x0100 / 0 / 0)
+   //     and every pubkey occurs exactly twice, so neither header values nor
+   //     cross-reference counts discriminate.
    i := -1
    for j, r := range recs {
       if r == enc {
@@ -161,6 +168,8 @@ func run(src, refstem, outstem string) (int, error) {
       fmt.Printf("  %s  %2d B\n", outs[k], len(v))
    }
 
+   // --- optional verification: only if the reference files happen to exist.
+   //     Their absence is not an error; a mismatch is.
    ok := true
    fmt.Printf("\nverified against %s.sig.* :\n", refstem)
    for _, k := range refNames {
