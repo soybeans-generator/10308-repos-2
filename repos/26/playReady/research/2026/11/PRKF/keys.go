@@ -1,13 +1,13 @@
-// 2-extract-keys.go begin
+// keys.go begin
 //go:build windows
 
-// cmdKeys implements prkf -2.
+// cmdKeys is the second half of prkf -1.
 //
 // Extracts the signing and encryption key components from a PRKF container.
 //
-// Takes no arguments; the names are fixed below. It reads msprcore.bla from
-// the working directory, finds the 0x1009 key-material section, parses every
-// 0x100f record inside it, and writes four components into testdata/:
+// The names are fixed below. It reads msprcore.bla from the working
+// directory, finds the 0x1009 key-material section, parses every 0x100f
+// record inside it, and writes four components into testdata/:
 //
 //   testdata/extracted.sig.pub   signing public key
 //   testdata/extracted.sig.prv   signing private component (32 bytes, still obfuscated)
@@ -21,6 +21,10 @@
 // The structural parse is the only check. No sample key files are consulted:
 // the record layout and the uniqueness of the 65-byte private component are
 // what identify the two keys.
+//
+// NOTE: this file has no entry point of its own. main.go's cmdExtract calls
+// cmdCert and then this, so the two halves of -1 cannot be run separately and
+// cannot disagree about whether the chain was carved.
 package main
 
 import (
@@ -36,15 +40,7 @@ const (
    keysOut = "extracted"    // output stem, inside outDir
 )
 
-// cmdKeys is the entry point for prkf -2.
-func cmdKeys(args []string) error {
-   if len(args) != 0 {
-      return fmt.Errorf("prkf -2 takes no arguments, got %q", args[0])
-   }
-   return extractKeys()
-}
-
-func extractKeys() error {
+func cmdKeys() error {
    outNames := []string{"sig.pub", "sig.prv", "enc.pub", "enc.prv"}
    outs := make(map[string]string, len(outNames))
    for _, k := range outNames {
@@ -210,4 +206,4 @@ func walk(buf []byte, start, end int) []section {
    return out
 }
 
-// 2-extract-keys.go end
+// keys.go end

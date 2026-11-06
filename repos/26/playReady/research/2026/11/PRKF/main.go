@@ -1,23 +1,29 @@
-// 1-extract-cert.go begin
+// main.go begin
 //go:build windows
 
-// prkf is the PlayReady key-extraction pipeline: four steps, one binary, one
+// prkf is the PlayReady key-extraction pipeline: three steps, one binary, one
 // package, one folder. Each step is selected by a flag and keeps its
 // implementation in the file it was always in:
 //
-//   prkf -1    1-extract-cert.go   carve the CHAI certificate chain
-//   prkf -2    2-extract-keys.go   extract the sig/enc key components
-//   prkf -3    3-find-sub.go       locate the signing-key routine descriptor
-//   prkf -4    4-decrypt.go        decrypt the signing key
+//   prkf -1    main.go + keys.go   carve the CHAI chain, extract key components
+//   prkf -2    findsub.go          locate the signing-key routine descriptor
+//   prkf -3    decrypt.go          decrypt the signing key
 //
-// Run the steps in order, in one directory: -3 writes prsubs.json, -4 reads
-// it, and -4 consumes what -2 wrote. Every file the pipeline creates lands in
+// Steps -1 and -2 of the old four-step pipeline are now one step. They read
+// the same input (msprcore.bla) and write disjoint outputs; nothing downstream
+// ever wanted the carved chain without the keys, so the split only forced an
+// ordering rule on the caller. The two implementations stay in separate files,
+// because carving a container and parsing its records are different jobs, but
+// prkf -1 runs both and fails if either half fails.
+//
+// Run the steps in order, in one directory: -2 writes prsubs.json, -3 reads
+// it, and -3 consumes what -1 wrote. Every file the pipeline creates lands in
 // testdata/, so a run is disposable and the working directory stays clean.
 //
-// -3 also re-executes this binary, one child per candidate descriptor, to
+// -2 also re-executes this binary, one child per candidate descriptor, to
 // probe it. The child is selected by an environment variable rather than a
-// flag or an argument, so `prkf -h` lists the four steps and nothing else.
-// See 3-find-sub.go for why the probe must be a separate process.
+// flag or an argument, so `prkf -h` lists the three steps and nothing else.
+// See findsub.go for why the probe must be a separate process.
 //
 // The four files share one namespace, so a handful of identifiers had to be
 // renamed: see the note at the top of each file.
@@ -58,7 +64,7 @@ var (
    magicCERT = []byte("CERT")
 )
 
-// cmdCert implements prkf -1.
+// cmdCert is the first half of prkf -1.
 //
 // Carves the CHAI certificate chain out of msprcore.bla.
 //
@@ -70,12 +76,8 @@ var (
 // The structural parse is the only check. A candidate must be internally
 // consistent to be considered at all, and no reference file is consulted.
 //
-// Takes no arguments. All names are fixed below.
-func cmdCert(args []string) error {
-   if len(args) != 0 {
-      return fmt.Errorf("prkf -1 takes no arguments, got %q", args[0])
-   }
-
+// All names are fixed below; the driver has already rejected arguments.
+func cmdCert() error {
    if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
       return errors.New("missing input: " + corePath)
    }
@@ -165,6 +167,22 @@ func cmdCert(args []string) error {
    return nil
 }
 
+// cmdExtract implements prkf -1: carve the chain, then extract the keys.
+//
+// The two halves read the same file and write disjoint outputs, so the order
+// is arbitrary. Carving runs first because it is the cheaper structural check
+// on msprcore.bla and its failure message is more specific than "not a PRKF".
+//
+// A failure in either half aborts the step: a run that produced a chain but no
+// keys is not a state any later step can use.
+func cmdExtract() error {
+   if err := cmdCert(); err != nil {
+      return err
+   }
+   fmt.Println() // separate the two halves' reports
+   return cmdKeys()
+}
+
 // ensureOutDir creates outDir if it does not exist. Called once from main
 // before dispatch, so no step has to care.
 func ensureOutDir() error {
@@ -183,7 +201,7 @@ func hexSpace(b []byte) string {
 }
 
 func main() {
-   // A probe child spawned by -3 announces itself through the environment,
+   // A probe child spawned by -2 announces itself through the environment,
    // so it needs no flag and no argument. Checked first, before the FlagSet
    // exists, so it never appears in the usage text.
    if va, ok := probeTarget(); ok {
@@ -192,18 +210,17 @@ func main() {
    }
 
    step1 := flag.Bool("1", false,
-      "carve the CHAI certificate chain ("+outFile("extracted.cert")+")")
+      "carve the CHAI chain ("+outFile("extracted.cert")+") and extract the key "+
+         "components ("+outFile("extracted")+".{sig,enc}.{pub,prv})")
    step2 := flag.Bool("2", false,
-      "extract the key components ("+outFile("extracted")+".{sig,enc}.{pub,prv})")
-   step3 := flag.Bool("3", false,
       "locate the signing-key routine ("+outFile("prsubs.json")+", "+outFile("findprsub.txt")+")")
-   step4 := flag.Bool("4", false,
+   step3 := flag.Bool("3", false,
       "decrypt the signing key ("+outFile("extracted.sig.plain")+")")
 
    flag.Parse()
 
    n := 0
-   for _, on := range []bool{*step1, *step2, *step3, *step4} {
+   for _, on := range []bool{*step1, *step2, *step3} {
       if on {
          n++
       }
@@ -214,7 +231,15 @@ func main() {
       flag.Usage()
       os.Exit(2)
    case n > 1:
-      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 -2 -3 -4")
+      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 -2 -3")
+      os.Exit(2)
+   }
+
+   // Checked once here rather than in each step: -1 runs two functions, so a
+   // per-step check would be duplicated and would name the wrong step.
+   if flag.NArg() != 0 {
+      fmt.Fprintf(os.Stderr, "prkf: unexpected argument %q: no step takes arguments\n",
+         flag.Arg(0))
       os.Exit(2)
    }
 
@@ -226,13 +251,11 @@ func main() {
    var err error
    switch {
    case *step1:
-      err = cmdCert(flag.Args())
+      err = cmdExtract()
    case *step2:
-      err = cmdKeys(flag.Args())
+      err = cmdFindSub()
    case *step3:
-      err = cmdFindSub(flag.Args())
-   case *step4:
-      err = cmdDecrypt(flag.Args())
+      err = cmdDecrypt()
    }
    if err != nil {
       fmt.Fprintln(os.Stderr, err)
@@ -337,4 +360,4 @@ func parseChain(buf []byte, base int) (*chain, bool) {
    return c, true
 }
 
-// 1-extract-cert.go end
+// main.go end

@@ -1,14 +1,14 @@
-// 3-find-sub.go begin
+// findsub.go begin
 //go:build windows
 
-// cmdFindSub implements prkf -3.
+// cmdFindSub implements prkf -2.
 //
 // Locates the signing-key routine's descriptor for this DLL build.
 //
-// Takes no arguments. It re-executes this binary once per candidate
-// descriptor, scanWorkers at a time, and reads the RESULT line each child
-// prints. The child learns which descriptor to probe from an environment
-// variable, so it takes no arguments and no flag of its own.
+// It re-executes this binary once per candidate descriptor, scanWorkers at a
+// time, and reads the RESULT line each child prints. The child learns which
+// descriptor to probe from an environment variable, so it takes no arguments
+// and no flag of its own.
 //
 // # WHY THE PROBE IS A SEPARATE PROCESS
 //
@@ -44,7 +44,7 @@
 //
 // Property 4 is the discriminating one - it collapses the large set of
 // descriptors that merely return success. Verification against a real key is
-// prkf -4's job, not this program's.
+// prkf -3's job, not this program's.
 //
 // The ONLY value that differs between DLL builds is the RVA of the heap
 // descriptor holding the routine.
@@ -58,7 +58,7 @@
 //   findprsub.txt   per-descriptor probe results, for diagnosing a failure
 //
 // NOTE: this file owns the package-wide dllPath, keyLen and outOff constants;
-// prkf -4 uses the same ones rather than redeclaring them.
+// prkf -3 uses the same ones rather than redeclaring them.
 package main
 
 import (
@@ -115,11 +115,8 @@ const (
    probeEnv = "PRKF_PROBE_DESC"
 )
 
-// cmdFindSub is the entry point for prkf -3.
-func cmdFindSub(args []string) error {
-   if len(args) != 0 {
-      return fmt.Errorf("prkf -3 takes no arguments, got %q", args[0])
-   }
+// cmdFindSub is the entry point for prkf -2.
+func cmdFindSub() error {
    return driver()
 }
 
@@ -635,4 +632,4 @@ func (w *worker) probe(tag string, data []byte, size uint32) {
    }
 }
 
-// 3-find-sub.go end
+// findsub.go end
