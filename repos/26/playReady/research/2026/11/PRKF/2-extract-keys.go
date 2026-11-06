@@ -1,4 +1,21 @@
-// 2-extract-keys.go [prkf] [refstem] [outstem]   defaults: msprcore.bla fake extracted
+// 2-extract-keys.go begin
+
+// Extracts the signing and encryption key components from a PRKF container.
+//
+// Three optional arguments, in order: the PRKF path (default msprcore.bla),
+// the reference stem (default fake) and the output stem (default extracted).
+// It finds the 0x1009 key-material section, parses every 0x100f record inside
+// it, and writes four components:
+//
+//   <outstem>.sig.pub   signing public key
+//   <outstem>.sig.prv   signing private component (32 bytes, still obfuscated)
+//   <outstem>.enc.pub   encryption public key
+//   <outstem>.enc.prv   encryption private component (65 bytes)
+//
+// The signing record is the one immediately preceding the unique 65-byte
+// encryption record; see the comment at that site for why no header field can
+// discriminate. <refstem>.sig.* (default fake.sig.*) is compared when present:
+// absence is not an error, a mismatch is.
 package main
 
 import (
@@ -255,3 +272,5 @@ func walk(buf []byte, start, end int) []section {
    }
    return out
 }
+
+// 2-extract-keys.go end

@@ -1,4 +1,18 @@
 // 1-extract-cert.go begin
+
+// Carves the CHAI certificate chain out of msprcore.bla.
+//
+// It scans for CHAI headers, keeps only chains that parse self-consistently
+// (the certificate entries must tile the chain exactly), prefers a chain
+// whose preceding u32 big-endian length prefix equals its total length, and
+// writes the carved bytes to extracted.cert.
+//
+// fake.cert is optional: when present, the carve is cross-checked against it
+// and any mismatch aborts before anything is written. When absent, the carve
+// is written unconditionally, because the structural parse is already a
+// strong check on its own.
+//
+// No arguments. All names are fixed below.
 package main
 
 import (
@@ -145,7 +159,7 @@ func main() {
 
    case len(reference) == len(blob)+1 && bytes.Equal(reference[1:], blob):
       lead := reference[0]
-      prev := -1 // -1 == None
+      prev := -1 // -1 means "no byte available"
       if base >= 1 {
          prev = int(buf[base-1])
       }

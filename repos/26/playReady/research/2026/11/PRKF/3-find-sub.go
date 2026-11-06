@@ -1,6 +1,11 @@
+// 3-find-sub.go begin
 //go:build windows
 
-// 3-find-sub.go - locate the signing-key routine's descriptor for this DLL build.
+// Locates the signing-key routine's descriptor for this DLL build.
+//
+// Takes no arguments. The --one flag is internal: the driver re-executes this
+// binary once per candidate descriptor so that a faulting routine kills only
+// the worker, not the scan. Do not invoke it by hand.
 //
 // This program does NOT use sample key files. Discovery rests entirely on
 // properties of the routine itself, read from its disassembly:
@@ -21,7 +26,7 @@
 //
 // Property 4 is the discriminating one - it collapses the large set of
 // descriptors that merely return success. Verification against a real key is
-// decrypt.go's job, not this program's.
+// 4-decrypt.go's job, not this program's.
 //
 // The ONLY value that differs between DLL builds is the RVA of the heap
 // descriptor holding the routine.
@@ -78,7 +83,7 @@ const (
    probeTimeout = 40 * time.Second
 )
 
-// comma renders n with thousands separators, matching Python's f"{n:,}".
+// comma renders n with thousands separators: 10348448 -> 10,348,448.
 func comma(n int) string {
    s := strconv.Itoa(n)
    var b strings.Builder
@@ -113,8 +118,8 @@ func driver() error {
       return err
    }
    defer logf.Close()
-   // *os.File writes are unbuffered, so this is equivalent to Python's
-   // per-line flush.
+   // *os.File writes are unbuffered, so each line reaches the log as soon as
+   // it is written - useful when the scan dies partway through.
    w := func(s string) { fmt.Fprintln(logf, s) }
 
    w("dll    " + dllPath)
@@ -346,7 +351,7 @@ func heapDescs(data []byte, secs []section, ranges []rng) []descriptor {
       }
       end := start + int(s.rawSize)
       if end > len(data) {
-         end = len(data) // mirrors Python's silently-truncating slice
+         end = len(data) // clamp to the bytes actually present
       }
       blob := data[start:end]
 
@@ -481,7 +486,7 @@ func (w *worker) emit(inputA, inputB []byte) {
       c.ntstatus, hex.EncodeToString(c.status),
       okInput, okReject,
       hex.EncodeToString(a.out))
-   os.Exit(0) // os.Exit, like Python's os._exit: no deferred work
+   os.Exit(0) // skip deferred cleanup: the worker has nothing to flush
 }
 
 // probe performs one WB heap-exec call.
@@ -509,7 +514,7 @@ func (w *worker) probe(tag string, data []byte, size uint32) {
       os.Exit(2)
    }
    keyBuf := make([]byte, keyLen)
-   copy(keyBuf, data) // Python's create_string_buffer(data, KEY_LEN)
+   copy(keyBuf, data) // always keyLen bytes; a short data leaves the tail zero
    status := make([]byte, 0x10)
    out := make([]byte, keyLen)
    copy(out, fill)
@@ -541,3 +546,5 @@ func (w *worker) probe(tag string, data []byte, size uint32) {
       fill:     fill,
    }
 }
+
+// 3-find-sub.go end
