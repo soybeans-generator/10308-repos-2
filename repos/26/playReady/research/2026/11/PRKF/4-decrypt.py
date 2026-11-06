@@ -1,10 +1,10 @@
-# ---------------------------------------------------------------------------
-# decrypt a PlayReady signing key (extracted.sig.prv -> extracted.sig.plain)
+# 4-decrypt.py decrypt a PlayReady signing key
+# (extracted.sig.prv -> extracted.sig.plain)
 #
 # USAGE
 #   decrypt.py                      decrypt extracted.sig.prv -> extracted.sig.plain
-#   decrypt.py --known-good PATH    same, but first compare the plaintext with
-#                                   PATH; a mismatch aborts before any write
+#   decrypt.py --pub PATH           validate against a specific public key
+#                                   (default: extracted.sig.pub)
 #
 #   No positional arguments. Input and output names are fixed to the ones
 #   2-extract-keys.py produces. The output is written only after every
@@ -34,13 +34,23 @@
 #   prsubs.json is read from the CURRENT DIRECTORY, so run this from the same
 #   directory findprsub.py was run in.
 #
+# VERIFICATION
+#   The check is cryptographic and needs no secret reference: the plaintext d,
+#   read big-endian, must satisfy d*G == Q, where Q is the P-256 public key
+#   that 2-extract-keys.py wrote next to the ciphertext. A wrong descriptor, a
+#   wrong output offset, a wrong argument layout or a wrong input file cannot
+#   produce a scalar whose public point lands on Q. Cost: a few milliseconds.
+#
+#   This single check subsumes scalar-range validation: a d outside [1, n-1]
+#   cannot yield Q, so no separate range test is performed.
+#
 #   Failure is loud, never silent:
 #     wrong desc_va     -> NTSTATUS 0xC0000095 (INTEGER_OVERFLOW)
 #     wrong arg layout  -> status dword 0x80070057 (E_INVALIDARG) and an
 #                          unwritten output buffer; findprsub.py would also
 #                          report zero accepted descriptors
 #     output == input   -> descriptor for the wrong routine
-#     scalar out of range -> plaintext is not a P-256 private key
+#     d*G != sig.pub    -> descriptor, argument layout or input is wrong
 # ---------------------------------------------------------------------------
 
 import ctypes, hashlib, json, os, struct, sys
@@ -48,6 +58,7 @@ import ctypes, hashlib, json, os, struct, sys
 DLL = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
 
 SRC = "extracted.sig.prv"          # written by 2-extract-keys.py
+PUB = "extracted.sig.pub"          # written by 2-extract-keys.py
 DST = "extracted.sig.plain"        # 32-byte plaintext scalar
 
 # 32 bytes: the P-256 private scalar length, and the size the routine accepts.
@@ -58,17 +69,20 @@ KEY_LEN = 0x20
 # The read is unaligned, so this value cannot be inferred from alignment.
 OUT_OFF = 0x24
 
-# Order of the P-256 group. A P-256 private scalar must be in [1, n-1];
-# anything else proves we ran the wrong routine, at zero cost.
-P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+# ---- P-256 domain parameters ---------------------------------------------
+P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+P256_A = P256_P - 3
+P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+P256_G = (0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
+          0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5)
 
 USAGE = """\
-usage: decrypt.py [--known-good PATH]
+usage: decrypt.py [--pub PATH]
 
-  (no arguments)    decrypt extracted.sig.prv -> extracted.sig.plain
-  --known-good PATH compare the plaintext with PATH; a mismatch aborts
-                    before anything is written
-  -h, --help        this text
+  (no arguments)      decrypt extracted.sig.prv -> extracted.sig.plain,
+                      validating d*G against extracted.sig.pub
+  --pub PATH          validate against PATH instead of extracted.sig.pub
+  -h, --help          this text
 """
 
 
@@ -104,6 +118,68 @@ def _prsubs():
         raise SystemExit("cache has no desc_va - re-run findprsub.py")
 
     return rec
+
+
+# ---- P-256 arithmetic, for validating the plaintext ----------------------
+def _ec_add(p1, p2):
+    """Affine point addition on P-256; None is the point at infinity."""
+    if p1 is None:
+        return p2
+    if p2 is None:
+        return p1
+    x1, y1 = p1
+    x2, y2 = p2
+    if x1 == x2:
+        if (y1 + y2) % P256_P == 0:
+            return None                              # P + (-P), and y == 0
+        lam = (3 * x1 * x1 + P256_A) * pow(2 * y1, -1, P256_P) % P256_P
+    else:
+        lam = (y2 - y1) * pow(x2 - x1, -1, P256_P) % P256_P
+    x3 = (lam * lam - x1 - x2) % P256_P
+    return x3, (lam * (x1 - x3) - y1) % P256_P
+
+
+def _ec_mul(k, point):
+    """Right-to-left double-and-add; ~384 modular inversions for k < 2^256."""
+    acc = None
+    while k:
+        if k & 1:
+            acc = _ec_add(acc, point)
+        point = _ec_add(point, point)
+        k >>= 1
+    return acc
+
+
+def pubkey_of(d):
+    return _ec_mul(d, P256_G)
+
+
+def parse_pubkey(blob):
+    """Decode an uncompressed (65B), raw (64B) or compressed (33B) P-256
+    point, and verify that it really lies on the curve."""
+    if len(blob) == 65 and blob[0] == 0x04:
+        x = int.from_bytes(blob[1:33], "big")
+        y = int.from_bytes(blob[33:65], "big")
+    elif len(blob) == 64:
+        x = int.from_bytes(blob[:32], "big")
+        y = int.from_bytes(blob[32:], "big")
+    elif len(blob) == 33 and blob[0] in (0x02, 0x03):
+        x = int.from_bytes(blob[1:], "big")
+        rhs = (pow(x, 3, P256_P) + P256_A * x + P256_B) % P256_P
+        y = pow(rhs, (P256_P + 1) // 4, P256_P)      # P == 3 (mod 4)
+        if (y & 1) != (blob[0] & 1):
+            y = P256_P - y
+    else:
+        raise ValueError(f"{len(blob)} bytes, prefix {blob[:1].hex()} - "
+                         "not a P-256 point encoding")
+
+    if not (0 <= x < P256_P and 0 <= y < P256_P):
+        raise ValueError("coordinate outside the field")
+    if (y * y - (pow(x, 3, P256_P) + P256_A * x + P256_B)) % P256_P:
+        raise ValueError("point is not on the P-256 curve")
+    if x == 0 and y == 0:
+        raise ValueError("point at infinity")
+    return x, y
 
 
 def decrypt_signing_key(prv_path, out_path=None, _rec=None):
@@ -183,7 +259,7 @@ def decrypt_signing_key(prv_path, out_path=None, _rec=None):
 
 
 def main(argv):
-    known_good = None
+    pub_path = PUB
 
     # ---- arguments: flags only, nothing positional --------------------
     i = 0
@@ -193,13 +269,13 @@ def main(argv):
             print(USAGE)
             return 0
         name, eq, val = a.partition("=")
-        if name == "--known-good":
+        if name == "--pub":
             if not eq:
                 i += 1
                 if i >= len(argv):
-                    raise SystemExit(f"--known-good needs a value\n\n{USAGE}")
+                    raise SystemExit(f"--pub needs a value\n\n{USAGE}")
                 val = argv[i]
-            known_good = val
+            pub_path = val
         elif a.startswith("-"):
             raise SystemExit(f"unknown option {a}\n\n{USAGE}")
         else:
@@ -214,41 +290,31 @@ def main(argv):
     if not os.path.isfile(SRC):
         raise SystemExit(f"missing input: {SRC}\n  run 2-extract-keys.py first")
 
-    if known_good is not None and not os.path.isfile(known_good):
-        raise SystemExit(f"known-good file not found: {known_good}")
+    if not os.path.isfile(pub_path):
+        raise SystemExit(f"missing public key: {pub_path}\n"
+                         "  run 2-extract-keys.py first, or pass --pub PATH")
 
     # ---- decrypt ------------------------------------------------------
     got = decrypt_signing_key(SRC, None)
     print(f"{SRC} ({KEY_LEN} bytes)")
     print(f"plaintext {got.hex()}")
 
-    # ---- sanity: a real decrypt must land in the P-256 scalar range ----
-    if not 0 < int.from_bytes(got, "big") < P256_N:
-        raise SystemExit("plaintext is not a valid P-256 private scalar - "
-                         "descriptor or argument layout is wrong")
-    print("[ OK ] plaintext is in range for a P-256 private scalar")
+    # ---- validation: d*G must equal the published public key ----------
+    with open(pub_path, "rb") as f:
+        pub_raw = f.read()
+    try:
+        want = parse_pubkey(pub_raw)
+    except ValueError as e:
+        raise SystemExit(f"{pub_path}: {e}")
 
-    # ---- comparison against a user-supplied known good ----------------
-    if known_good is None:
-        print("[ n/a] no --known-good given, comparison skipped")
-    else:
-        with open(known_good, "rb") as f:
-            want = f.read()
-        if want == got:
-            print(f"[ OK ] == {known_good}")
-        else:
-            n = min(len(got), len(want))
-            d = next((j for j in range(n) if got[j] != want[j]), None)
-            print(f"[FAIL] != {known_good}")
-            if d is not None:
-                print(f"       first difference at offset {d:#x}")
-                print(f"       got : {got[max(d-8, 0):d+8].hex(' ')}")
-                print(f"       want: {want[max(d-8, 0):d+8].hex(' ')}")
-            else:
-                print(f"       common prefix identical over {n} bytes "
-                      f"(lengths {len(got)} vs {len(want)})")
-            raise SystemExit("not writing output - the plaintext does not "
-                             "match the known good")
+    if pubkey_of(int.from_bytes(got, "big")) != want:
+        raise SystemExit(
+            f"d*G != {pub_path} - the plaintext is not the private key for\n"
+            "that public key. The descriptor, the argument layout or the\n"
+            "input file is wrong. Nothing was written.")
+    print(f"[ OK ] d*G == {pub_path}")
+    print(f"       Q = ({want[0]:064x},\n"
+          f"            {want[1]:064x})")
 
     # ---- write --------------------------------------------------------
     with open(DST, "wb") as f:

@@ -1,4 +1,4 @@
-# locate the signing-key routine's descriptor for this DLL build.
+# 3-find-sub.py locate the signing-key routine's descriptor for this DLL build.
 #
 # This script does NOT use sample key files. Discovery rests entirely on
 # properties of the routine itself, read from its disassembly:
