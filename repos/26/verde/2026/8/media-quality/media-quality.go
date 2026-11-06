@@ -1,0 +1,219 @@
+package main
+
+import (
+   "bytes"
+   "encoding/json"
+   "flag"
+   "fmt"
+   "io/fs"
+   "math"
+   "os"
+   "os/exec"
+   "path/filepath"
+   "strconv"
+   "strings"
+   "time"
+)
+
+// SizeThreshold is the maximum allowed file size (max uint32).
+const SizeThreshold = int64(math.MaxUint32)
+
+const min_bitrate = 2_500_000
+
+var allowedExtensions = map[string]bool{
+   ".mp4":  true,
+   ".m4a":  true,
+   ".ini":  true,
+   ".jpg":  true,
+   ".vtt":  true,
+   ".ts":   true,
+   ".txt":  true,
+   ".json": true, // Added so metadata.json isn't flagged
+}
+
+// mediaExtensions defines which files should be checked for bitrate.
+var mediaExtensions = map[string]bool{
+   ".mp4": true,
+   ".ts":  true,
+}
+
+// getBitrate uses ffprobe to fetch the overall bitrate of a media file.
+func getBitrate(path string) (int64, error) {
+   cmd := exec.Command("ffprobe",
+      "-show_entries", "format=bit_rate",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      path,
+   )
+
+   var out bytes.Buffer
+   cmd.Stdout = &out
+   // Discard stderr to prevent ffprobe banner and logs from spamming the terminal
+   cmd.Stderr = nil
+
+   if err := cmd.Run(); err != nil {
+      return 0, err
+   }
+
+   // ParseInt will return an error for "N/A" or empty strings.
+   return strconv.ParseInt(strings.TrimSpace(out.String()), 10, 64)
+}
+
+func main() {
+   var rootDir string
+   var minBitrate int64
+
+   flag.StringVar(&rootDir, "dir", "", "Root directory to audit")
+   flag.Int64Var(&minBitrate, "min-bitrate", min_bitrate, "Minimum acceptable bitrate in bits per second")
+   flag.Parse()
+
+   // Require the user to provide a directory via the flag
+   if rootDir == "" {
+      flag.Usage()
+      os.Exit(1)
+   }
+
+   fmt.Printf("Auditing '%s' (Minimum Bitrate: %d bps)...\n", rootDir, minBitrate)
+   fmt.Println(strings.Repeat("-", 70))
+
+   auditor := &Auditor{
+      MinBitrate: minBitrate,
+   }
+   err := filepath.WalkDir(rootDir, auditor.auditFile)
+
+   if err != nil {
+      fmt.Fprintf(os.Stderr, "Error walking the directory: %v\n", err)
+   }
+
+   fmt.Println(strings.Repeat("-", 70))
+
+   // --- PRINT EXCLUDES AT THE END ---
+   if len(auditor.ExcludedDirs) > 0 {
+      fmt.Println("Excluded Folders:")
+      for _, ex := range auditor.ExcludedDirs {
+         fmt.Printf("[Skipped] %s\n", ex)
+      }
+      fmt.Println(strings.Repeat("-", 70))
+   }
+
+   // --- PRINT FAILURES AT THE END ---
+   if len(auditor.Failures) > 0 {
+      fmt.Println("Failures:")
+      for _, fail := range auditor.Failures {
+         fmt.Printf("[%s] %s\n", strings.Join(fail.Flags, ", "), fail.Path)
+      }
+      fmt.Println(strings.Repeat("-", 70))
+   }
+
+   fmt.Println("Audit complete.")
+}
+
+// shouldExclude parses the exclude date and returns true if the folder should
+// be excluded. A folder is excluded only when the date is less than one year
+// old. Missing, empty, or invalid dates (and dates a year or older) are not
+// excluded.
+func shouldExclude(raw string) bool {
+   raw = strings.TrimSpace(raw)
+   if raw == "" {
+      return false
+   }
+
+   t, err := time.Parse(time.DateOnly, raw)
+   if err != nil {
+      // Unparseable date – treat as missing, do not exclude.
+      return false
+   }
+
+   // Exclude only when the date is less than one year old.
+   cutoff := time.Now().AddDate(-1, 0, 0)
+   return t.After(cutoff)
+}
+
+// AuditResult stores the path and the reasons why a file failed the audit.
+type AuditResult struct {
+   Path  string
+   Flags []string
+}
+
+// Auditor holds the state of the audit, including all failures and exclusions.
+type Auditor struct {
+   Failures     []AuditResult
+   ExcludedDirs []string
+   MinBitrate   int64
+}
+
+// auditFile is the WalkDir callback that flags files exceeding the size
+// threshold, carrying an unexpected extension, or having too low bitrate.
+func (a *Auditor) auditFile(path string, entry fs.DirEntry, err error) error {
+   if err != nil {
+      return err
+   }
+
+   if entry.IsDir() {
+      // Check for metadata.json in this directory
+      metaPath := filepath.Join(path, "metadata.json")
+      data, err := os.ReadFile(metaPath)
+      if err == nil {
+         // File exists, check the "exclude" date field.
+         var meta struct {
+            Exclude string `json:"exclude"`
+         }
+         if err := json.Unmarshal(data, &meta); err != nil {
+            return fmt.Errorf("invalid metadata.json in %s: %w", path, err)
+         }
+         if shouldExclude(meta.Exclude) {
+            fmt.Printf("Skipping excluded folder: %s\n", path)
+            // Record the excluded directory for the end summary
+            a.ExcludedDirs = append(a.ExcludedDirs, path)
+            return filepath.SkipDir // Bypasses the entire folder
+         }
+      }
+      return nil
+   }
+
+   info, err := entry.Info()
+   if err != nil {
+      return err
+   }
+
+   // --- PRINT NAME DURING WALK ---
+   fmt.Println(path)
+
+   var flags []string
+
+   // --- RULE 1: Size Check ---
+   if info.Size() > SizeThreshold {
+      flags = append(flags, fmt.Sprintf("%d bytes", info.Size()))
+   }
+
+   // --- RULE 2: Extension Check ---
+   ext := strings.ToLower(filepath.Ext(path))
+   if !allowedExtensions[ext] {
+      if ext == "" {
+         flags = append(flags, "No Extension")
+      } else {
+         flags = append(flags, fmt.Sprintf("Ext: %s", ext))
+      }
+   }
+
+   // --- RULE 3: Bitrate Check (for media files) ---
+   if mediaExtensions[ext] {
+      bitrate, err := getBitrate(path)
+      if err != nil {
+         // Propagate the error to halt the walk and report it
+         return fmt.Errorf("failed to get bitrate for %s: %w", path, err)
+      }
+
+      // Use the struct's MinBitrate field instead of the hardcoded constant
+      if bitrate > 0 && bitrate < a.MinBitrate {
+         kbps := bitrate / 1000
+         flags = append(flags, fmt.Sprintf("%d kbps", kbps))
+      }
+   }
+
+   // --- COLLECT FAILURES ---
+   if len(flags) > 0 {
+      a.Failures = append(a.Failures, AuditResult{Path: path, Flags: flags})
+   }
+
+   return nil
+}

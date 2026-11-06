@@ -1,0 +1,12 @@
+[color "diff"]
+meta = yellow bold
+
+[core]
+askPass = git-askpass
+
+[diff]
+wsErrorHighlight = all
+
+[user]
+name = 27
+email = 27@riseup.net

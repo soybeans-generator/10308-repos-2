@@ -1,0 +1,27 @@
+/*
+==userstyle==
+@name Reddit
+@namespace 10317
+@version 2023.05.12
+==/userstyle==
+*/
+@-moz-document domain("reddit.com") {
+   /* Add a blue left border to top-level comments */
+   .commentarea > .sitetable > .thing.comment > .entry {
+      border-left: 1em solid blue !important;
+   }
+   /* Add a green left border to second-level comments */
+   .commentarea > .sitetable > .thing.comment > .child > .sitetable > .thing.comment > .entry {
+      border-left: 1em solid green !important;
+   }
+   /* Add an orange left border to third-level comments */
+   .commentarea > .sitetable > .thing.comment > .child > .sitetable > .thing.comment > .child > .sitetable > .thing.comment > .entry {
+      border-left: 1em solid orange !important;
+   }
+   :visited {
+      color: hsl(270 100% 50%) !important
+   }
+   .arrow {
+      visibility: hidden !important
+   }
+}

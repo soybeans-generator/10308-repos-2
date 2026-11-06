@@ -1,0 +1,105 @@
+# ────────────────────────────────────────────────────────────────────
+# Section 1 — Array declarations (never expires)
+# ────────────────────────────────────────────────────────────────────
+
+$basePath = @()
+
+$androidPath = @()
+
+# ────────────────────────────────────────────────────────────────────
+# Section 2 — Environment variables, array items & core behavior (can expire — dated)
+# ────────────────────────────────────────────────────────────────────
+
+# 2026-11-01
+$basePath += 'C:\zig'
+$basePath += 'C:\msvc\autoenv\x64'
+$basePath += 'C:\Bento4-SDK\bin'
+
+# 2026-10-11
+$basePath += 'C:\Users\Steven\.cargo\bin'
+
+# 2026-10-08
+$basePath += 'C:\gron'
+
+# 2026-09-16
+$basePath += 'C:\gdu'
+
+# 2026-09-07
+$basePath += 'C:\less'
+$basePath += 'C:\neocities-deploy'
+$basePath += 'C:\sqlite-tools'
+
+# 2026-09-02
+$basePath += 'C:\hugo'
+
+# 2026-08-08
+$basePath += 'C:\mitmproxy'
+
+# 2026-07-27
+$androidPath += 'C:\ripgrep'
+
+# 2026-07-26
+$basePath += 'C:\N_m3u8DL-RE'
+
+# 2026-07-25
+$androidPath += 'C:\go\bin'
+
+# 2026-07-19
+$androidPath += 'C:\Users\Steven\AppData\Local\Programs\Python\Python314'
+$androidPath += 'C:\Users\Steven\AppData\Local\Programs\Python\Python314\Scripts'
+$basePath += 'C:\Users\Steven\AppData\Local\Programs\Python\Python314'
+$basePath += 'C:\Users\Steven\AppData\Local\Programs\Python\Python314\Scripts'
+$basePath += 'C:\ffmpeg\bin'
+
+# 2026-07-18
+$basePath += 'C:\MinGit\mingw64\bin'
+$basePath += 'C:\Users\Steven\go\bin'
+$basePath += 'C:\curl\bin'
+$basePath += 'C:\fd'
+$basePath += 'C:\go\bin'
+$basePath += 'C:\mitmproxy'
+$basePath += 'C:\rclone'
+$basePath += 'C:\ripgrep'
+$basePath += 'C:\staticcheck'
+$basePath += 'C:\vim92'
+
+# 2026-07-18
+$androidPath += 'C:\Program Files\Android\Android Studio\jbr\bin'
+$androidPath += 'C:\Users\Steven\AppData\Local\Android\Sdk\build-tools\36.0.0'
+$androidPath += 'C:\Users\Steven\AppData\Local\Android\Sdk\emulator'
+$androidPath += 'C:\Users\Steven\AppData\Local\Android\Sdk\platform-tools'
+$androidPath += 'C:\Users\Steven\go\bin'
+$androidPath += 'C:\jadx\bin'
+
+# 2026-07-18
+$env:RIPGREP_CONFIG_PATH = 'C:\ripgrep\ripgrep.txt'
+
+# 2026-07-18
+$env:GOPROXY = 'direct'
+
+# 2026-07-18
+$env:GOSUMDB = 'off'
+
+# 2026-07-18
+$env:EDITOR = 'gvim'
+
+# 2026-07-18
+Remove-Item -Path Alias:* -Force
+
+# 2026-07-18
+Set-PSReadLineKeyHandler Ctrl+UpArrow {
+   Set-Location ..
+   [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt()
+}
+
+# 2026-07-18
+function Set-PathAndroid {
+   $env:PATH = $androidPath -join ';'
+   Write-Host 'PATH switched to Android/Python' -ForegroundColor Green
+}
+
+# ────────────────────────────────────────────────────────────────────
+# Section 3 — Join (never expires)
+# ────────────────────────────────────────────────────────────────────
+
+$env:PATH = $basePath -join ';'

@@ -1,0 +1,52 @@
+/*
+==userstyle==
+@name GitHub
+@namespace 10317
+@version 2023.10.27
+==/userstyle==
+*/
+@-moz-document domain("github.com") {
+   /*
+   2023-10-27
+   github.com/ME
+   */
+   .ContributionCalendar-day[data-level="1"] {
+      background: hsl(210, 100%, 80%) !important;
+   }
+   .ContributionCalendar-day[data-level="2"] {
+      background: hsl(100, 70%, 60%) !important;
+   }
+   .ContributionCalendar-day[data-level="3"] {
+      background: hsl(50, 80%, 60%) !important;
+   }
+   .ContributionCalendar-day[data-level="4"] {
+      background: hsl(10, 80%, 50%) !important;
+   }
+   .ContributionCalendar-day[data-level="1"] {
+      fill: hsl(210, 100%, 80%) !important;
+   }
+   .ContributionCalendar-day[data-level="2"] {
+      fill: hsl(100, 70%, 60%) !important;
+   }
+   .ContributionCalendar-day[data-level="3"] {
+      fill: hsl(50, 80%, 60%) !important;
+   }
+   .ContributionCalendar-day[data-level="4"] {
+      fill: hsl(10, 80%, 50%) !important;
+   }
+   /*
+   2023-05-11
+   github.com/ME/umber/blob/main/umber.go
+   */
+   body,
+   [font-family="normal"] {
+      font-family: Arial !important;
+   }
+   
+   #read-only-cursor-text-area,
+   .react-code-text,
+   [data-code-text] {
+      font-size: 14px !important;
+   }
+   
+}

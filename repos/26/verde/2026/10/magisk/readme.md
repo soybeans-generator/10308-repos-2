@@ -1,0 +1,64 @@
+# magisk
+
+## Step 1: Boot the emulator from the stock image
+```bash
+emulator -avd Television_1080p
+```
+
+## Step 2: Check `init` bitness
+```bash
+adb shell getprop ro.product.cpu.abilist64
+```
+- If the output is **empty** → use `-init-bits 32`
+- If the output contains an ABI (like `x86_64` or `arm64-v8a`) → use `-init-bits 64`
+
+## Step 3: Download the Magisk APK and the Go script, then run the patch script
+Download the Magisk APK from the official releases page: <https://github.com/topjohnwu/magisk/releases>
+
+With the emulator running, execute the script (replace `Magisk-v30.7.apk` with your downloaded filename):
+```bash
+go run magisk.go -apk Magisk-v30.7.apk -img ramdisk.img -init-bits 32
+```
+
+## Step 4: Replace the ramdisk in your system images directory
+1. Close the emulator
+2. Backup the original ramdisk: `cp ramdisk.img ramdisk.img.orig`
+3. Locate your system image directory (e.g., `C:\Users\Steven\AppData\Local\Android\Sdk\system-images\android-34\android-tv\x86\`)
+4. Copy the patched image to that directory, replacing the original:
+   ```bash
+   cp magisk_patched.img "C:\Users\Steven\AppData\Local\Android\Sdk\system-images\android-34\android-tv\x86\ramdisk.img"
+   ```
+
+## Step 5: Cold boot the emulator
+```bash
+emulator -avd Television_1080p -no-snapshot-load -show-kernel
+```
+
+## Step 6: Install the Magisk APK
+```bash
+adb install Magisk-v30.7.apk
+```
+
+## Step 7: Open the Magisk app
+```bash
+adb shell monkey -p com.topjohnwu.magisk -c android.intent.category.LAUNCHER 1
+```
+- It should now say **Installed: 30.7**
+- It should prompt: *"Your device needs additional setup..."*
+- Tap **OK** — emulator reboots
+
+## Step 8: Verify root
+```bash
+adb shell su -c id
+# uid=0(root) gid=0(root)
+```
+
+## Step 9: Boot the emulator with a proxy (optional)
+
+If you need to use an HTTP proxy, close the emulator and restart it with the
+`-http-proxy` flag. Always include `-no-snapshot-load` to ensure it cold boots
+with the patched ramdisk:
+
+```
+emulator -avd Television_1080p -no-snapshot-load -http-proxy http://127.0.0.1:8080
+```
