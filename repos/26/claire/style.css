@@ -1,0 +1,54 @@
+.builtin {
+    color: forestgreen;
+    font-weight: bold;
+}
+
+.comment {
+    color: firebrick;
+}
+
+.doc {
+    margin-left: 2em;
+}
+
+.keyword {
+    color: blue;
+    font-weight: bold;
+}
+
+/* 
+Shared style for 'up' and 'repository' links.
+1.25rem is larger than body text but smaller than the full H1 scaling.
+*/
+.meta-link {
+    font-size: 1.25rem;
+    font-weight: normal;
+    margin-left: 1em;
+}
+
+.version-info {
+    font-size: 0.8em;
+    font-weight: normal;
+    color: #555;
+    margin-left: 1em;
+}
+
+body {
+    font-family: sans-serif;
+}
+
+h1,
+h2,
+h3,
+h4 {
+    color: #333;
+}
+
+pre {
+    background-color: #f4f4f4;
+    padding: 1em;
+    border: 1px solid #ddd;
+    white-space: pre-wrap;
+    font-size: 1.1em;
+    tab-size: 4;
+}

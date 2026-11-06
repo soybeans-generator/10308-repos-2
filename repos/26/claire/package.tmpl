@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="{{.StyleSheetPath}}">
+    <meta charset="utf-8">
+    {{if and .ImportPath .RepositoryUrl}}
+    <meta name="go-import" content="{{.ImportPath}} git {{.RepositoryUrl}}">
+    {{end}}
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Documentation for {{.Name}}</title>
+</head>
+<body>
+    <h1>
+        Package {{.Name}}
+        {{if .Version}}
+            <span class="version-info">({{.Version}})</span>
+        {{end}}
+        <span class="meta-link">[<a href="../">up</a>]</span>
+        {{if .RepositoryUrl}}
+            <span class="meta-link">[<a href="{{.RepositoryUrl}}" target="_blank" rel="noopener">repository</a>]</span>
+        {{end}}
+    </h1>
+
+    {{if .Doc}}
+    <div class="doc">
+        <pre>{{.Doc}}</pre>
+    </div>
+    {{end}}
+
+    {{if or .Constants .Variables .Functions .Types}}
+    <h2>Index</h2>
+    <ul>
+        {{if .Constants}}<li><a href="#constants">Constants</a></li>{{end}}
+        {{if .Variables}}<li><a href="#variables">Variables</a></li>{{end}}
+        {{if .Functions}}<li><a href="#functions">Functions</a></li>{{end}}
+        {{if .Types}}
+        <li><a href="#types">Types</a>
+            <ul>
+                {{range .Types}}
+                <li><a href="#{{.Name}}">{{.Name}}</a></li>
+                {{end}}
+            </ul>
+        </li>
+        {{end}}
+    </ul>
+    {{end}}
+
+    {{if .Constants}}
+    <h2 id="constants">Constants</h2>
+    {{range .Constants}}
+        <pre>{{.Definition}}</pre>
+        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+    {{end}}
+    {{end}}
+
+    {{if .Variables}}
+    <h2 id="variables">Variables</h2>
+    {{range .Variables}}
+        <pre>{{.Definition}}</pre>
+        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+    {{end}}
+    {{end}}
+
+    {{if .Functions}}
+    <h2 id="functions">Functions</h2>
+    {{range .Functions}}
+        <pre id="{{.Name}}">{{.Signature}}</pre>
+        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+    {{end}}
+    {{end}}
+
+    {{if .Types}}
+    <h2 id="types">Types</h2>
+    {{range .Types}}
+        {{$typeName := .Name}}
+        <h3 id="{{.Name}}">type {{.Name}}</h3>
+        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+        <pre>{{.Definition}}</pre>
+
+        {{if .Constants}}
+            <h4>Constants</h4>
+            {{range .Constants}}
+                <pre>{{.Definition}}</pre>
+                {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+            {{end}}
+        {{end}}
+
+        {{if .Variables}}
+            <h4>Variables</h4>
+            {{range .Variables}}
+                <pre>{{.Definition}}</pre>
+                {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+            {{end}}
+        {{end}}
+
+        {{if .Functions}}
+            <h4>Functions</h4>
+            {{range .Functions}}
+                <pre id="{{.Name}}">{{.Signature}}</pre>
+                {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+            {{end}}
+        {{end}}
+
+        {{if .Methods}}
+            <h4>Methods</h4>
+            {{range .Methods}}
+                <pre id="{{$typeName}}.{{.Name}}">{{.Signature}}</pre>
+                {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+            {{end}}
+        {{end}}
+    {{end}}
+    {{end}}
+
+    {{if .SubPackages}}
+    <h2>Packages</h2>
+    <ul>
+        {{range .SubPackages}}
+        <li><a href="{{.}}/">{{.}}</a></li>
+        {{end}}
+    </ul>
+    {{end}}
+</body>
+</html>
