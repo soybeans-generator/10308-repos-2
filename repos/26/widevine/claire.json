@@ -1,0 +1,7 @@
+{
+   "import_path": "41.neocities.org/widevine",
+   "input": ".",
+   "output": "D:/41.neocities.org/widevine",
+   "repository": "https://codeberg.org/26/widevine",
+   "version": "v1.6.5"
+}

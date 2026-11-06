@@ -1,0 +1,4 @@
+41.neocities.org/protobuf v1.8.0 h1:WFhUy/X6wshA46VFSXrQcbopl1g3F6yuBEMjrN5MDjI=
+41.neocities.org/protobuf v1.8.0/go.mod h1:oxOLuB0urSf6Tt1GaEXVMJBS1SIvyY23ax4It1o3iNQ=
+github.com/emmansun/gmsm v0.45.2 h1:GUqMkdHDrEvxqcRtIfhkyqMzgwtiQsnCVYtioOdYlQc=
+github.com/emmansun/gmsm v0.45.2/go.mod h1:RfnfrzyB9XbDi73nF1NHbJeqJj+a6pg/pXr5lrZKMok=
