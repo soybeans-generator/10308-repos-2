@@ -1,0 +1,164 @@
+// encoder.go marker preserve
+package protobuf
+
+import (
+   "bytes"
+   "encoding/binary"
+   "fmt"
+)
+
+// DecodeMessage populates a message by decoding the protobuf wire format data.
+func DecodeMessage(data []byte) (Message, error) {
+   var (
+      fields Message
+      offset int
+   )
+   for offset < len(data) {
+      tag, bytesRead, err := DecodeTag(data[offset:])
+      if err != nil {
+         return nil, fmt.Errorf("failed to decode tag at offset %d: %w", offset, err)
+      }
+      offset += bytesRead
+
+      field := Field{Tag: tag} // Store the pointer directly
+      var dataLength int
+
+      switch tag.Type {
+      case WireVarint:
+         val, bytesRead := binary.Uvarint(data[offset:])
+         if bytesRead <= 0 {
+            return nil, fmt.Errorf("failed to decode varint for field %d at offset %d: %w", tag.Number, offset, ErrMalformedVarint)
+         }
+         field.Numeric = val
+         dataLength = bytesRead
+
+      case WireFixed32:
+         val, bytesRead, err := DecodeFixed32(data[offset:])
+         if err != nil {
+            return nil, fmt.Errorf("failed to decode fixed32 for field %d: %w", tag.Number, err)
+         }
+         field.Numeric = uint64(val)
+         dataLength = bytesRead
+
+      case WireFixed64:
+         val, bytesRead, err := DecodeFixed64(data[offset:])
+         if err != nil {
+            return nil, fmt.Errorf("failed to decode fixed64 for field %d: %w", tag.Number, err)
+         }
+         field.Numeric = val
+         dataLength = bytesRead
+
+      case WireBytes:
+         length, bytesRead, err := DecodeLengthPrefixed(data[offset:])
+         if err != nil {
+            return nil, fmt.Errorf("failed to decode length for field %d: %w", tag.Number, err)
+         }
+         offset += bytesRead
+         dataLength = int(length)
+
+         // Copy rather than aliasing data[offset:offset+dataLength]: a
+         // sub-slice would pin the entire parent buffer for as long as
+         // this one field is retained.
+         field.Bytes = make([]byte, dataLength)
+         copy(field.Bytes, data[offset:offset+dataLength])
+
+      default:
+         return nil, fmt.Errorf("%w %d for field %d at offset %d", ErrInvalidWireType, tag.Type, tag.Number, offset)
+      }
+
+      offset += dataLength
+      fields = append(fields, &field)
+   }
+
+   return fields, nil
+}
+
+// DecodeTag decodes a varint from the input buffer and returns it as a pointer to a Tag struct
+func DecodeTag(buffer []byte) (*Tag, int, error) {
+   tagValue, bytesRead := binary.Uvarint(buffer)
+   if bytesRead <= 0 {
+      return nil, 0, ErrMalformedVarint
+   }
+
+   // Keep tagValue as uint64 until validated so the range check is exact.
+   // Valid field numbers are 1 through 2^29-1 (536870911) per the protobuf
+   // spec; anything larger would be silently truncated by the uint32 cast.
+   fieldNum := tagValue >> 3
+   if fieldNum == 0 || fieldNum > 536_870_911 {
+      return nil, 0, ErrInvalidFieldNumber
+   }
+
+   return &Tag{
+      Number: uint32(fieldNum),
+      Type:   Type(tagValue & 0x7),
+   }, bytesRead, nil
+}
+
+// Encode serializes the message into the protobuf wire format.
+//
+// For WireBytes fields, Bytes takes precedence: if it is non-nil, it is
+// written verbatim. Message is only encoded when Bytes is nil (i.e.,
+// fields built via Embed). An empty-but-non-nil Bytes ([]byte{} or
+// []byte("")) encodes as a zero-length field, same as an empty Message.
+func (m Message) Encode() ([]byte, error) {
+   var buffer bytes.Buffer
+   // Allocate a small buffer on the stack to prevent heap allocations inside the loop
+   var scratch [binary.MaxVarintLen64]byte
+
+   for _, field := range m {
+      if field == nil || field.Tag == nil {
+         return nil, fmt.Errorf("cannot encode field: nil field or nil tag")
+      }
+
+      // Validate the field number before writing anything, mirroring
+      // DecodeTag. Valid field numbers are 1 through 2^29-1 per the
+      // protobuf spec; emitting anything else would produce output that
+      // this package's own decoder rejects with ErrInvalidFieldNumber.
+      if num := field.Tag.Number; num == 0 || num > 536_870_911 {
+         return nil, fmt.Errorf("%w %d for encoding", ErrInvalidFieldNumber, num)
+      }
+
+      var valueBytes []byte
+
+      if field.Tag.Type == WireBytes {
+         if field.Bytes == nil {
+            // No raw bytes: treat the field as an embedded message.
+            // Note: Encode on a nil Message is safe and yields no bytes,
+            // so Embed(1) with no sub-fields encodes as a zero-length field.
+            encoded, err := field.Message.Encode()
+            if err != nil {
+               return nil, fmt.Errorf("failed to encode embedded message for field %d: %w", field.Tag.Number, err)
+            }
+            valueBytes = encoded
+         } else {
+            valueBytes = field.Bytes
+         }
+      }
+
+      // Create tag: (Field Number << 3) | Wire Type
+      tagValue := uint64(field.Tag.Number)<<3 | uint64(field.Tag.Type)
+      n := binary.PutUvarint(scratch[:], tagValue)
+      buffer.Write(scratch[:n])
+
+      switch field.Tag.Type {
+      case WireVarint:
+         n := binary.PutUvarint(scratch[:], field.Numeric)
+         buffer.Write(scratch[:n])
+      case WireFixed32:
+         binary.LittleEndian.PutUint32(scratch[:4], uint32(field.Numeric))
+         buffer.Write(scratch[:4])
+      case WireFixed64:
+         binary.LittleEndian.PutUint64(scratch[:8], field.Numeric)
+         buffer.Write(scratch[:8])
+      case WireBytes:
+         n := binary.PutUvarint(scratch[:], uint64(len(valueBytes)))
+         buffer.Write(scratch[:n])
+         buffer.Write(valueBytes)
+      default:
+         return nil, fmt.Errorf("%w %d for encoding field %d", ErrInvalidWireType, field.Tag.Type, field.Tag.Number)
+      }
+   }
+   return buffer.Bytes(), nil
+}
+
+// encoder.go marker preserve
