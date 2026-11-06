@@ -1,0 +1,84 @@
+name: Clone Codeberg repos
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # daily, 00:00 UTC
+  workflow_dispatch:
+    inputs:
+      owners:
+        description: Codeberg users/orgs (space-separated)
+        default: "26 claire"
+      repos:
+        description: Extra single repos as owner/name (space-separated)
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  OWNERS: ${{ inputs.owners || '26 claire' }}
+  EXTRA_REPOS: ${{ inputs.repos || '' }}
+
+jobs:
+  clone:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install git-filter-repo
+        run: pip install git-filter-repo
+
+      - name: List repos
+        run: |
+          : > repos.txt
+          for owner in $OWNERS; do
+            base="https://codeberg.org/api/v1/users/${owner}/repos"
+            curl -fsS "${base}?limit=1" >/dev/null 2>&1 || base="https://codeberg.org/api/v1/orgs/${owner}/repos"
+            page=1
+            while :; do
+              out=$(curl -fsS "${base}?page=${page}&limit=50") || break
+              urls=$(echo "$out" | jq -r --arg o "$owner" '.[] | select(.empty == false) | "\($o)/\(.name) \(.clone_url) \(.default_branch)"')
+              [ -z "$urls" ] && break
+              echo "$urls" >> repos.txt
+              page=$((page+1))
+            done
+          done
+          for r in $EXTRA_REPOS; do
+            curl -fsS "https://codeberg.org/api/v1/repos/${r}" \
+              | jq -r '"\(.full_name) \(.clone_url) \(.default_branch)"' >> repos.txt \
+              || echo "FAILED lookup: $r"
+          done
+          sort -u repos.txt -o repos.txt
+          echo "Repos found: $(wc -l < repos.txt)"
+
+      - name: Import repos with history
+        run: |
+          while read -r name url branch; do
+            tmp=$(mktemp -d)
+            git clone --quiet --single-branch --branch "$branch" "$url" "$tmp" \
+              || { echo "FAILED clone: $name"; continue; }
+            git -C "$tmp" filter-repo --quiet --to-subdirectory-filter "repos/$name" \
+              || { echo "FAILED filter: $name"; continue; }
+            git fetch --quiet --no-tags "$tmp" "$branch" \
+              || { echo "FAILED fetch: $name"; continue; }
+            if git cat-file -e "HEAD:repos/$name" 2>/dev/null; then
+              git merge --no-edit -m "Update $name from Codeberg" FETCH_HEAD \
+                || { echo "FAILED merge: $name"; git merge --abort; }
+            else
+              git merge --allow-unrelated-histories --no-edit -m "Add $name from Codeberg" FETCH_HEAD \
+                || { echo "FAILED add: $name"; git merge --abort; }
+            fi
+            rm -rf "$tmp"
+          done < repos.txt
+          rm repos.txt
+
+      - name: Push
+        run: git push
