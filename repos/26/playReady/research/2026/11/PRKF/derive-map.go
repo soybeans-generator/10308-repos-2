@@ -1,6 +1,7 @@
+// 3-derive-map.go begin
 //go:build windows
 
-// 3-derive-map.go -- magic-independent stage 3
+// Magic-independent stage 3 (prkf -6)
 // =============================================================================
 //
 // Stage 3: wbtool_img.bin + extracted.enc.prv + the oracle licences
@@ -31,13 +32,13 @@
 //          testdata/derive_map.txt
 //
 // USAGE
-//   enc.plain -3
+//   prkf -6
 //
-//   No flags. Every path above is a constant.
+//   No flags of its own. Every path above is a constant.
 //
 //   The sweep runs in a child of this same binary, using positional arguments
 //   rather than flags:
-//     enc.plain -3 sweep <setRVA> <descRVA> <lics>
+//     prkf -6 sweep <setRVA> <descRVA> <lics>
 //   That is the internal worker; the driver spawns it, nothing else should.
 // =============================================================================
 
@@ -245,7 +246,7 @@ func dmUniq(b []byte) bool {
 
 func dmWorker(setArg, descArg, licsArg string) {
    if setArg == "" || descArg == "" || licsArg == "" {
-      fmt.Fprintln(os.Stderr, "usage: enc.plain -3 sweep <setRVA> <descRVA> <lics>")
+      fmt.Fprintln(os.Stderr, "usage: prkf -6 sweep <setRVA> <descRVA> <lics>")
       os.Exit(2)
    }
    arg := func(s string, base int) int {
@@ -429,17 +430,17 @@ func dmWorker(setArg, descArg, licsArg string) {
 
 func stageDeriveMap(args []string) int {
    // Internal worker mode. Positional, so the command line surface stays at
-   // exactly -1 -2 -3 -4.
+   // exactly -1 through -7.
    if len(args) > 0 && args[0] == "sweep" {
       if len(args) != 4 {
-         fmt.Fprintln(os.Stderr, "usage: enc.plain -3 sweep <setRVA> <descRVA> <lics>")
+         fmt.Fprintln(os.Stderr, "usage: prkf -6 sweep <setRVA> <descRVA> <lics>")
          return 2
       }
       dmWorker(args[1], args[2], args[3])
       return 0
    }
    if len(args) > 0 {
-      fmt.Fprintf(os.Stderr, "enc.plain -3: unexpected argument %q\n", args[0])
+      fmt.Fprintf(os.Stderr, "prkf -6: unexpected argument %q\n", args[0])
       return 2
    }
 
@@ -451,7 +452,7 @@ func stageDeriveMap(args []string) int {
       }
    }
    if _, err := os.Stat(dmOracleDir); err != nil {
-      dmDie("missing %s - run enc.plain -1 first", dmOracleDir)
+      dmDie("missing %s - run prkf -4 first", dmOracleDir)
    }
    read := func(p string) []byte {
       b, err := os.ReadFile(p)
@@ -737,7 +738,7 @@ func dmRun(setrva uint32, lics []int) dmSweep {
    defer cancel()
    // Positional worker arguments, not flags: the child re-derives every path
    // from the same constants the parent used.
-   cmd := exec.CommandContext(ctx, exe, "-3", "sweep",
+   cmd := exec.CommandContext(ctx, exe, "-6", "sweep",
       fmt.Sprintf("0x%x", setrva),
       fmt.Sprintf("0x%x", dmDesc),
       strings.Join(ps, ","))

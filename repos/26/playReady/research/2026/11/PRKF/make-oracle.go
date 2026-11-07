@@ -4,7 +4,8 @@
 
 // =============================================================================
 //
-// Stage 1 of the chain: build the nibble-oracle inputs used by 3-derive-map.
+// Stage 1 of the chain (prkf -4): build the nibble-oracle inputs used by
+// 3-derive-map.go, which is step -6.
 //
 // WHY THIS EXISTS
 //
@@ -28,17 +29,18 @@
 //
 // PIPELINE
 //
-//   enc.plain -1   ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
-//   enc.plain -2   ->  testdata/wbtool_img.bin
-//   enc.plain -3   ->  testdata/oracle_map.json
-//   enc.plain -4   ->  testdata/extracted.enc.plain
+//   prkf -4   ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
+//   prkf -5   ->  testdata/wbtool_img.bin
+//   prkf -6   ->  testdata/oracle_map.json
+//   prkf -7   ->  testdata/extracted.enc.plain
 //
 // USAGE
 //
-//   enc.plain -1
+//   prkf -4
 //
-//   There are no other flags. -1 -2 -3 -4 are the entire command line surface;
-//   every input and output path is a constant in the stage that uses it.
+//   There are no flags of its own. -1 through -7 are the entire command line
+//   surface, and the driver in main.go owns it; every input and output path
+//   here is a constant in the stage that uses it.
 //
 // OUTPUTS   (all under testdata/, which is created on demand)
 //
@@ -66,7 +68,6 @@ package main
 
 import (
    "crypto/rand"
-   "flag"
    "fmt"
    "math/big"
    "os"
@@ -74,7 +75,9 @@ import (
    "strings"
 )
 
-// moData is the artefact root shared by all four stages.
+// moData is the artefact root shared by all seven steps. It is the same
+// directory main.go calls outDir; the two are not unified because this stage
+// and the three that follow it are self-contained, and outDir is the driver's.
 const moData = "testdata"
 
 // The licence plaintext: signature key = "HELLO MICROSOFT!", content key = zeros.
@@ -103,79 +106,8 @@ var (
    }
 )
 
-// moOracleDir is where -1 writes its output.
+// moOracleDir is where -4 writes its output.
 var moOracleDir = filepath.Join(moData, "oracle")
-
-// =============================================================================
-// Entry point.
-//
-// The entire command line surface is four boolean selectors. There is no
-// per-stage flag set, because there is nothing left for one to hold: every
-// input and output path is a constant in the stage that uses it.
-//
-// fs.Usage is deliberately left unset, so the flag package's own defaultUsage
-// renders the help: "Usage of enc.plain:" followed by the four flags. That is
-// what prints on an undefined flag and on -h.
-//
-// The internal worker modes are positional arguments, not flags, and are only
-// ever produced by a stage spawning itself:
-//
-//   enc.plain -3 sweep <setRVA> <descRVA> <lics>
-//   enc.plain -4 s1 <desc> [prep]
-//   enc.plain -4 s2 <desc> <obf> [prep] [variant]
-// =============================================================================
-
-func main() {
-   fs := flag.NewFlagSet("enc.plain", flag.ContinueOnError)
-   one := fs.Bool("1", false, "build the nibble oracle")
-   two := fs.Bool("2", false, "decrypt the Warbird image")
-   three := fs.Bool("3", false, "derive oracle_map.json")
-   four := fs.Bool("4", false, "derive extracted.enc.plain")
-
-   // No fs.Usage override. flag.ErrHelp is not special-cased either: -h and
-   // -help are not selectors here, so they fail exactly like any other
-   // undefined flag, after the default usage has already been printed.
-   if err := fs.Parse(os.Args[1:]); err != nil {
-      os.Exit(2)
-   }
-
-   picked := 0
-   for _, b := range []bool{*one, *two, *three, *four} {
-      if b {
-         picked++
-      }
-   }
-   if picked != 1 {
-      fs.PrintDefaults()
-      os.Exit(2)
-   }
-
-   rest := fs.Args()
-   noArgs := func(stage string) bool {
-      if len(rest) == 0 {
-         return true
-      }
-      fmt.Fprintf(os.Stderr, "enc.plain %s: unexpected argument %q\n", stage, rest[0])
-      return false
-   }
-
-   switch {
-   case *one:
-      if !noArgs("-1") {
-         os.Exit(2)
-      }
-      os.Exit(stageMakeOracle())
-   case *two:
-      if !noArgs("-2") {
-         os.Exit(2)
-      }
-      os.Exit(stageDecryptImg())
-   case *three:
-      os.Exit(stageDeriveMap(rest))
-   default:
-      os.Exit(stageDerivePlain(rest))
-   }
-}
 
 // moConcat32 renders each value as 32 big-endian bytes and concatenates them.
 func moConcat32(vals ...*big.Int) []byte {

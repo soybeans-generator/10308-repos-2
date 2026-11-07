@@ -1,8 +1,7 @@
+// 4-derive-plain.go begin
 //go:build windows
 
-// 4-derive-plain.go
-//
-// Stage 4: extracted.enc.prv -> extracted.enc.plain
+// Stage 4 (prkf -7): extracted.enc.prv -> extracted.enc.plain
 //
 //   stage 1  prv[0x00:0x20]  --stage-1 routine-->  OBF
 //   stage 2  OBF (mutated in place) --stage-2 routine-->  mut
@@ -20,14 +19,14 @@
 // Output   testdata/{extracted.enc.plain, derive_plain.txt}
 //
 // USAGE
-//   enc.plain -4
+//   prkf -7
 //
-//   No flags. Every path above is a constant.
+//   No flags of its own. Every path above is a constant.
 //
 //   Trials run in children of this same binary, using positional arguments
 //   rather than flags:
-//     enc.plain -4 s1 <desc> [prep]
-//     enc.plain -4 s2 <desc> <obf> [prep] [variant]
+//     prkf -7 s1 <desc> [prep]
+//     prkf -7 s2 <desc> <obf> [prep] [variant]
 //   (internal; the driver spawns them, nothing else should)
 //
 // Every child prints rc and status for every call, rejects included, so "wrong
@@ -112,8 +111,8 @@ var (
 
 // One trial, one process.
 //
-//   -4 s1 <desc> [prep]
-//   -4 s2 <desc> <obf> [prep] [variant]
+//   -7 s1 <desc> [prep]
+//   -7 s2 <desc> <obf> [prep] [variant]
 //
 // variant 0 real inputs / 1 zero out-buffer / 2 all zero / 3 no second size
 
@@ -811,12 +810,12 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
 
 func stageDerivePlain(args []string) int {
    // Internal trial modes. Positional, so the command line surface stays at
-   // exactly -1 -2 -3 -4.
+   // exactly -1 through -7.
    if len(args) > 0 && (args[0] == "s1" || args[0] == "s2") {
       mode, a := args[0], args[1:]
       if len(a) < 1 {
          fmt.Fprintln(os.Stderr,
-            "usage: enc.plain -4 s1 <desc> [prep] | enc.plain -4 s2 <desc> <obf> [prep] [variant]")
+            "usage: prkf -7 s1 <desc> [prep] | prkf -7 s2 <desc> <obf> [prep] [variant]")
          return 2
       }
       d, err := strconv.ParseUint(a[0], 0, 32)
@@ -833,7 +832,7 @@ func stageDerivePlain(args []string) int {
       } else {
          if len(a) < 2 {
             fmt.Fprintln(os.Stderr,
-               "usage: enc.plain -4 s2 <desc> <obf> [prep] [variant]")
+               "usage: prkf -7 s2 <desc> <obf> [prep] [variant]")
             return 2
          }
          obf = a[1]
@@ -848,7 +847,7 @@ func stageDerivePlain(args []string) int {
       return 0
    }
    if len(args) > 0 {
-      fmt.Fprintf(os.Stderr, "enc.plain -4: unexpected argument %q\n", args[0])
+      fmt.Fprintf(os.Stderr, "prkf -7: unexpected argument %q\n", args[0])
       return 2
    }
 
@@ -988,13 +987,13 @@ type dpResult struct {
    rc     int
 }
 
-// dpRunChild spawns one trial as `exe -4 <mode> <args...>`. Positional, so no
+// dpRunChild spawns one trial as `exe -7 <mode> <args...>`. Positional, so no
 // flag is ever involved.
 func dpRunChild(exe, mode string, args ...string) dpResult {
    ctx, cancel := context.WithTimeout(context.Background(), dpTimeout)
    defer cancel()
 
-   cmd := exec.CommandContext(ctx, exe, append([]string{"-4", mode}, args...)...)
+   cmd := exec.CommandContext(ctx, exe, append([]string{"-7", mode}, args...)...)
    var out, errb bytes.Buffer
    cmd.Stdout = &out
    cmd.Stderr = &errb

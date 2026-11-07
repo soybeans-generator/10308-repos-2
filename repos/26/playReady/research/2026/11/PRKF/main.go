@@ -1,15 +1,19 @@
 // main.go begin
 //go:build windows
 
-// prkf is the PlayReady key-extraction pipeline: three steps, one binary, one
+// prkf is the PlayReady key-extraction pipeline: seven steps, one binary, one
 // package, one folder. Each step is selected by a flag:
 //
-//   prkf -1    extract.go   carve the CHAI chain, extract key components
-//   prkf -2    findsub.go   locate the signing-key routine descriptor
-//   prkf -3    decrypt.go   decrypt the signing key
+//   prkf -1   extract.go        carve the CHAI chain, extract key components
+//   prkf -2   findsub.go        locate the signing-key routine descriptor
+//   prkf -3   decrypt.go        decrypt the signing key
+//   prkf -4   make-oracle.go    build the nibble oracle
+//   prkf -5   2-decrypt-img.go  decrypt the Warbird image
+//   prkf -6   3-derive-map.go   derive oracle_map.json
+//   prkf -7   4-derive-plain.go derive extracted.enc.plain
 //
 // This file is only the driver: parse the flag, reject arguments, make the
-// testdata directory, dispatch, and name the pipeline's one input. It holds no
+// testdata directory, dispatch, and name the pipeline's inputs. It holds no
 // step logic.
 //
 // warbird.go holds the kernel call ABI that -2 and -3 share, and the probe
@@ -17,20 +21,30 @@
 // probeEnv) live there; dllPath lives in findsub.go, which owns the DLL the
 // scan reads.
 //
-// Run the steps in order, from the same working directory: -2 writes
-// prsubs.json, -3 reads it, and -3 consumes what -1 wrote. Every path goes
-// through dataFile, so the sample is read from testdata/ and everything the
-// pipeline creates lands beside it. The working directory stays clean, and
-// `rm -rf testdata` throws the whole run away - including the sample, which
-// has to be put back before the next run.
+// Run the steps in order, from the same working directory. -1 feeds both
+// branches: -2 writes prsubs.json for -3 to read, and -4 writes the oracle
+// directory plus the extracted.enc.{pub,prv} pair that -6 and -7 consume. -5
+// writes wbtool_img.bin, which -6 and -7 both read; -6 writes oracle_map.json,
+// which -7 reads. Every path goes through dataFile or the step's own data
+// constants, so the sample is read from testdata/ and everything the pipeline
+// creates lands beside it. The working directory stays clean, and
+// `rm -rf testdata` throws the whole run away - including the sample, which has
+// to be put back before the next run.
 //
 // dllPath is the one path that is not under testdata/: the PlayReady module is
-// read, hashed and mapped where Windows installed it.
+// read, hashed and mapped where Windows installed it. -5 reads the same module
+// for the same reason.
 //
-// -2 also re-executes this binary, one child per candidate descriptor, to
-// probe it. The child is selected by an environment variable rather than a
-// flag or an argument, so `prkf -h` lists the three steps and nothing else.
-// See warbird.go for why the probe must be a separate process.
+// Three steps re-execute this binary rather than doing their work in-process:
+//
+//   -2  one child per candidate descriptor, selected by PRKF_PROBE_DESC
+//   -6  one child per (set, licence) sweep, selected by the "sweep" argument
+//   -7  one child per (stage 1, stage 2) trial, selected by "s1"/"s2"
+//
+// The first is an environment variable, so `prkf -h` lists the seven steps and
+// nothing else; the other two are positional arguments, so the command line
+// surface stays at exactly -1 through -7. See warbird.go for why the -2 probe
+// must be a separate process.
 package main
 
 import (
@@ -101,11 +115,19 @@ func main() {
       "locate the signing-key routine ("+dataFile("prsubs.json")+", "+dataFile("findprsub.txt")+")")
    step3 := flag.Bool("3", false,
       "decrypt the signing key ("+dataFile("extracted.sig.plain")+")")
+   step4 := flag.Bool("4", false,
+      "build the nibble oracle ("+dataFile("oracle")+"/key_NN.pub, "+dataFile("oracle")+"/lic_NN.blob)")
+   step5 := flag.Bool("5", false,
+      "decrypt the Warbird image ("+dataFile("wbtool_img.bin")+", "+dataFile("decrypt_img.txt")+")")
+   step6 := flag.Bool("6", false,
+      "derive the nibble map ("+dataFile("oracle_map.json")+", "+dataFile("derive_map.txt")+")")
+   step7 := flag.Bool("7", false,
+      "derive the encryption key ("+dataFile("extracted.enc.plain")+", "+dataFile("derive_plain.txt")+")")
 
    flag.Parse()
 
    n := 0
-   for _, on := range []bool{*step1, *step2, *step3} {
+   for _, on := range []bool{*step1, *step2, *step3, *step4, *step5, *step6, *step7} {
       if on {
          n++
       }
@@ -116,18 +138,24 @@ func main() {
       flag.Usage()
       os.Exit(2)
    case n > 1:
-      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 -2 -3")
+      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 through -7")
       os.Exit(2)
+   }
+
+   // -1..-5 take no arguments at all. -6 and -7 own their positional worker
+   // modes, so they receive whatever follows the flag verbatim and validate it
+   // themselves; a blanket NArg check here would break their children.
+   noArgs := func(stage string) bool {
+      if flag.NArg() == 0 {
+         return true
+      }
+      fmt.Fprintf(os.Stderr, "prkf %s: unexpected argument %q: this step takes no arguments\n",
+         stage, flag.Arg(0))
+      return false
    }
 
    // Checked once here rather than in each step: -1 runs two functions, so a
    // per-step check would be duplicated and would name the wrong step.
-   if flag.NArg() != 0 {
-      fmt.Fprintf(os.Stderr, "prkf: unexpected argument %q: no step takes arguments\n",
-         flag.Arg(0))
-      os.Exit(2)
-   }
-
    if err := ensureOutDir(); err != nil {
       fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
       os.Exit(1)
@@ -136,11 +164,34 @@ func main() {
    var err error
    switch {
    case *step1:
+      if !noArgs("-1") {
+         os.Exit(2)
+      }
       err = cmdExtract()
    case *step2:
+      if !noArgs("-2") {
+         os.Exit(2)
+      }
       err = cmdFindSub()
    case *step3:
+      if !noArgs("-3") {
+         os.Exit(2)
+      }
       err = cmdDecrypt()
+   case *step4:
+      if !noArgs("-4") {
+         os.Exit(2)
+      }
+      os.Exit(stageMakeOracle())
+   case *step5:
+      if !noArgs("-5") {
+         os.Exit(2)
+      }
+      os.Exit(stageDecryptImg())
+   case *step6:
+      os.Exit(stageDeriveMap(flag.Args()))
+   default:
+      os.Exit(stageDerivePlain(flag.Args()))
    }
    if err != nil {
       fmt.Fprintln(os.Stderr, err)
