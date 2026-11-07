@@ -22,48 +22,46 @@
 //   -1 -> -2 -> -3                  the signing key
 //   -1 -> -4, -5 -> -6 -> -7        the encryption key
 //
-// Every artefact lives under outDir. Each name is declared once, at the end of
-// this file, so no step spells a path and no two steps can disagree about one.
+// Every artefact lives under outDir (testdata/). Each name is declared once, at
+// the end of this file, so no step spells a path and no two can disagree.
 //
-//   in   testdata/msprcore.bla          the PlayReady sample, put here by hand
-//   -1   testdata/extracted.cert        carved CHAI chain
-//   -1   testdata/extracted.sig.pub     signing public key
-//   -1   testdata/extracted.sig.prv     signing private component, 32 B, obfuscated
-//   -1   testdata/extracted.enc.pub     encryption public key
-//   -1   testdata/extracted.enc.prv     encryption private component, 65 B
-//   -2   testdata/prsubs.json           signing routine descriptor, keyed by DLL sha256
-//   -2   testdata/findprsub.txt         per-descriptor probe log
-//   -3   testdata/extracted.sig.plain   signing private scalar, 32 B, plain
-//   -4   testdata/oracle/key_NN.pub     nibble oracle public keys, 15 files
-//   -4   testdata/oracle/lic_NN.blob    nibble oracle licence blobs, 15 files
-//   -5   testdata/wbtool_img.bin        decrypted image, RVA == file offset
-//   -5   testdata/decrypt_img.txt       per-block decrypt log
-//   -6   testdata/oracle_map.json       nibble permutation + magic sequence
-//   -6   testdata/derive_map.txt        sweep log
-//   -7   testdata/extracted.enc.plain   encryption private scalar, 32 B, plain
-//   -7   testdata/derive_plain.txt      trial log
+//   in   msprcore.bla          the PlayReady sample, put here by hand
+//   -1   extracted.cert        carved CHAI chain
+//   -1   extracted.sig.pub     signing public key
+//   -1   extracted.sig.prv     signing private component, 32 B, obfuscated
+//   -1   extracted.enc.pub     encryption public key
+//   -1   extracted.enc.prv     encryption private component, 65 B
+//   -2   prsubs.json           signing routine descriptor, keyed by DLL sha256
+//   -2   findprsub.txt         per-descriptor probe log
+//   -3   extracted.sig.plain   signing private scalar, 32 B, plain
+//   -4   oracle/key_NN.pub     nibble oracle public keys, 15 files
+//   -4   oracle/lic_NN.blob    nibble oracle licence blobs, 15 files
+//   -5   wbtool_img.bin        decrypted image, RVA == file offset
+//   -5   decrypt_img.txt       per-block decrypt log
+//   -6   oracle_map.json       nibble permutation + magic sequence
+//   -6   derive_map.txt        sweep log
+//   -7   extracted.enc.plain   encryption private scalar, 32 B, plain
+//   -7   derive_plain.txt      trial log
 //
-// dllPath is the one path outside outDir. The PlayReady module is read, hashed
-// and mapped where Windows installed it, never copied: a descriptor is an RVA
-// into that image, so the bytes hashed and the image the kernel executes from
-// have to be the same module.
+// dllPath is the one path outside outDir. The module is read, hashed and
+// mapped where Windows installed it, never copied: a descriptor is an RVA into
+// that image, so the bytes hashed and the image executed must be the same one.
 //
 // # CHILD PROCESSES
 //
-// Three steps re-execute this binary rather than doing their work in-process:
+// Three steps re-execute this binary rather than working in-process:
 //
 //   -2  one child per candidate descriptor, selected by PRKF_PROBE_DESC
 //   -6  one child per (set, licence) sweep, selected by the "sweep" argument
 //   -7  one child per (stage 1, stage 2) trial, selected by "s1"/"s2"
 //
 // The first is an environment variable, so `prkf -h` lists the seven steps and
-// nothing else; the other two are positional arguments, so the command line
-// surface stays at exactly -1 through -7. See warbird.go for why the -2 probe
-// must be a separate process.
+// nothing else; the other two are positional, so the command line surface stays
+// at exactly -1 through -7. See warbird.go for why the -2 probe must be its own
+// process.
 //
 // Run the steps in order, from the same working directory. `rm -rf testdata`
-// throws the whole run away, including the sample, which has to be put back
-// before the next run.
+// throws the whole run away, including the sample.
 package main
 
 import (

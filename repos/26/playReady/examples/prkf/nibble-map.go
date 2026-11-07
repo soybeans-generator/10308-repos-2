@@ -39,8 +39,9 @@
 //     prkf -6 sweep <setRVA> <descRVA> <lics>
 //   That is the internal worker; the driver spawns it, nothing else should.
 //
-// The descriptor format, the PE census, the block carving and the span lookup
-// are all shared with -5 and -7 and live in warbird.go.
+// The descriptor format, the PE census, the block carving, the span lookup, the
+// page patch and the fault handler are all shared with -5 and -7 and live in
+// warbird.go.
 // =============================================================================
 
 package main
@@ -65,7 +66,7 @@ import (
 
 const (
    dmCBLK, dmCN, dmCLEN = 16, 64, 0x400
-   dmRWX, dmKBL         = 0x40, 0x48
+   dmKBL                = 0x48
 )
 
 var (
@@ -78,21 +79,12 @@ var (
 // ================================ worker =====================================
 
 var (
-   dmLoadLibraryW   = syscall.NewLazyDLL("kernel32.dll").NewProc("LoadLibraryW")
-   dmVirtualProtect = syscall.NewLazyDLL("kernel32.dll").NewProc("VirtualProtect")
-   dmGetMapped      = syscall.NewLazyDLL("kernel32.dll").NewProc("K32GetMappedFileNameW")
-   dmAddVEH         = syscall.NewLazyDLL("kernel32.dll").NewProc("AddVectoredExceptionHandler")
-   dmNtQuery        = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
-   dmRtlMove        = syscall.NewLazyDLL("ntdll.dll").NewProc("RtlMoveMemory")
-
    // Static, never-moved scratch handed to native code.
    dmST  [0x40]byte
    dmOUT [0x100]byte
    dmKB  [dmKBL]byte
    dmARG [0x40]byte
-   dmNM  [512]uint16
    dmCB  []byte
-   dmVEH uintptr
 )
 
 var dmDesc uint32
@@ -121,7 +113,9 @@ func dmCensus(fb []byte, secs []imgSection, sizeImg uint32) ([]imgDesc, []imgDes
 
 func dmDie(f string, a ...any) {
    dmLogf("FATAL: "+f, a...)
-   os.WriteFile(mapLogPath, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
+   if err := os.WriteFile(mapLogPath, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644); err != nil {
+      fmt.Fprintf(os.Stderr, "prkf -6: %s: %v\n", mapLogPath, err)
+   }
    os.Exit(1)
 }
 
@@ -159,8 +153,14 @@ func dmFindSets(img []byte) []uint32 {
    return out
 }
 
+// dmHx parses a hex constant. A malformed constant is a programming error, and
+// silently returning nil would make the Windows 10/11 comparisons below false
+// for the wrong reason, so it panics at init instead.
 func dmHx(s string) []byte {
-   b, _ := hex.DecodeString(s)
+   b, err := hex.DecodeString(s)
+   if err != nil {
+      panic("dmHx: bad hex constant: " + s)
+   }
    return b
 }
 
@@ -221,24 +221,10 @@ func dmWorker(setArg, descArg, licsArg string) {
    if err != nil {
       dmLoadFail("%v", err)
    }
-   bp, _, lerr := dmLoadLibraryW.Call(uintptr(unsafe.Pointer(wp)))
+   bp, _, lerr := wbLoadLibraryW.Call(uintptr(unsafe.Pointer(wp)))
    base := uintptr(bp)
    if base == 0 {
       dmLoadFail("LoadLibraryW: %v", lerr)
-   }
-
-   // base stays a uintptr; memory traffic goes through RtlMoveMemory, so no
-   // uintptr is ever converted back into a Go pointer.
-   wr := func(rva uint32, buf []byte) bool {
-      span := uintptr((len(buf) + 0xFFF) &^ 0xFFF)
-      addr := base + uintptr(rva)
-      var old, dummy uint32
-      if r, _, _ := dmVirtualProtect.Call(addr, span, dmRWX, uintptr(unsafe.Pointer(&old))); r == 0 {
-         return false
-      }
-      dmRtlMove.Call(addr, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-      dmVirtualProtect.Call(addr, span, uintptr(old), uintptr(unsafe.Pointer(&dummy)))
-      return true
    }
 
    // --- prep: patch segment plaintext, but never over a heap-exec block.
@@ -263,7 +249,7 @@ func dmWorker(setArg, descArg, licsArg string) {
          continue
       }
       for _, run := range carveRuns(merged, r, n) {
-         if wr(run.start, img[run.start:run.start+run.length]) {
+         if wbPatch(base, run.start, img[run.start:run.start+run.length]) {
             patched++
          } else {
             skipped++
@@ -273,24 +259,16 @@ func dmWorker(setArg, descArg, licsArg string) {
    fmt.Printf("PATCHED %d skipped %d\n", patched, skipped)
    fmt.Printf("VARIANT prv[0x40]=0x%02x %%3=%d\n", dmKB[0x40], dmKB[0x40]%3)
 
-   dmVEH = syscall.NewCallback(func(ep *dmExceptionPointers) uintptr {
-      mod := "-"
-      if r, _, _ := dmGetMapped.Call(^uintptr(0), ep.Record.Address,
-         uintptr(unsafe.Pointer(&dmNM[0])), 512); r != 0 {
-         if s := syscall.UTF16ToString(dmNM[:]); s != "" {
-            mod = s[strings.LastIndex(s, `\`)+1:]
-         }
-      }
-      fmt.Printf("FAULT 0x%08x addr=0x%016x off=%+#x module=%s\n",
-         ep.Record.Code, ep.Record.Address,
-         int64(ep.Record.Address)-int64(base), mod)
-      os.Exit(3)
-      return 0
-   })
-   dmAddVEH.Call(1, dmVEH)
+   // A false return means the child runs unprotected: a fault then kills it with
+   // no FAULT line, the sweep comes back with no OUT rows, and the driver reads
+   // that as "incomplete" - the one diagnosis this step must not confuse with a
+   // result.
+   if !wbVEH(base, func(s string) { fmt.Println(s) }) {
+      dmLoadFail("AddVectoredExceptionHandler returned NULL")
+   }
 
    orig := make([]byte, dmCLEN)
-   dmRtlMove.Call(uintptr(unsafe.Pointer(&orig[0])), base+uintptr(srva), dmCLEN)
+   copy(orig, unsafe.Slice((*byte)(wbMemAt(base+uintptr(srva))), dmCLEN))
 
    decrypt := func(blob []byte) (uint32, []byte, []byte) {
       clear(dmST[:])
@@ -306,21 +284,35 @@ func dmWorker(setArg, descArg, licsArg string) {
       binary.LittleEndian.PutUint32(a[0x24:], 0x41)
       binary.LittleEndian.PutUint64(a[0x28:], uint64(uintptr(unsafe.Pointer(&dmCB[0]))))
       binary.LittleEndian.PutUint64(a[0x30:], uint64(uintptr(unsafe.Pointer(&dmOUT[0]))))
-      r, _, _ := dmNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), 0x38, 0)
+      r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), 0x38, 0)
       return uint32(r), append([]byte(nil), dmST[:4]...), append([]byte(nil), dmOUT[:0x20]...)
    }
 
+   // A failed patch here does not merely skip work: the forced nibble is not
+   // forced, so every OUT row for that licence is garbage and the permutation
+   // comes out wrong. It is fatal for the same reason a missing licence is.
+   force := func(v byte) {
+      if !wbPatch(base, uint32(srva), bytes.Repeat([]byte{v}, dmCLEN)) {
+         dmLoadFail("patch set 0x%x: VirtualProtect failed", srva)
+      }
+   }
+
    for _, nn := range lics {
+      // A missing licence is fatal, not skipped: skipping one makes every set
+      // report "incomplete" and sends the driver into its blob/ECC-encoding
+      // analysis, which is the wrong diagnosis for a missing file.
       blob, err := os.ReadFile(filepath.Join(oracleDir, fmt.Sprintf("lic_%02x.blob", nn)))
       if err != nil {
-         continue
+         dmLoadFail("licence %02x: %v", nn, err)
       }
       rc, sd, res := decrypt(blob)
       fmt.Printf("CTRL %02x rc=0x%08x st=%x %x\n", nn, rc, sd, res)
       for mm := 0; mm < 16; mm++ {
-         wr(uint32(srva), bytes.Repeat([]byte{byte(mm)}, dmCLEN))
+         force(byte(mm))
          rc, sd, res := decrypt(blob)
-         wr(uint32(srva), orig)
+         if !wbPatch(base, uint32(srva), orig) {
+            dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
+         }
          fmt.Printf("OUT %02x %02x rc=0x%08x st=%x %x\n", nn, mm, rc, sd, res)
       }
    }
@@ -345,7 +337,9 @@ func stageDeriveMap(args []string) int {
       return 2
    }
 
-   os.MkdirAll(outDir, 0o755)
+   if err := os.MkdirAll(outDir, 0o755); err != nil {
+      dmDie("cannot create %s: %v", outDir, err)
+   }
 
    for _, f := range []string{imgPath, encPrvPath} {
       if _, err := os.Stat(f); err != nil {
@@ -404,10 +398,36 @@ func stageDeriveMap(args []string) int {
       liveRVA  uint32
       haveLive bool
       magic    string
-      liveTab  dmSweep
+
+      // The set the routine demonstrably reads even when no forced nibble lands
+      // on the sentinel: whichever varies the most. Its table is printed below
+      // when nothing is live, because that is the evidence separating a wrong
+      // blob order from a wrong table.
+      bestTab  dmSweep
+      bestRVA  uint32
+      bestMinD int
+
+      metaOnce bool
    )
+
+   // PATCHED and VARIANT do not depend on the set, so the first sweep that
+   // returns them is enough. Printed before any verdict, not after: the failure
+   // path below tells the reader to check the variant, and used to be the one
+   // path where the line carrying it was never written.
+   showMeta := func(r dmSweep) {
+      if metaOnce || len(r.meta) == 0 {
+         return
+      }
+      metaOnce = true
+      for _, m := range r.meta {
+         dmLogf("  %s", m)
+      }
+      dmLogf("")
+   }
+
    for i, rva := range SETS {
       r := dmRun(rva, P1)
+      showMeta(r)
       if r.loadfail != "" {
          dmDie("%s", r.loadfail)
       }
@@ -448,7 +468,10 @@ func stageDeriveMap(args []string) int {
          if haveLive {
             dmDie("two live sets: 0x%06x and 0x%06x", liveRVA, rva)
          }
-         haveLive, liveIdx, liveRVA, magic, liveTab = true, i, rva, shared[0], r
+         haveLive, liveIdx, liveRVA, magic = true, i, rva, shared[0]
+      }
+      if minD > bestMinD {
+         bestTab, bestRVA, bestMinD = r, rva, minD
       }
    }
    dmLogf("")
@@ -456,21 +479,50 @@ func stageDeriveMap(args []string) int {
    if !haveLive {
       dmLogf("no set produced a shared plaintext across licences.")
       dmLogf("")
-      dmLogf("That rules out both wrong-magic and wrong-live-set: if the sentinel were")
-      dmLogf("ever produced, the shared value would appear. So the sentinel is never")
-      dmLogf("reached at all, which points at the blob/ECC encoding rather than at the")
-      dmLogf("tables. Check, in order:")
-      dmLogf("  1. lic_NN.blob point order - C1||C2 vs C2||C1. The oracle writes")
-      dmLogf("     C1=(rG) then C2=(M+rQ); a build that reads C2 first never lands on M.")
-      dmLogf("  2. Whether the consumer really is the 0x41 licence consumer on this")
-      dmLogf("     build. Compare the 'distinct' column: all-1 means the patch has no")
-      dmLogf("     effect on the output, so that descriptor is not reading the table.")
-      dmLogf("  3. Whether prv[0x40]%%3 selects a routine family whose table is not among")
-      dmLogf("     the discovered sets - the VARIANT line above records the value.")
+
+      if bestMinD > 1 {
+         dmLogf("The set at 0x%06x IS read by the routine: %d distinct outputs per",
+            bestRVA, bestMinD)
+         dmLogf("licence, so the patch reaches it and the descriptor is the consumer.")
+         dmLogf("What is missing is the sentinel. Same forced nibble m, one row per")
+         dmLogf("m, 'lics' counting how many of the %d licences produced that output:", len(P1))
+         dmLogf("")
+         dmLogf("  %-4s%-6s%s", "m", "lics", "output")
+         for mm := 0; mm < 16; mm++ {
+            v, ok := bestTab.outs[P1[0]][mm]
+            if !ok {
+               continue
+            }
+            n := 0
+            for _, nn := range P1 {
+               if bestTab.outs[nn][mm] == v {
+                  n++
+               }
+            }
+            dmLogf("  %02x  %d/%d   %s", mm, n, len(P1), v)
+         }
+         dmLogf("")
+         dmLogf("A %d/%d row is the sentinel, and the permutation falls out of it. No",
+            len(P1), len(P1))
+         dmLogf("%d/%d row means the derived scalar is not MAP[m] repeated for any m,",
+            len(P1), len(P1))
+         dmLogf("so either this build reads the blob's points in the other order (swap")
+         dmLogf("C1||C2 in lic_NN.blob) or the table the routine uses is not among the")
+         dmLogf("%d sets above.", len(SETS))
+      } else {
+         dmLogf("No set changed the output at all, so the routine reads none of the %d", len(SETS))
+         dmLogf("sets: the consumer is wrong on this build, or the table is not a plain")
+         dmLogf("nibble array in wbtool_img.bin.")
+      }
+      dmLogf("")
+      dmLogf("The VARIANT line above names the routine family prv[0x40]%%3 selects.")
       dmDie("no live set")
    }
 
-   mh := dmHx(magic)
+   mh, herr := hex.DecodeString(magic)
+   if herr != nil {
+      dmDie("shared value from the sweep is not hex: %q", magic)
+   }
    MAGIC := make([]byte, min(len(mh), len(dmSENT)))
    for i := range MAGIC {
       MAGIC[i] = mh[i] ^ dmSENT[i]
@@ -488,14 +540,13 @@ func stageDeriveMap(args []string) int {
       dmLogf("              which is why a hardcoded W10 constant would never match.")
    }
    dmLogf("")
-   for _, m := range liveTab.meta {
-      dmLogf("  %s", m)
-   }
 
    // ---- phase 2: full permutation on the live set
-   dmLogf("")
    dmLogf("phase 2: full permutation on the live set")
    r := dmRun(liveRVA, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
+   if r.loadfail != "" {
+      dmDie("%s", r.loadfail)
+   }
    if r.fault != "" {
       dmDie("%s", r.fault)
    }
@@ -564,7 +615,12 @@ func stageDeriveMap(args []string) int {
    }
    dmLogf("")
    dmLogf("written %s", mapPath)
-   os.WriteFile(mapLogPath, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
+   // The sweep log is the only record of how the permutation was derived, so a
+   // failure to write it is reported instead of discarded.
+   if err := os.WriteFile(mapLogPath, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644); err != nil {
+      fmt.Fprintf(os.Stderr, "prkf -6: %s: %v\n", mapLogPath, err)
+      return 1
+   }
    return 0
 }
 
@@ -593,21 +649,6 @@ func dmFindConsumer(img []byte, heaps []imgDesc) (imgDesc, []int, bool) {
    return owner, sites, found
 }
 
-type dmExceptionPointers struct {
-   Record  *dmExceptionRecord
-   Context uintptr
-}
-
-// dmExceptionRecord is EXCEPTION_RECORD truncated after ExceptionAddress
-// (+0x10): those are the only two fields read, and nothing past them is
-// dereferenced.
-type dmExceptionRecord struct {
-   Code    uint32
-   Flags   uint32
-   Prev    uintptr
-   Address uintptr
-}
-
 type dmSweep struct {
    outs     map[int]map[int]string
    meta     []string
@@ -617,7 +658,12 @@ type dmSweep struct {
 }
 
 func dmRun(setrva uint32, lics []int) dmSweep {
-   exe, _ := os.Executable()
+   // A failure here leaves exe empty, so the spawn fails, every sweep comes back
+   // with no OUT rows and the run dies blaming an incomplete sweep.
+   exe, err := os.Executable()
+   if err != nil {
+      return dmSweep{loadfail: "LOADFAIL os.Executable: " + err.Error()}
+   }
    ps := make([]string, len(lics))
    for i, x := range lics {
       ps[i] = fmt.Sprintf("%02x", x)
@@ -632,7 +678,7 @@ func dmRun(setrva uint32, lics []int) dmSweep {
       strings.Join(ps, ","))
    var so bytes.Buffer
    cmd.Stdout = &so
-   err := cmd.Run()
+   err = cmd.Run()
 
    r := dmSweep{outs: map[int]map[int]string{}}
    if ee, ok := err.(*exec.ExitError); ok {
@@ -651,8 +697,16 @@ func dmRun(setrva uint32, lics []int) dmSweep {
       case "FAULT":
          r.fault = ln
       case "OUT":
-         nn, _ := strconv.ParseInt(f[1], 16, 64)
-         mm, _ := strconv.ParseInt(f[2], 16, 64)
+         nn, err := strconv.ParseInt(f[1], 16, 64)
+         if err != nil {
+            r.loadfail = "LOADFAIL bad OUT index: " + ln
+            return r
+         }
+         mm, err := strconv.ParseInt(f[2], 16, 64)
+         if err != nil {
+            r.loadfail = "LOADFAIL bad OUT nibble: " + ln
+            return r
+         }
          if r.outs[int(nn)] == nil {
             r.outs[int(nn)] = map[int]string{}
          }

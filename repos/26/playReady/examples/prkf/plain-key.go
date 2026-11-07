@@ -33,8 +33,9 @@
 // the stage tag ("S1 FAULT" / "S2 FAULT") the driver filters on, so a fault is
 // never recorded as "no output".
 //
-// The descriptor format, the PE census, the span lookup and the block carving
-// are shared with -5 and -6 and live in warbird.go.
+// The descriptor format, the PE census, the span lookup, the block carving, the
+// page patch and the fault handler are shared with -5 and -6 and live in
+// warbird.go.
 //
 // Pitfalls:
 //   - The stage routines' own blocks must be LEFT CIPHERTEXT. They are heap-exec,
@@ -45,9 +46,9 @@
 //     heap-exec blocks. wbtool_img.bin holds DECRYPTED code at those RVAs, so
 //     copying it over a block the kernel will decrypt again yields garbage.
 //     PREP=full and PREP=none are selectable so the three can be compared.
-//   - A fault is reported with code, address, signed offset, module and bytes,
-//     then hard-exits via os.Exit; neither the Go runtime nor ctypes unwinds out
-//     of a VEH callback.
+//   - If AddVectoredExceptionHandler returns NULL the child reports ERR and exits
+//     6 instead of running unprotected, because with no handler a fault is a
+//     plain process death the driver can only record as NONE.
 //   - On failure a localization matrix runs automatically: each candidate with
 //     real inputs, then zeroed inputs, to separate a data-dependent fault from a
 //     structural one.
@@ -76,7 +77,6 @@ import (
 )
 
 const (
-   dpRWX     = 0x40
    dpTimeout = 300 * time.Second
    dpTol     = 0x20
    dpWinSz   = 0x400
@@ -86,17 +86,7 @@ const (
 
 var (
    dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
-   dpZ4      [4]byte
    dpZ32     = make([]byte, 0x20)
-
-   dpKernel32 = syscall.NewLazyDLL("kernel32.dll")
-   dpNtdll    = syscall.NewLazyDLL("ntdll.dll")
-
-   dpProcLoadLibraryW = dpKernel32.NewProc("LoadLibraryW")
-   dpProcVirtualProt  = dpKernel32.NewProc("VirtualProtect")
-   dpProcMappedName   = dpKernel32.NewProc("K32GetMappedFileNameW")
-   dpProcAddVEH       = dpKernel32.NewProc("AddVectoredExceptionHandler")
-   dpProcNtQuery      = dpNtdll.NewProc("NtQuerySystemInformation")
 )
 
 // One trial, one process.
@@ -105,11 +95,6 @@ var (
 //   -7 s2 <desc> <obf> [prep] [variant]
 //
 // variant 0 real inputs / 1 zero out-buffer / 2 all zero / 3 no second size
-
-var (
-   dpFaultBase uintptr
-   dpFaultSay  func(string)
-)
 
 func dpDriver() {
    var lines []string
@@ -120,7 +105,9 @@ func dpDriver() {
    }
    die := func(f string, a ...any) {
       say("FATAL: "+f, a...)
-      _ = os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+      if err := os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+         fmt.Fprintf(os.Stderr, "prkf -7: %s: %v\n", plainLogPath, err)
+      }
       os.Exit(1)
    }
    show := func(r dpResult) string {
@@ -141,18 +128,21 @@ func dpDriver() {
       die("%v", err)
    }
 
-   vals := make([]int, 0, 16)
-   for _, v := range in.mapt {
-      vals = append(vals, v)
+   // A 16-entry permutation: 16 keys in 0..15, each mapping to a distinct value.
+   // Both halves are checked because stage 4 indexes mapt with a nibble and a
+   // missing key would panic mid-child instead of failing here.
+   if len(in.mapt) != 16 {
+      die("oracle_map.json is not a 16-entry permutation (%d entries)", len(in.mapt))
    }
-   slices.Sort(vals)
-   if len(vals) != 16 {
-      die("oracle_map.json is not a 16-entry permutation")
-   }
-   for i, v := range vals {
-      if v != i {
-         die("oracle_map.json is not a 16-entry permutation")
+   var seenVal uint32
+   for k, v := range in.mapt {
+      if k < 0 || k > 15 || v < 0 || v > 15 {
+         die("oracle_map.json: %d -> %d is out of range", k, v)
       }
+      seenVal |= 1 << uint(v)
+   }
+   if seenVal != 0xFFFF {
+      die("oracle_map.json is not a 16-entry permutation (repeated value)")
    }
    if in.cluster < 0x1000 {
       die("oracle_map.json cluster RVA 0x%x looks invalid", in.cluster)
@@ -173,7 +163,7 @@ func dpDriver() {
 
    ov := 0
    for _, s := range in.seg {
-      if len(in.carve(s.rva, s.size)) != 1 {
+      if len(carveRuns(in.merged, s.rva, s.size)) != 1 {
          ov++
       }
    }
@@ -204,18 +194,14 @@ func dpDriver() {
    }
    matchDesc := func(t int) (uint32, bool) {
       var best uint32
-      found := false
+      bestDist := dpTol + 1
       for _, d := range descKeys {
          dist := max(int(d)-t, t-int(d))
-         if dist > dpTol {
-            continue
-         }
-         if !found || dist < max(int(best)-t, t-int(best)) {
-            best = d
-            found = true
+         if dist < bestDist {
+            best, bestDist = d, dist
          }
       }
-      return best, found
+      return best, bestDist <= dpTol
    }
 
    sites := bytes.Count(in.img, dpPattern)
@@ -316,11 +302,15 @@ func dpDriver() {
       die("no candidate produced an OBF - stage 1 is not in the candidate set")
    }
 
-   obfList := make([]string, 0, len(obfs))
-   for _, v := range obfs {
-      obfList = append(obfList, v)
+   // The first OBF in descriptor order, not in string order: deterministic
+   // without building and sorting a second slice for one element.
+   obfFirst := ""
+   for _, d1 := range descKeys {
+      if v, ok := obfs[d1]; ok {
+         obfFirst = v
+         break
+      }
    }
-   slices.Sort(obfList)
 
    var found []string
    nFault, nReject := 0, 0
@@ -379,7 +369,7 @@ func dpDriver() {
       say("")
       say("  %-10s%-10s%-8s%-8s%-8s%-8s%s", "cand", "code", "A", "B", "C", "D", "note")
 
-      obf := obfList[0]
+      obf := obfFirst
       firstReject := candList[0]
       seenReject := false
 
@@ -431,8 +421,14 @@ func dpDriver() {
    if err != nil {
       die("bad plain hex from child: %v", err)
    }
-   s1, _ := strconv.ParseUint(found[0], 10, 32)
-   s2, _ := strconv.ParseUint(found[1], 10, 32)
+   s1, err := strconv.ParseUint(found[0], 10, 32)
+   if err != nil {
+      die("bad stage-1 descriptor from child: %q", found[0])
+   }
+   s2, err := strconv.ParseUint(found[1], 10, 32)
+   if err != nil {
+      die("bad stage-2 descriptor from child: %q", found[1])
+   }
 
    say("stage 1   0x%06x  (descriptor 0x%06x)", heapDesc[uint32(s1)].rva, s1)
    say("OBF       %s", found[2])
@@ -457,69 +453,15 @@ func dpDriver() {
    psum := sha256.Sum256(plain)
    say("written   %s  (%d bytes)  sha256 %x", encPlainPath, len(plain), psum)
 
-   _ = os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+   if err := os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+      fmt.Fprintf(os.Stderr, "prkf -7: %s: %v\n", plainLogPath, err)
+      os.Exit(1)
+   }
 }
 
 func dpLastLine(s string) string {
    ls := strings.Split(strings.TrimRight(s, "\r\n"), "\n")
    return strings.TrimSpace(ls[len(ls)-1])
-}
-
-func dpLoadMap(raw []byte) (map[int]int, uint32, string, error) {
-   var o dpOracle
-   if err := json.Unmarshal(raw, &o); err != nil {
-      return nil, 0, "", err
-   }
-   if o.Map == nil {
-      return nil, 0, "", fmt.Errorf("%s is in the old flat format - re-run prkf -6", mapPath)
-   }
-   m := make(map[int]int, len(o.Map))
-   for k, v := range o.Map {
-      ki, err := strconv.Atoi(k)
-      if err != nil {
-         return nil, 0, "", fmt.Errorf("%s: bad map key %q", mapPath, k)
-      }
-      m[ki] = v
-   }
-   return m, uint32(o.Cluster), o.Magic, nil
-}
-
-// dpOnFault is the VEH handler. It never returns.
-func dpOnFault(ep uintptr) uintptr {
-   er := *(*uintptr)(dpPtrAt(ep))        // EXCEPTION_POINTERS.ExceptionRecord
-   code := *(*uint32)(dpPtrAt(er))       // ExceptionCode
-   ad := *(*uintptr)(dpPtrAt(er + 0x10)) // ExceptionAddress
-
-   mod := "-"
-   var nm [512]uint16
-   r, _, _ := dpProcMappedName.Call(^uintptr(0), ad, uintptr(unsafe.Pointer(&nm[0])), 512)
-   if r != 0 {
-      if s := syscall.UTF16ToString(nm[:]); s != "" {
-         mod = s[strings.LastIndexByte(s, '\\')+1:]
-      }
-   }
-
-   raw := "-"
-   if ad != 0 {
-      raw = hex.EncodeToString(unsafe.Slice((*byte)(dpPtrAt(ad)), 16))
-   }
-
-   dpFaultSay(fmt.Sprintf(
-      "FAULT 0x%08x addr=0x%016x off=%+#x module=%s bytes=%s",
-      code, ad, int64(ad)-int64(dpFaultBase), mod, raw,
-   ))
-   os.Exit(3)
-   return 0
-}
-
-// dpPtrAt reinterprets an address the OS handed us as an integer. The direct
-// form unsafe.Pointer(u) is rejected by vet's unsafeptr check, which cannot see
-// that these integers are mapped addresses, so the write goes through a
-// variable.
-func dpPtrAt(u uintptr) unsafe.Pointer {
-   var p unsafe.Pointer
-   *(*uintptr)(unsafe.Pointer(&p)) = u
-   return p
 }
 
 func dpTag(mode string) string {
@@ -552,23 +494,10 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
       say("ERR loadlibrary")
       os.Exit(4)
    }
-   base, _, _ := dpProcLoadLibraryW.Call(uintptr(unsafe.Pointer(ptr)))
+   base, _, _ := wbLoadLibraryW.Call(uintptr(unsafe.Pointer(ptr)))
    if base == 0 {
       say("ERR loadlibrary")
       os.Exit(4)
-   }
-
-   wr := func(rva uint32, buf []byte) bool {
-      p := base + uintptr(rva)
-      n := (uintptr(len(buf)) + 0xFFF) &^ 0xFFF
-      var old, dummy uint32
-      r, _, _ := dpProcVirtualProt.Call(p, n, dpRWX, uintptr(unsafe.Pointer(&old)))
-      if r == 0 {
-         return false
-      }
-      copy(unsafe.Slice((*byte)(dpPtrAt(p)), len(buf)), buf)
-      dpProcVirtualProt.Call(p, n, uintptr(old), uintptr(unsafe.Pointer(&dummy)))
-      return true
    }
 
    patched, skipped := 0, 0
@@ -583,13 +512,13 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
          }
          runs := []imgRun{{s.rva, s.size}}
          if prep != "full" {
-            runs = in.carve(s.rva, s.size)
+            runs = carveRuns(in.merged, s.rva, s.size)
             if len(runs) == 0 {
                skipped++
             }
          }
          for _, x := range runs {
-            if wr(x.start, in.img[x.start:x.start+x.length]) {
+            if wbPatch(base, x.start, in.img[x.start:x.start+x.length]) {
                patched++
             } else {
                skipped++
@@ -599,12 +528,14 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
    }
    say("PREP %s patched %d skipped %d", prep, patched, skipped)
 
-   dpFaultBase = base
-   dpFaultSay = func(s string) {
-      say("%s", s)
+   if !wbVEH(base, func(s string) { say("%s", s) }) {
+      say("ERR AddVectoredExceptionHandler returned NULL - a fault would be invisible")
+      os.Exit(6)
    }
-   dpProcAddVEH.Call(1, syscall.NewCallback(dpOnFault))
 
+   // op3 is not newWbArgs: it passes a variable args length (the whole point of
+   // the variant matrix) and writes a second size dword at +0x2C, which is
+   // wbArgs's blank padding and therefore unaddressable from Go.
    op3 := func(descRVA, ln uint32, status, key, out []byte, size2 *uint32) uint32 {
       var a [0x40]byte
       binary.LittleEndian.PutUint64(a[0x00:], 3)
@@ -616,7 +547,7 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
       if size2 != nil {
          binary.LittleEndian.PutUint32(a[0x2C:], *size2)
       }
-      r, _, _ := dpProcNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
+      r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
       runtime.KeepAlive(a)
       runtime.KeepAlive(status)
       runtime.KeepAlive(key)
@@ -632,7 +563,7 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
 
       rc := op3(desc, 0x2C, st, kb, ob, nil)
       sd := st[:4]
-      if rc != 0 || !bytes.Equal(sd, dpZ4[:]) || bytes.Equal(ob[:0x20], dpZ32) {
+      if rc != 0 || !statusOK(sd) || bytes.Equal(ob[:0x20], dpZ32) {
          say("REJECT rc=0x%08x st=%s out=%s",
             rc, hex.EncodeToString(sd), hex.EncodeToString(ob[:0x20]))
       } else {
@@ -674,7 +605,7 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
       s2 = &v
    }
 
-   if rc := op3(desc, ln, st2, ib, ob2, s2); rc != 0 || !bytes.Equal(st2[:4], dpZ4[:]) {
+   if rc := op3(desc, ln, st2, ib, ob2, s2); rc != 0 || !statusOK(st2) {
       say("REJECT var=%d rc=0x%08x st=%s", variant, rc, hex.EncodeToString(st2[:4]))
       os.Exit(0)
    }
@@ -765,7 +696,12 @@ func stageDerivePlain(args []string) int {
             prep = a[2]
          }
          if len(a) > 3 {
-            variant, _ = strconv.Atoi(a[3])
+            v, err := strconv.Atoi(a[3])
+            if err != nil {
+               fmt.Fprintf(os.Stderr, "prkf -7: bad variant %q: %v\n", a[3], err)
+               return 2
+            }
+            variant = v
          }
       }
       dpWorker(mode, uint32(d), obf, prep, variant)
@@ -787,7 +723,6 @@ type dpInputs struct {
    seg     []imgSpan
    heaps   []imgDesc
    merged  []imgInterval
-   carve   func(r, s uint32) []imgRun
    prv     []byte
    pub     []byte
    mapt    map[int]int
@@ -803,13 +738,31 @@ func dpLoadInputs() (*dpInputs, error) {
    if in.img, err = os.ReadFile(imgPath); err != nil {
       return nil, err
    }
+
+   // oracle_map.json, parsed here rather than in a single-caller helper: the
+   // map, the cluster RVA and the magic sequence all land in dpInputs, and a
+   // separate function would only hand back the same three values.
    raw, err := os.ReadFile(mapPath)
    if err != nil {
       return nil, err
    }
-   if in.mapt, in.cluster, in.magic, err = dpLoadMap(raw); err != nil {
+   var o dpOracle
+   if err := json.Unmarshal(raw, &o); err != nil {
       return nil, err
    }
+   if o.Map == nil {
+      return nil, fmt.Errorf("%s is in the old flat format - re-run prkf -6", mapPath)
+   }
+   in.mapt = make(map[int]int, len(o.Map))
+   for k, v := range o.Map {
+      ki, err := strconv.Atoi(k)
+      if err != nil {
+         return nil, fmt.Errorf("%s: bad map key %q", mapPath, k)
+      }
+      in.mapt[ki] = v
+   }
+   in.cluster, in.magic = uint32(o.Cluster), o.Magic
+
    if in.prv, err = os.ReadFile(encPrvPath); err != nil {
       return nil, err
    }
@@ -855,7 +808,6 @@ func dpLoadInputs() (*dpInputs, error) {
       }
    }
    in.merged = mergeIntervals(ivs)
-   in.carve = func(r, s uint32) []imgRun { return carveRuns(in.merged, r, s) }
    return in, nil
 }
 

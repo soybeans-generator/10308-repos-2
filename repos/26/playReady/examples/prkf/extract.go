@@ -125,14 +125,11 @@ func cmdCert() error {
    blob := buf[base : base+int(totalLength)]
 
    // ---- context around the chain -----------------------------------
-   lo := base - 16
-   if lo < 0 {
-      lo = 0
-   }
+   lo := max(base-16, 0)
    fmt.Printf("\nbytes 0x%x..0x%x (before CHAI):\n", lo, base)
    fmt.Printf("  % x\n", buf[lo:base])
    switch {
-   case !ch.hasPrefix:
+   case base < 4:
       fmt.Println("  (chain starts before offset 4 - no length prefix possible)")
    case ch.prefixOK:
       fmt.Printf("u32be at CHAI-4 = 0x%08x == chain length -> PRKF length-prefix confirmed\n", ch.prefix)
@@ -188,14 +185,18 @@ func cmdKeys() error {
 
    fmt.Printf("usable records: %d\n", len(recs))
    for _, r := range recs {
+      head := r.pub
+      if len(head) > 8 {
+         head = head[:8]
+      }
       fmt.Printf("  %#8x  pub=%2dB priv=%2dB %s\n",
-         r.off, r.publen, r.privlen, pubHex(r.pub))
+         r.off, len(r.pub), len(r.priv), hex.EncodeToString(head))
    }
 
    // --- encryption key: the unique 65-byte private component
    var encC []*keyRecord
    for _, r := range recs {
-      if r.privlen == 65 {
+      if len(r.priv) == 65 {
          encC = append(encC, r)
       }
    }
@@ -225,8 +226,8 @@ func cmdKeys() error {
    }
 
    sig := recs[i-1]
-   if sig.privlen != 32 {
-      return fmt.Errorf("record before the encryption key has a %d-byte private component, expected 32", sig.privlen)
+   if len(sig.priv) != 32 {
+      return fmt.Errorf("record before the encryption key has a %d-byte private component, expected 32", len(sig.priv))
    }
    fmt.Printf("signing key: %#x  (record preceding the encryption key)\n", sig.off)
 
@@ -253,14 +254,6 @@ func cmdKeys() error {
    return nil
 }
 
-func pubHex(pub []byte) string {
-   n := len(pub)
-   if n > 8 {
-      n = 8
-   }
-   return hex.EncodeToString(pub[:n])
-}
-
 // u32be reads a big-endian uint32 at off, reporting whether it fit.
 func u32be(buf []byte, off int) (uint32, bool) {
    if off < 0 || off+4 > len(buf) {
@@ -276,7 +269,6 @@ type chain struct {
    certCount   uint32
    warnings    []string
    prefix      uint32
-   hasPrefix   bool
    prefixOK    bool
 }
 
@@ -342,23 +334,23 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       return nil, false
    }
 
-   if base >= 4 {
-      if p, ok := u32be(buf, base-4); ok {
-         c.prefix = p
-         c.hasPrefix = true
-         c.prefixOK = p == totalLength
-      }
+   // The length prefix lives in the four bytes before the magic. u32be rejects
+   // off < 0, so a chain near the start of the file simply has none.
+   if p, ok := u32be(buf, base-4); ok {
+      c.prefix = p
+      c.prefixOK = p == totalLength
    }
 
    return c, true
 }
 
+// keyRecord is one 0x100f record's public and private components. The lengths
+// are len(pub) and len(priv): the record carries them as u32 fields, but every
+// consumer wants the slice, and a separate field could disagree with it.
 type keyRecord struct {
-   off     int
-   publen  int
-   pub     []byte
-   privlen int
-   priv    []byte
+   off  int
+   pub  []byte
+   priv []byte
 }
 
 func parseRec(buf []byte, ps, pe int) *keyRecord {
@@ -382,10 +374,7 @@ func parseRec(buf []byte, ps, pe int) *keyRecord {
    }
 
    priv := buf[q+12 : q+12+privlen]
-   return &keyRecord{
-      off: ps, publen: publen, pub: pub,
-      privlen: privlen, priv: priv,
-   }
+   return &keyRecord{off: ps, pub: pub, priv: priv}
 }
 
 // section is a parsed PRKF section header. Only the type and the payload span

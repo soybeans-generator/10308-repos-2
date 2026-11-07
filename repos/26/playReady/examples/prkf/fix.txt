@@ -1,7 +1,3 @@
-# fix
-
-do not ignore errors
-
 one line idiocy
 func data(n string) string { return filepath.Join(dataDir, n) }
 
@@ -32,3 +28,5 @@ replace hand written ECC
 small main
 
 speed
+
+stupid for loops

@@ -2,128 +2,67 @@
 //go:build windows
 
 // prkf -2 and -3: find the signing-key routine's descriptor, then decrypt the
-// signing key with it.
+// signing key with it. One file, because -2 writes prsubs.json and -3 reads
+// it, both call the same ABI in warbird.go, and both name the same DLL.
 //
-// One file, because the two steps are one branch: -2 writes prsubs.json and -3
-// reads it, both call through the same ABI in warbird.go, and both name the
-// same DLL. The producer and the consumer of a single 100-byte record do not
-// belong in two files that cannot be read apart.
-//
-// ================================== -2 =======================================
-//
-// It scans the DLL for Warbird heap-exec descriptors, then re-executes this
+// -2 scans the DLL for Warbird heap-exec descriptors, then re-executes this
 // binary once per candidate, scanWorkers at a time, and reads the RESULT line
-// each child prints. The child, the call it makes, and the argument block all
-// live in warbird.go; this file owns the parent side of the scan.
-//
-// This step does NOT use sample key files. Discovery rests entirely on
-// properties of the routine itself, read from its disassembly:
+// each child prints. Discovery rests entirely on properties of the routine
+// itself, read from its disassembly - no sample key files:
 //
 //  1. accepts exactly 0x20 bytes and succeeds
-//     (the routine begins: cmp dword ptr [rcx+10h], 20h)
-//  2. writes its output buffer
-//     (it copies the input there, then transforms in place)
-//  3. different input -> different output
-//     (a key transform cannot ignore its input)
+//     (it begins: cmp dword ptr [rcx+10h], 20h)
+//  2. writes its output buffer; 3. different input -> different output
 //  4. REJECTS a size other than 0x20
-//     (property 1's converse; no generic routine enforces this)
 //
 // Property 4 is the discriminating one - it collapses the large set of
 // descriptors that merely return success. Verification against a real key is
-// -3's job, not -2's.
+// -3's job, not -2's. Zero accepted descriptors, or more than one, is an error
+// to investigate: there is no fallback path. Outputs: prsubsPath (build values,
+// keyed by the DLL sha256) and scanLogPath (probe results and child traces).
 //
-// The ONLY value that differs between DLL builds is the RVA of the heap
-// descriptor holding the routine.
-//
-// A result of ZERO accepted descriptors, or more than one, is an error to
-// investigate - there is no fallback path.
-//
-// Outputs: prsubsPath (build-specific values, keyed by the DLL sha256) and
-// scanLogPath (per-descriptor probe results and every child's trace). Both are
-// declared in main.go's manifest.
-//
-// # DIAGNOSTICS
-//
-// A scan that stalls has three possible shapes - one child spinning, several
-// spinning, or the parent deadlocked - and from the progress line alone they
-// look identical. The log distinguishes them:
-//
-//   job N start / job N end   one line per descriptor, with wall clock
-//   trace[i desc] ...         the child's own phase trace, streamed live
-//   watchdog ...              every 5s while work is in flight, names the
-//                             descriptors still running and for how long
-//
-// A stuck descriptor therefore leaves its last trace line as the final record
-// for that index: `probe B begin` means the child never returned from the
-// kernel call for probe B. There is no deadline to cut the run short, so
-// interrupt it and read the log.
-//
-// If the log shows work in flight but the watchdog lines never name a growing
-// duration, the parent itself is stuck rather than a child. This file does not
-// dump the parent's stacks: send the process Ctrl-Break and the Go runtime
-// prints a goroutine dump by itself, which is the same evidence without an
-// import of runtime here.
+// DIAGNOSTICS. A scan that stalls has three possible shapes - one child
+// spinning, several spinning, or the parent deadlocked - and the progress line
+// cannot tell them apart. The log can: `job N start/end` per descriptor with
+// wall clock, `trace[i desc]` streamed live, and `watchdog` every 5s naming the
+// descriptors still in flight and for how long. A stuck descriptor leaves its
+// last trace line as the final record for that index: `probe B begin` means the
+// child never returned from the kernel call for probe B. There is no deadline,
+// so interrupt the run and read the log. If work is in flight but the watchdog
+// never names a growing duration, the parent is stuck rather than a child;
+// Ctrl-Break prints a goroutine dump by itself.
 //
 // NOTE: this file owns scanWorkers and the -2 scan. dllPath is in main.go's
 // manifest; descTotal and the descriptor layout are in warbird.go; keyLen,
-// warbirdOp, argsLen and probeEnv are the Warbird ABI and are also there, along
-// with the probe child. -3 builds the same argument block rather than
-// redeclaring it.
+// warbirdOp, argsLen and probeEnv are the Warbird ABI and are also there.
 //
-// ================================== -3 =======================================
+// -3 decrypts sigPrvPath -> sigPlainPath, writing output only after every
+// available check passes.
 //
-// Decrypts a PlayReady signing key (sigPrvPath -> sigPlainPath).
+// VERSION SUPPORT. Only ONE value differs between DLL builds: the RVA of the
+// heap descriptor holding the signing-key routine, from prsubsPath keyed by the
+// DLL sha256. This step refuses to run if the cache does not match the DLL.
 //
-// The names are fixed: input, output and public key are the ones -1 produces.
-// The output is written only after every available check passes.
+// Everything else is hardcoded because it cannot drift with the DLL: op=3 and
+// the WarbirdCallArgs layout are kernel ABI; the routine's own argument struct
+// is packed (it reads its output pointer unaligned at +0x14) and packed layout
+// is fixed by source; size == 0x20 is the P-256 scalar length, which the
+// routine tests itself.
 //
-// # VERSION SUPPORT
+// VERIFICATION. The check needs no secret reference: the plaintext d must
+// satisfy d*G == Q, where Q is the P-256 public key -1 wrote next to the
+// ciphertext. A wrong descriptor, output offset, argument layout or input file
+// cannot produce a scalar whose public point lands on Q. NewPublicKey and
+// NewPrivateKey do the on-curve and range checks, so neither is repeated.
 //
-// Only ONE value differs between DLL builds: the RVA of the heap descriptor
-// holding the signing-key routine. It comes from prsubsPath, keyed by the DLL
-// sha256 and produced by -2, which does not use sample keys. This step refuses
-// to run if the cache does not match the DLL.
-//
-// Everything else is hardcoded because it cannot drift with the DLL:
-//
-//   - op=3 and the WarbirdCallArgs layout are a kernel ABI. The DLL and the
-//     running kernel must agree on them, so neither can change unilaterally.
-//     The block, the call and the module load are all in warbird.go, shared
-//     with -2.
-//   - The routine's own argument struct is packed (it reads its output pointer
-//     unaligned at +0x14), and packed layout is fixed by source and invariant
-//     under recompilation.
-//   - size == 0x20 is the P-256 private scalar length, and the routine tests it
-//     itself with `cmp dword ptr [rcx+10h], 20h`.
-//
-// Run -2 first; both steps agree on the directory because both go through
-// main.go's manifest.
-//
-// # VERIFICATION
-//
-// The check is cryptographic and needs no secret reference: the plaintext d
-// must satisfy d*G == Q, where Q is the P-256 public key that -1 wrote next to
-// the ciphertext. A wrong descriptor, a wrong output offset, a wrong argument
-// layout or a wrong input file cannot produce a scalar whose public point lands
-// on Q. Cost: a few milliseconds.
-//
-// crypto/ecdh covers both directions: NewPublicKey rejects a published point
-// that is off the curve or at infinity, and NewPrivateKey rejects a scalar
-// outside [1, n-1] before the base-point multiply is reached. That range
-// rejection is why no separate range test appears below.
-//
-// Failure is loud, never silent:
-//
-//   wrong desc_va     -> NTSTATUS 0xC0000095 (INTEGER_OVERFLOW)
-//   wrong arg layout  -> status dword 0x80070057 (E_INVALIDARG) and an
-//                        unwritten output buffer; -2 would also report zero
-//                        accepted descriptors
-//   output == input   -> descriptor for the wrong routine
-//   d*G != sig.pub    -> descriptor, argument layout or input is wrong
+// Failure is loud, never silent: wrong desc_va -> NTSTATUS 0xC0000095
+// (INTEGER_OVERFLOW); wrong arg layout -> status dword 0x80070057
+// (E_INVALIDARG) plus an unwritten output buffer; output == input -> wrong
+// routine; d*G != sig.pub -> descriptor, argument layout or input is wrong.
 //
 // NOTE: keyLen, argsLen, statusOK, wbArgs, newWbArgs, loadWarbird and
 // callWarbird are in warbird.go. This half imports neither unsafe nor syscall:
-// the one pointer conversion and the one module load are both inside warbird.go.
+// the one pointer conversion and the one module load are inside warbird.go.
 package main
 
 import (
@@ -131,8 +70,6 @@ import (
    "crypto/ecdh"
    "crypto/rand"
    "crypto/sha256"
-   "debug/pe"
-   "encoding/binary"
    "encoding/hex"
    "encoding/json"
    "errors"
@@ -221,24 +158,34 @@ func cmdFindSub() error {
    sum := sha256.Sum256(data)
    shaHex := hex.EncodeToString(sum[:])
 
-   f, err := pe.NewFile(bytes.NewReader(data))
-   if err != nil {
-      return fmt.Errorf("parse PE: %w", err)
-   }
-   defer f.Close()
-
    logf, err := os.Create(scanLogPath)
    if err != nil {
       return err
    }
-   defer logf.Close()
+   // Checked, and checked before the elapsed line runs: the header calls this
+   // log the only evidence a stalled scan leaves behind, so a close that fails
+   // (a full disk is the common case) must not be silent.
+   defer func() {
+      if err := logf.Close(); err != nil {
+         fmt.Fprintf(os.Stderr, "prkf -2: %s: close: %v\n", scanLogPath, err)
+      }
+   }()
    // *os.File writes are unbuffered, so each line reaches the log as soon as
    // it is written - useful when the scan dies partway through. logMu exists
-   // because the workers and the watchdog both write.
-   var logMu sync.Mutex
+   // because the workers and the watchdog both write; logErr keeps the first
+   // write failure, because a log that stops mid-scan is worse than one that
+   // says so.
+   var (
+      logMu  sync.Mutex
+      logErr error
+   )
    w := func(s string) {
       logMu.Lock()
-      fmt.Fprintln(logf, s)
+      if logErr == nil {
+         if _, err := fmt.Fprintln(logf, s); err != nil {
+            logErr = err
+         }
+      }
       logMu.Unlock()
    }
 
@@ -247,7 +194,14 @@ func cmdFindSub() error {
    // after logf's Close, so it still has an open file to write to.
    defer func() {
       el := time.Since(start).Round(time.Millisecond)
+      logMu.Lock()
+      werr := logErr
+      logMu.Unlock()
       w("elapsed " + el.String())
+      if werr != nil {
+         fmt.Fprintf(os.Stderr, "prkf -2: %s: %v (the log above is incomplete)\n",
+            scanLogPath, werr)
+      }
       fmt.Printf("elapsed %s\n", el)
    }()
 
@@ -257,7 +211,8 @@ func cmdFindSub() error {
    w("start  " + start.Format("2006-01-02 15:04:05"))
    w("")
 
-   descs := heapDescs(data, f.Sections)
+   _, secs := peSections(data)
+   descs := signingCandidates(data, secs)
    w(fmt.Sprintf("heap descriptors: %d", len(descs)))
    fmt.Printf("heap descriptors: %d\n", len(descs))
 
@@ -383,7 +338,7 @@ func cmdFindSub() error {
    close(stopWatch)
    <-watchDone
 
-   var acc []descriptor
+   var acc []imgDesc
    var slow []int
    for i, res := range results {
       w(res.line)
@@ -406,7 +361,7 @@ func cmdFindSub() error {
    w("")
    w(fmt.Sprintf("accepted: %d", len(acc)))
    for _, d := range acc {
-      w(fmt.Sprintf("  desc %#09x code %#09x+%#07x", d.descVA, d.codeRVA, d.codeLen))
+      w(fmt.Sprintf("  desc %#09x code %#09x+%#07x", d.descVA, d.rva, d.ln))
    }
 
    if len(acc) == 0 {
@@ -424,8 +379,8 @@ func cmdFindSub() error {
    rec := subRecord{
       SHA256:  shaHex,
       DescVA:  d.descVA,
-      CodeRVA: d.codeRVA,
-      SegLen:  d.codeLen,
+      CodeRVA: d.rva,
+      SegLen:  d.ln,
    }
 
    // One marshal: the cache is the same text the log and stdout carry.
@@ -458,7 +413,7 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
 
    // The module has to be mapped in this process before the call: rec.DescVA
    // is an RVA relative to its image base, not a file offset.
-   base, ntq, err := loadWarbird()
+   base, err := loadWarbird()
    if err != nil {
       return nil, err
    }
@@ -486,7 +441,7 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
    // result is read - its address is stored as a uintptr - and it is, by the
    // comparison below.
    args := newWbArgs(uint64(base)+uint64(rec.DescVA), status, keyBuf, out, keyLen)
-   st, _, _ := callWarbird(ntq, args)
+   st := callWarbird(args)
 
    if st32 := uint32(st); st32 != 0 {
       msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st32)
@@ -517,114 +472,63 @@ func isFile(p string) bool {
    return err == nil && fi.Mode().IsRegular()
 }
 
-// ------------------------------------------------------------- descriptors
-
-type descriptor struct {
-   descVA  uint32 // masked with 0x0FFFFFFF (top nibble is a flag)
-   codeRVA uint32
-   codeLen uint32
+// spanMapped reports whether [rva, rva+n) lies inside one section's mapped
+// extent, which is the larger of its virtual and raw sizes.
+func spanMapped(secs []imgSection, rva, n uint32) bool {
+   lo, hi := uint64(rva), uint64(rva)+uint64(n)
+   for _, s := range secs {
+      if uint64(s.va) <= lo && hi <= uint64(s.va)+uint64(max(s.vs, s.rs)) {
+         return true
+      }
+   }
+   return false
 }
 
-// heapDescs collects digest-validated Warbird heap-exec descriptors.
-//
-// This is the -2 scan, not the shared census in warbird.go: it needs the code
-// span to lie inside a mapped section and it deduplicates by (desc_va, rva,
-// len), which the other steps do not.
-//
-// Descriptor layout, relative to its base:
-//
-//   +0x00  32-byte SHA-256 over [0x20, 0xF0)
-//   +0x20  u32 total size (0xF0)
-//   +0x24  u32 v1 marker (0xFFFFFF00)
-//   +0x28  u32 desc_va
-//   +0x34  u32 encr_va   (0xF0000000 | code_rva)
-//   +0x38  u32 size      (0xF0000000 | code_len)
-//
-// Only descriptors whose code segment lies entirely inside a mapped section
-// are returned, sorted by code RVA.
-func heapDescs(data []byte, secs []*pe.Section) []descriptor {
-   // A section is mapped over the larger of its virtual and raw extents, so a
-   // code span is rejected only when it lies outside both. Built once: it is
-   // consulted for every candidate in every section.
-   ranges := make([]rng, 0, len(secs))
-   for _, s := range secs {
-      extent := uint64(s.VirtualSize)
-      if uint64(s.Size) > extent {
-         extent = uint64(s.Size)
-      }
-      ranges = append(ranges, rng{uint64(s.VirtualAddress), uint64(s.VirtualAddress) + extent})
-   }
+// ------------------------------------------------------------- descriptors
 
+// signingCandidates is the shared census filtered to what -2 can probe: a
+// heap-exec descriptor whose code span is non-empty and lies inside a mapped
+// section.
+//
+// This is a filter, not a second scan. The digest validation, the section walk
+// and the size cap are all scanDescs's, so -2 cannot drift from -5, -6 and -7
+// about which bytes are a descriptor. The dedupe by (desc_va, code rva, len)
+// stays because overlapping section extents can present the same descriptor
+// twice, and probing it twice would waste a process and inflate the count.
+func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    type key struct{ va, rva, ln uint32 }
-   found := make(map[key]struct{})
-   le := binary.LittleEndian
+   seen := make(map[key]bool)
+   var out []imgDesc
 
-   for _, s := range secs {
-      if s.Size < descTotal {
+   for _, d := range scanDescs(fb, secs) {
+      if !d.heap() || d.ln == 0 {
          continue
       }
-      start := int(s.Offset)
-      if start >= len(data) {
+      if !spanMapped(secs, d.rva, d.ln) {
          continue
       }
-      end := start + int(s.Size)
-      if end > len(data) {
-         end = len(data) // clamp to the bytes actually present
+      k := key{d.descVA, d.rva, d.ln}
+      if seen[k] {
+         continue
       }
-      blob := data[start:end]
-
-      for off := 0; off+descTotal <= len(blob); off += 4 {
-         if le.Uint32(blob[off+0x20:]) != descTotal {
-            continue
-         }
-         if le.Uint32(blob[off+0x24:]) != 0xFFFFFF00 {
-            continue
-         }
-         body := blob[off+0x20 : off+descTotal]
-         sum := sha256.Sum256(body)
-         if !bytes.Equal(sum[:], blob[off:off+0x20]) {
-            continue
-         }
-         descVA := le.Uint32(blob[off+0x28:])
-         encrVA := le.Uint32(blob[off+0x34:])
-         codeSz := le.Uint32(blob[off+0x38:])
-         // top nibble of both fields is a flag; the rest is an RVA
-         codeRVA := encrVA & 0x0FFFFFFF
-         codeLen := codeSz & 0x0FFFFFFF
-         if codeLen == 0 {
-            continue
-         }
-         lo, hi := uint64(codeRVA), uint64(codeRVA)+uint64(codeLen)
-         for _, r := range ranges {
-            if r.lo <= lo && hi <= r.hi {
-               found[key{descVA & 0x0FFFFFFF, codeRVA, codeLen}] = struct{}{}
-               break
-            }
-         }
-      }
+      seen[k] = true
+      out = append(out, d)
    }
 
-   out := make([]descriptor, 0, len(found))
-   for k := range found {
-      out = append(out, descriptor{descVA: k.va, codeRVA: k.rva, codeLen: k.ln})
-   }
    // A total order over keys the map already deduplicated: no equal elements
    // can reach the comparator, so stability would buy nothing.
    sort.Slice(out, func(i, j int) bool {
       a, b := out[i], out[j]
-      if a.codeRVA != b.codeRVA {
-         return a.codeRVA < b.codeRVA
+      if a.rva != b.rva {
+         return a.rva < b.rva
       }
       if a.descVA != b.descVA {
          return a.descVA < b.descVA
       }
-      return a.codeLen < b.codeLen
+      return a.ln < b.ln
    })
    return out
 }
-
-// rng is one mapped section's address extent.
-type rng struct{ lo, hi uint64 }
 
 // ---------------------------------------------------------------- the cache
 

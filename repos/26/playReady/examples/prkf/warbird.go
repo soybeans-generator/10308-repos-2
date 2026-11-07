@@ -2,8 +2,8 @@
 //go:build windows
 
 // The Warbird interface: the descriptor format, the PE census that finds
-// descriptors in a DLL on disk, the kernel call ABI both branches share, and
-// the probe child that -2 re-executes.
+// descriptors in a DLL on disk, the kernel call ABI both branches share, the
+// one page-patch and the one fault handler, and the probe child -2 re-executes.
 //
 // # THE DESCRIPTOR FORMAT
 //
@@ -16,63 +16,48 @@
 //   +0x20  u32 total size   (0xF0 => heap-exec, anything else => segment)
 //   +0x24  u32 v1 marker    (0xFFFFFF00)
 //   +0x28  u32 desc_va
-//   +0x2C  u32 relocs       (segment descriptors only)
-//   +0x30  u32 reloc count  (segment descriptors only)
+//   +0x2C  u32 relocs, +0x30 u32 count   (segment descriptors only)
 //   +0x34  u32 encr_va      (0xF0000000 | code_rva; heap-exec only)
 //   +0x38  u32 size         (0xF0000000 | code_len; heap-exec only)
 //   +0xF0  entries, 0xC each: flags, rva, size   (segment descriptors only)
 //
-// The top nibble of encr_va and of an entry's size is a flag; the rest is an
-// RVA. scanDescs returns every descriptor whose digest validates, in file
-// order; segSpans returns a segment descriptor's entry spans.
+// The top nibble of desc_va, encr_va and an entry's size is a flag; the rest is
+// an RVA. scanDescs returns every descriptor whose digest validates, in file
+// order; segSpans returns a segment descriptor's entry spans. The v1 marker is
+// covered by the digest, so it is documented but not tested: testing it could
+// only reject descriptors the kernel accepts.
 //
 // # THE TWO CALLS
 //
-// op=1 (segment decrypt) is used by -5 alone, and its argument block lives in
-// image.go because it is the only caller. op=3 (WbHeapExecuteCall) is used by
-// -2's probe child and by -3, so its block is wbArgs below.
-//
-// Both go through one function that converts a Go pointer to a uintptr. That is
-// not cosmetic: Proc.Call and LazyProc.Call take ...uintptr, so the conversion
-// cannot be avoided, but it can be confined to one place whose contract is
-// stated and whose lifetime handling is correct.
-//
-// The load-and-resolve pair is shared for the same reason: both callers need
-// the PlayReady module mapped and the call gate resolved, so loadWarbird does
-// it once. It runs in whichever process needs it - the probe child for -2, the
-// parent for -3 - so this removes a second copy of the code, not a second copy
-// of the work.
+// op=1 (segment decrypt) is used by -5 alone, and its block lives in image.go
+// because it is the only caller. op=3 (WbHeapExecuteCall) is used by -2's probe
+// child and by -3, so its block is wbArgs below. Both go through one function
+// that converts a Go pointer to a uintptr: Call takes ...uintptr, so the
+// conversion cannot be avoided, but it can be confined to one place whose
+// contract is stated and whose lifetime handling is correct.
 //
 // # WHY THE PROBE IS A SEPARATE PROCESS
 //
 // A fault in a descriptor's code is a Windows SEH exception raised inside the
 // DLL, not a Go panic. The Go runtime only converts exceptions on Go-managed
-// stacks into panics, so recover() never runs and the whole process is
-// terminated. Across 981 arbitrary code blobs that is the normal case, not an
-// edge case, and no skip list can rescue it: each fault would have to be
-// discovered by crashing, and a crash in the parent would end the scan before
-// it reached the descriptor that matters.
+// stacks into panics, so recover() never runs and the whole process dies.
+// Across 981 arbitrary code blobs that is the normal case, not an edge case:
+// each fault would have to be discovered by crashing, and a crash in the parent
+// would end the scan before it reached the descriptor that matters. One child
+// per descriptor confines a fault to that child; the parent records NO_OUTPUT
+// with the exit status and last trace line and continues.
 //
-// One child per descriptor confines a fault to that child. The parent sees a
-// child with no RESULT line, records NO_OUTPUT with the child's exit status and
-// its last trace line, and continues with the next descriptor.
+// NO DEADLINE. A timeout does not make a hang impossible, it makes it
+// invisible: the driver would print TIMEOUT and move on, and the descriptor
+// that actually hangs would be buried in a line that looks like every other
+// REJECT. A hanging child hangs the run and says so - its trace is streamed
+// into the log as it arrives, so the last line names the phase it never came
+// back from. Interrupt the run and read the log.
 //
-// # NO DEADLINE
-//
-// There is deliberately no timeout on a child. A deadline here does not make a
-// hang impossible, it makes it invisible: the driver would print TIMEOUT and
-// move on, and the descriptor that actually hangs - the thing worth knowing -
-// would be buried in a log line that looks like every other REJECT. A child
-// that hangs now hangs the run, and says so: its trace is streamed into the log
-// as it arrives, so the last line for that descriptor names the phase it never
-// came back from. Interrupt the run and read the log.
-//
-// # IMPORTANT: rejection is in the STATUS DWORD, not in NTSTATUS
-//
-// The routine writes 0x80070057 (E_INVALIDARG) to the status pointer and
-// returns normally, so NtQuerySystemInformation still returns 0. A check
-// written as "NTSTATUS != 0" will never fire. statusOK is the one
-// implementation of that check.
+// IMPORTANT: rejection is in the STATUS DWORD, not in NTSTATUS. The routine
+// writes 0x80070057 (E_INVALIDARG) to the status pointer and returns normally,
+// so NtQuerySystemInformation still returns 0, and a check written as
+// "NTSTATUS != 0" will never fire. statusOK is the one implementation of it.
 //
 // NOTE: dllPath is declared in main.go's manifest. Everything here is either
 // the on-disk descriptor format, kernel ABI, or the child's own trace.
@@ -120,6 +105,29 @@ const (
    // the children it spawns and nothing else does; the environment is used
    // instead of a flag so the child mode never appears in `prkf -h`.
    probeEnv = "PRKF_PROBE_DESC"
+
+   // PAGE_EXECUTE_READWRITE
+   wbPAGE_RWX = 0x40
+)
+
+// One entry point per native routine the program calls, shared by every step
+// that needs it. Declaring them here rather than per file is what lets wbPatch
+// and wbVEH exist once: three files patch pages and two install a fault
+// handler, and they all have to agree about which kernel32 they are calling.
+//
+// K32GetMappedFileNameW, not GetMappedFileNameW: the unprefixed name lives in
+// psapi.dll, and a LazyProc built for it on kernel32 panics on first Call -
+// which here is inside the VEH callback, turning a reported fault into a silent
+// process death.
+var (
+   wbKernel32 = syscall.NewLazyDLL("kernel32.dll")
+   wbNtdll    = syscall.NewLazyDLL("ntdll.dll")
+
+   wbLoadLibraryW   = wbKernel32.NewProc("LoadLibraryW")
+   wbVirtualProtect = wbKernel32.NewProc("VirtualProtect")
+   wbMappedName     = wbKernel32.NewProc("K32GetMappedFileNameW")
+   wbAddVEH         = wbKernel32.NewProc("AddVectoredExceptionHandler")
+   wbNtQuery        = wbNtdll.NewProc("NtQuerySystemInformation")
 )
 
 // ------------------------------------------------------------ the probe child
@@ -132,46 +140,47 @@ var childT0 = time.Now()
 // The conversion is unavoidable: Call takes ...uintptr, and syscall offers no
 // pointer-typed variant.
 //
-// The KeepAlive is not decorative. Through an interface, the callee's directive
-// (go:uintptrescapes) is not visible to the compiler - it does not know which
-// implementation runs - so the referent of the converted pointer is not kept
-// alive on our behalf. Without this call, a is dead after the conversion and
-// its struct, and with it the status and key buffers, may be collected while
-// the kernel is using them.
-func callWarbird(proc caller, a *wbArgs) (uintptr, uintptr, error) {
+// The KeepAlive is not decorative. Through the wbArgs pointer the callee's
+// directive (go:uintptrescapes) is not visible to the compiler, so the referent
+// of the converted pointer is not kept alive on our behalf. Without this call,
+// a is dead after the conversion and its struct, and with it the status and key
+// buffers, may be collected while the kernel is using them.
+//
+// NTSTATUS comes back in r1; the upper half of the register is garbage. The
+// third return of Call is GetLastError, which NtQuerySystemInformation does not
+// set, so there is nothing there to check.
+func callWarbird(a *wbArgs) uintptr {
    // SystemExtendedProcessInformation (0xB9) is the Warbird call gate.
-   // NTSTATUS comes back in r1; the upper half of the register is garbage.
-   r1, r2, err := proc.Call(0xB9, uintptr(unsafe.Pointer(a)), argsLen, 0)
+   r1, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(a)), argsLen, 0)
    runtime.KeepAlive(a)
-   return r1, r2, err
+   return r1
 }
 
 func le16(b []byte, o int) uint16 { return binary.LittleEndian.Uint16(b[o:]) }
 func le32(b []byte, o int) uint32 { return binary.LittleEndian.Uint32(b[o:]) }
 
 // loadWarbird maps the PlayReady module into this process and resolves the
-// Warbird call gate, returning the image base and the resolved procedure.
+// Warbird call gate, returning the image base.
 //
-// Both callers need exactly this pair, so it is written once. The module must
-// be mapped here before any call: the descriptor is a virtual address relative
-// to that image base in this process, not a file offset.
+// Both callers need exactly this, so it is written once. The module must be
+// mapped here before any call: the descriptor is a virtual address relative to
+// that image base in this process, not a file offset.
 //
 // The *DLL handle is not retained or released. The module has to stay mapped
 // for the life of the process - releasing it would invalidate the base this
 // function returns - and both callers are short-lived.
-func loadWarbird() (base uintptr, ntq *syscall.LazyProc, err error) {
+func loadWarbird() (base uintptr, err error) {
    dll, err := syscall.LoadDLL(dllPath)
    if err != nil {
-      return 0, nil, fmt.Errorf("loading %s: %w", dllPath, err)
+      return 0, fmt.Errorf("loading %s: %w", dllPath, err)
    }
 
-   ntq = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
    // Resolve now, not on first Call: a Find failure inside mustFind panics, and
    // a panic at the call site would look like a fault in the descriptor's code.
-   if err := ntq.Find(); err != nil {
-      return 0, nil, fmt.Errorf("NtQuerySystemInformation: %w", err)
+   if err := wbNtQuery.Find(); err != nil {
+      return 0, fmt.Errorf("NtQuerySystemInformation: %w", err)
    }
-   return uintptr(dll.Handle), ntq, nil
+   return uintptr(dll.Handle), nil
 }
 
 // probeTarget reports whether this process was started as a probe child, and
@@ -218,16 +227,15 @@ func runOne(descVA uint32) {
    }
    trace("inputs built")
 
-   base, ntq, err := loadWarbird()
+   base, err := loadWarbird()
    if err != nil {
       trace("loadWarbird failed: %v", err)
       fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
       os.Exit(2)
    }
-   trace("dll loaded base=%#x ntq=%#x", base, ntq.Addr())
+   trace("dll loaded base=%#x", base)
 
    w := &worker{
-      ntq:    ntq,
       base:   base, // HMODULE == image base for a DLL
       descVA: descVA,
    }
@@ -237,12 +245,6 @@ func runOne(descVA uint32) {
    c := w.probe("C", inputA, keyLen-1) // one byte short - must be rejected
    trace("all probes done")
    w.emit(a, b, c, inputA, inputB)
-}
-
-// sawSuccess: NTSTATUS 0 AND a zero status dword - not NTSTATUS alone. The
-// pointer is never nil: probe either returns a result or kills the process.
-func sawSuccess(r *probeResult) bool {
-   return r.ntstatus == 0 && statusOK(r.status)
 }
 
 // statusOK reports whether the routine's status dword - the four bytes it
@@ -262,11 +264,75 @@ func trace(format string, a ...any) {
       os.Getpid(), time.Since(childT0).Milliseconds(), fmt.Sprintf(format, a...))
 }
 
-// caller is the part of *syscall.Proc and *syscall.LazyProc this program uses.
-// Both have identical Call signatures, so one call site covers -2's probe and
-// -3's decrypt.
-type caller interface {
-   Call(a ...uintptr) (r1, r2 uintptr, lastErr error)
+// ------------------------------------------------------- raw memory + faults
+
+// wbMemAt reinterprets an address the OS handed us as an integer.
+//
+// The direct form unsafe.Pointer(u) is rejected by vet's unsafeptr check, which
+// cannot see that these integers are mapped addresses. unsafe.Add is the
+// identity on the address and vet accepts it. The pointer never escapes: every
+// caller copies immediately, so the slice header holding the foreign address
+// dies on the caller's stack frame.
+func wbMemAt(u uintptr) unsafe.Pointer {
+   return unsafe.Add(unsafe.Pointer(nil), u)
+}
+
+// wbPatch copies buf to base+rva, flipping the containing pages to RWX for the
+// copy and restoring the previous protection afterwards.
+//
+// The restore is part of the operation, not cleanup: a page left writable is a
+// page the kernel refuses to take a descriptor from (0xc000000d), so a failed
+// restore is reported as a failed patch rather than left for the next call to
+// blame on the routine it was about to invoke.
+func wbPatch(base uintptr, rva uint32, buf []byte) bool {
+   if len(buf) == 0 {
+      return true
+   }
+   p := base + uintptr(rva)
+   n := (uintptr(len(buf)) + 0xFFF) &^ 0xFFF
+
+   var old, dummy uint32
+   if r, _, _ := wbVirtualProtect.Call(p, n, wbPAGE_RWX, uintptr(unsafe.Pointer(&old))); r == 0 {
+      return false
+   }
+   copy(unsafe.Slice((*byte)(wbMemAt(p)), len(buf)), buf)
+   r, _, _ := wbVirtualProtect.Call(p, n, uintptr(old), uintptr(unsafe.Pointer(&dummy)))
+   return r != 0
+}
+
+// wbVEH installs a first-chance handler that reports the fault and exits.
+//
+// A false return means no handler was installed, and the caller must treat that
+// as fatal: with no handler every fault is a plain process death with no output
+// at all, which the parent can only record as "no result" - the exact ambiguity
+// the FAULT line exists to remove.
+//
+// The handler never returns: neither the Go runtime nor the kernel unwinds out
+// of a VEH callback into Go code.
+func wbVEH(base uintptr, say func(string)) bool {
+   cb := syscall.NewCallback(func(ep *excPointers) uintptr {
+      mod := "-"
+      var nm [512]uint16
+      if r, _, _ := wbMappedName.Call(^uintptr(0), ep.Record.Address,
+         uintptr(unsafe.Pointer(&nm[0])), 512); r != 0 {
+         if s := syscall.UTF16ToString(nm[:]); s != "" {
+            mod = s[strings.LastIndexByte(s, '\\')+1:]
+         }
+      }
+
+      raw := "-"
+      if ep.Record.Address != 0 {
+         raw = hex.EncodeToString(unsafe.Slice((*byte)(wbMemAt(ep.Record.Address)), 16))
+      }
+
+      say(fmt.Sprintf("FAULT 0x%08x addr=0x%016x off=%+#x module=%s bytes=%s",
+         ep.Record.Code, ep.Record.Address,
+         int64(ep.Record.Address)-int64(base), mod, raw))
+      os.Exit(3)
+      return 0
+   })
+   h, _, _ := wbAddVEH.Call(1, cb)
+   return h != 0
 }
 
 type childOut struct {
@@ -280,7 +346,10 @@ type childOut struct {
 // w receives the child's trace lines as they arrive and writes them to the
 // step's log. They are not buffered until the child exits: a child that hangs
 // never exits, and the hang is precisely the case where the last line written
-// is the only evidence there is.
+// is the only evidence there is. For the same reason a failure to read the trace
+// or to close the pipe is written into that log instead of being discarded - a
+// trace that stops early and a trace that never had more to say look identical
+// otherwise.
 func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
    cmd := exec.Command(self)
    cmd.Env = append(os.Environ(), probeEnv+"="+fmt.Sprintf("%#x", descVA))
@@ -291,9 +360,12 @@ func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
    er, ew := io.Pipe()
    cmd.Stderr = ew
 
+   // Only the last non-empty trace line is ever reported, so it is tracked as
+   // the lines arrive rather than by keeping them all.
    var (
-      lines []string
-      swg   sync.WaitGroup
+      last string
+      swg  sync.WaitGroup
+      serr error
    )
    swg.Add(1)
    go func() {
@@ -302,9 +374,15 @@ func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
       sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
       for sc.Scan() {
          line := sc.Text()
-         lines = append(lines, line)
+         if s := strings.TrimSpace(line); s != "" {
+            last = s
+         }
          w(fmt.Sprintf("  trace[%d %#x] %s", idx, descVA, line))
       }
+      // sc.Err is the only signal that the trace ended early: a line past the
+      // 1 MiB cap, or a read fault on the pipe. Dropped, it would make a
+      // truncated trace indistinguishable from a complete one.
+      serr = sc.Err()
    }()
 
    t0 := time.Now()
@@ -314,8 +392,15 @@ func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
    // Run returned, so the child is gone and exec's copy goroutine has
    // finished. Closing the write end is what gives the scanner its EOF; the
    // WaitGroup makes sure every line is in the log before the summary below.
-   ew.Close()
+   // A close error is reported because it is the one case where the scanner may
+   // never see EOF at all.
+   if cerr := ew.Close(); cerr != nil {
+      w(fmt.Sprintf("  trace[%d %#x] close stderr pipe: %v", idx, descVA, cerr))
+   }
    swg.Wait()
+   if serr != nil {
+      w(fmt.Sprintf("  trace[%d %#x] TRACE TRUNCATED: %v", idx, descVA, serr))
+   }
 
    exit := "ok"
    if err != nil {
@@ -331,13 +416,6 @@ func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
 
    // No RESULT line: the child died, or it never got as far as printing one.
    // The last trace line says which phase it was in.
-   last := ""
-   for i := len(lines) - 1; i >= 0; i-- {
-      if s := strings.TrimSpace(lines[i]); s != "" {
-         last = s
-         break
-      }
-   }
    return childOut{
       line:    fmt.Sprintf("RESULT %#x NO_OUTPUT exit=%s last=%q", descVA, exit, last),
       elapsed: el,
@@ -345,16 +423,32 @@ func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
    }
 }
 
+// excPointers and excRecord are EXCEPTION_POINTERS and the head of
+// EXCEPTION_RECORD. Nothing past ExceptionAddress is dereferenced.
+type excPointers struct {
+   Record  *excRecord
+   Context uintptr
+}
+
+type excRecord struct {
+   Code    uint32
+   Flags   uint32
+   Prev    uintptr
+   Address uintptr
+}
+
 // imgDesc is one digest-validated descriptor. rva and ln are meaningful only
 // for heap-exec descriptors; off and size are meaningful for both, because the
 // segment call reads the descriptor's own relocation fields and -5 rewrites a
-// descriptor in place.
+// descriptor in place. descVA is the +0x28 field - the address the kernel is
+// asked to execute - and is meaningful only for heap-exec descriptors.
 type imgDesc struct {
-   va   uint32 // descriptor RVA
-   off  uint32 // file offset of the descriptor
-   size uint32 // total size, digest included
-   rva  uint32 // code RVA     (heap-exec only)
-   ln   uint32 // code length  (heap-exec only)
+   va     uint32 // descriptor RVA
+   off    uint32 // file offset of the descriptor
+   size   uint32 // total size, digest included
+   descVA uint32 // +0x28, top nibble masked (heap-exec only)
+   rva    uint32 // code RVA     (heap-exec only)
+   ln     uint32 // code length  (heap-exec only)
 }
 
 // scanDescs returns every digest-validated descriptor in the file, in the order
@@ -389,9 +483,15 @@ func scanDescs(fb []byte, secs []imgSection) []imgDesc {
             continue
          }
 
-         d := imgDesc{va: s.va + uint32(off), off: s.rp + uint32(off), size: size}
+         // top nibble of desc_va and of both heap-exec fields is a flag; the
+         // rest is an RVA
+         d := imgDesc{
+            va:     s.va + uint32(off),
+            off:    s.rp + uint32(off),
+            size:   size,
+            descVA: le32(b, off+0x28) & 0x0FFFFFFF,
+         }
          if d.heap() {
-            // top nibble of both fields is a flag; the rest is an RVA
             d.rva = le32(b, off+0x34) & 0x0FFFFFFF
             d.ln = le32(b, off+0x38) & 0x0FFFFFFF
          }
@@ -461,25 +561,49 @@ func carveRuns(merged []imgInterval, r, s uint32) []imgRun {
 
 // ------------------------------------------------------------- descriptors
 
-// imgSection is one PE section header as mapped: virtual address, raw extent
-// and raw file offset.
+// imgSection is one PE section header as mapped: virtual address, virtual size,
+// raw extent and raw file offset.
 type imgSection struct {
    va uint32
+   vs uint32 // VirtualSize
    rs uint32 // SizeOfRawData
    rp uint32 // PointerToRawData
 }
 
 // peSections reads SizeOfImage and the section table out of a PE file.
+//
+// A short or malformed header returns no sections and a zero SizeOfImage rather
+// than panicking: all four callers pass a ReadFile result straight in, and a
+// partially read file (still being written, or truncated by a copy) would
+// otherwise die with a bare slice-bounds error that names the wrong culprit.
+// Every caller already treats an empty section list or a zero SizeOfImage as
+// fatal, so nothing downstream needs a new check.
 func peSections(fb []byte) (sizeImg uint32, secs []imgSection) {
-   lf := int(le32(fb, 0x3C))    // e_lfanew
+   if len(fb) < 0x40 {
+      return 0, nil
+   }
+   lf := int(le32(fb, 0x3C)) // e_lfanew
+   // One bound covers every header field read below: NumberOfSections at
+   // lf+6, SizeOfOptionalHeader at lf+20, and SizeOfImage at lf+24+56.
+   if lf < 0 || lf+24+60 > len(fb) {
+      return 0, nil
+   }
    n := int(le16(fb, lf+6))     // NumberOfSections
    opt := int(le16(fb, lf+20))  // SizeOfOptionalHeader
    sizeImg = le32(fb, lf+24+56) // SizeOfImage
 
-   secs = make([]imgSection, n)
    p := lf + 24 + opt
+   if n <= 0 || p+40*n > len(fb) {
+      return sizeImg, nil
+   }
+   secs = make([]imgSection, n)
    for i := range secs {
-      secs[i] = imgSection{le32(fb, p+12), le32(fb, p+16), le32(fb, p+20)}
+      secs[i] = imgSection{
+         va: le32(fb, p+12),
+         vs: le32(fb, p+8),
+         rs: le32(fb, p+16),
+         rp: le32(fb, p+20),
+      }
       p += 40
    }
    return sizeImg, secs
@@ -581,19 +705,21 @@ func newWbArgs(descAddr uint64, status, key, out []byte, size uint32) *wbArgs {
 }
 
 type worker struct {
-   ntq    *syscall.LazyProc
    base   uintptr
    descVA uint32
 }
 
 func (w *worker) emit(a, b, c *probeResult, inputA, inputB []byte) {
-   okAccept := sawSuccess(a) && !bytes.Equal(a.out, a.fill) && !bytes.Equal(a.out, inputA)
-   okAccept2 := sawSuccess(b) && !bytes.Equal(b.out, b.fill) && !bytes.Equal(b.out, inputB)
+   // sawSuccess is NTSTATUS 0 AND a zero status dword - not NTSTATUS alone.
+   okA := a.ntstatus == 0 && statusOK(a.status) &&
+      !bytes.Equal(a.out, a.fill) && !bytes.Equal(a.out, inputA)
+   okB := b.ntstatus == 0 && statusOK(b.status) &&
+      !bytes.Equal(b.out, b.fill) && !bytes.Equal(b.out, inputB)
    okInput := !bytes.Equal(a.out, b.out)
-   okReject := !sawSuccess(c)
+   okReject := !(c.ntstatus == 0 && statusOK(c.status))
 
    verdict := "REJECT"
-   if okAccept && okAccept2 && okInput && okReject {
+   if okA && okB && okInput && okReject {
       verdict = "ACCEPT"
    }
    trace("emit verdict=%s input_dep=%t size_enforced=%t", verdict, okInput, okReject)
@@ -632,7 +758,7 @@ func (w *worker) probe(tag string, data []byte, size uint32) *probeResult {
    trace("probe %s calling kernel op=%d desc=%#x status=%p key=%p out=%p size=%#x",
       tag, warbirdOp, w.base+uintptr(w.descVA), &status[0], &keyBuf[0], &out[0], size)
 
-   r1, _, _ := callWarbird(w.ntq, args)
+   r1 := callWarbird(args)
 
    // Reading out here is also what keeps its backing array alive across the
    // call: only its address was handed to the kernel.

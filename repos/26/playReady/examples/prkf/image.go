@@ -1,79 +1,63 @@
 // image.go begin
 //go:build windows
 
-// =============================================================================
-//
 // prkf -5: decrypt the Warbird-protected code and tables in the PlayReady DLL
 // into a flat, plaintext image.
 //
 // WHY THIS EXISTS
-//   PlayReady keeps the interesting parts of the library - the license blob
+//
+//   PlayReady keeps the interesting parts of the library - the licence blob
 //   parser, the ECC key handling, the per-nibble bijection subtables - as
-//   Warbird-encrypted blocks. The decryption keys live in the kernel and are
-//   never exported, but the kernel will decrypt a block on request for any
-//   descriptor whose embedded SHA-256 validates. So the image is decrypted
-//   block by descriptor rather than by recovering a key.
+//   Warbird-encrypted blocks. The keys live in the kernel and are never
+//   exported, but the kernel will decrypt a block on request for any descriptor
+//   whose embedded SHA-256 validates. So the image is decrypted block by
+//   descriptor rather than by recovering a key.
 //
-//   Two different descriptor kinds need two different treatment:
+//   Two descriptor kinds need two treatments:
 //     - segment descriptors (?g_Encry, sizes other than 0xF0) each list one or
-//       more RVA ranges. All of them can be decrypted in a single loaded image.
-//     - heap-exec descriptors (size 0xF0) describe a single code block, and the
-//       kernel only honours the FIRST such decrypt per loaded image. Each block
-//       therefore needs its own fresh LoadLibraryW.
+//       more RVA ranges. All of them decrypt in a single loaded image.
+//     - heap-exec descriptors (size 0xF0) describe one code block, and the
+//       kernel honours only the FIRST such decrypt per loaded image, so each
+//       block needs its own fresh LoadLibraryW.
 //
-// The descriptor format and the census that finds descriptors are in
-// warbird.go; this file is the op=1 call and the two passes over them.
+// PIPELINE   -4 oracle, -5 wbtool_img.bin (this step), -6 oracle_map.json,
+//            -7 extracted.enc.plain
 //
-// PIPELINE
-//   prkf -4  ->  oracle/key_NN.pub, oracle/lic_NN.blob
-//   prkf -5  ->  wbtool_img.bin              (this step)
-//   prkf -6  ->  oracle_map.json
-//   prkf -7  ->  extracted.enc.plain
+// INPUT   dllPath, read from System32. Nothing about this build is assumed:
+//         descriptor locations, counts, sizes, the sacrificial slot and its
+//         relocation data are all discovered at runtime.
 //
-// INPUT
-//   dllPath, read directly from System32. Nothing about this build is assumed:
-//   descriptor locations, counts, sizes, the sacrificial slot and its
-//   relocation data are all discovered at runtime.
-//
-// OUTPUT
-//   imgPath    SizeOfImage bytes, laid out so RVA == file offset. Consumed by
-//              -6 and -7.
-//   imgLogPath descriptor counts, per-block results, sample bytes.
-//
-// USAGE
-//   prkf -5
-//
-//   No flags of its own. Both output paths and the DLL are manifest entries in
-//   main.go.
+// OUTPUT  imgPath     SizeOfImage bytes, RVA == file offset; -6 and -7 read it.
+//         imgLogPath  descriptor counts, per-block results, sample bytes.
 //
 // ACCEPTANCE CHECK
-//   This step cannot judge itself, because every address and every count is
-//   per-build. What it must report is:
+//
+//   This step cannot judge itself, because every address and count is per-build.
+//   What it must report is:
 //       descriptors <n>  segments <n>  heap-exec <n>      (informational)
 //       slot 0x<...>  relocs 0x<...>/<n>                  (resolved, not hardcoded)
 //       segment descriptors <n> ok <n>                    (all must succeed)
 //       heap-exec <n>  changed <n>  unchanged <n>  error 0
-//   The real proof is -7 printing pubkey MATCH: that requires the stage routines
-//   to be real code, the blocks they call to be decrypted, and the live
-//   bijection set to be intact. It is the only version-independent check.
+//   The real proof is -7 printing pubkey MATCH: that needs the stage routines to
+//   be real code, the blocks they call decrypted, and the live bijection set
+//   intact. It is the only version-independent check.
 //
 // DO NOT COMPARE THE FILE HASH BETWEEN RUNS
-//   Every LoadLibraryW bakes the current process load base into IAT slots and
-//   relocated fields, so no two decrypted images hash alike even though they are
+//
+//   Every LoadLibraryW bakes the process load base into IAT slots and relocated
+//   fields, so no two decrypted images hash alike even though they are
 //   functionally identical. The hash in the log is a per-run identifier only.
 //
 // KNOWN PITFALLS
+//
 //   - Descriptor size cap must stay at 0x200000; see scanDescs in warbird.go.
 //   - Segment descriptors must be decrypted per descriptor, not per deduped RVA.
-//     Descriptor span lists overlap; deduping by RVA drops later/larger spans
-//     (7818 spans instead of 7937) and corrupts the downstream scalar.
+//     Span lists overlap; deduping by RVA drops later/larger spans (7818 spans
+//     instead of 7937) and corrupts the downstream scalar.
 //   - The sacrificial descriptor page's original protection must be restored
-//     before the WB call, or the kernel rejects the descriptor with 0xc000000d.
-//
-// BUILD
-//   GOOS=windows GOARCH=amd64 go build -o prkf.exe .
-//   (requires golang.org/x/sys/windows)
-// =============================================================================
+//     before the WB call, or the kernel rejects it with 0xc000000d. The restore
+//     is checked here, so a failure is reported as a protection failure rather
+//     than charged to the block's code.
 
 package main
 
@@ -83,22 +67,13 @@ import (
    "encoding/binary"
    "fmt"
    "os"
-   "strconv"
    "strings"
    "unsafe"
 
    "golang.org/x/sys/windows"
 )
 
-// PAGE_EXECUTE_READWRITE
-const diRWX = 0x40
-
-var (
-   diLogLines []string
-
-   diNTDLL                        = windows.NewLazySystemDLL("ntdll.dll")
-   diProcNtQuerySystemInformation = diNTDLL.NewProc("NtQuerySystemInformation")
-)
+var diLogLines []string
 
 // =============================================================================
 // Kernel call plumbing.
@@ -120,7 +95,9 @@ func diCall(base, sac, rel, num uintptr) uint32 {
    binary.LittleEndian.PutUint64(a[0x20:], uint64(base+rel)) // relocations
    binary.LittleEndian.PutUint64(a[0x28:], uint64(num))      // relocation count
 
-   r1, _, _ := diProcNtQuerySystemInformation.Call(
+   // wbNtQuery is the one NtQuerySystemInformation LazyProc in the program;
+   // warbird.go owns it, so -3, -5, -6 and -7 cannot resolve it differently.
+   r1, _, _ := wbNtQuery.Call(
       0xB9,
       uintptr(unsafe.Pointer(&a[0])),
       0x30,
@@ -129,31 +106,19 @@ func diCall(base, sac, rel, num uintptr) uint32 {
    return uint32(r1)
 }
 
-// diCommas renders 1234567 as "1,234,567".
-func diCommas(n int) string {
-   neg := n < 0
-   if neg {
-      n = -n
-   }
-   s := strconv.Itoa(n)
-   var b strings.Builder
-   for i, c := range s {
-      if i > 0 && (len(s)-i)%3 == 0 {
-         b.WriteByte(',')
-      }
-      b.WriteRune(c)
-   }
-   if neg {
-      return "-" + b.String()
-   }
-   return b.String()
-}
-
+// diFinish writes the log and exits. A failure to write it is reported on
+// stderr, and turns a would-be success into a failure: imgLogPath is a declared
+// output, so a run that produced no log did not produce everything it promised.
 func diFinish(msg string, code int) {
    if msg != "" {
-      diLogln(msg)
+      diLogf("%s", msg)
    }
-   _ = os.WriteFile(imgLogPath, []byte(strings.Join(diLogLines, "\n")+"\n"), 0o644)
+   if err := os.WriteFile(imgLogPath, []byte(strings.Join(diLogLines, "\n")+"\n"), 0o644); err != nil {
+      fmt.Fprintf(os.Stderr, "prkf -5: %s: %v\n", imgLogPath, err)
+      if code == 0 {
+         code = 1
+      }
+   }
    os.Exit(code)
 }
 
@@ -166,10 +131,6 @@ func diLogf(format string, a ...any) {
    s := fmt.Sprintf(format, a...)
    diLogLines = append(diLogLines, s)
    fmt.Println(s) // Go's stdout is unbuffered, so no explicit flush needed
-}
-
-func diLogln(s string) {
-   diLogf("%s", s)
 }
 
 // diMakeDesc builds a synthetic 1-entry segment descriptor:
@@ -203,34 +164,19 @@ func diMakeDesc(hdr, params []byte, rva, size uint32) []byte {
 // =============================================================================
 // Raw memory access into the process we are running in.
 //
-// `base` is an address handed back by LoadLibraryW, not a Go pointer, so the GC
-// neither knows nor needs to know about it. vet's unsafeptr analyzer rejects
-// unsafe.Pointer(uintptr) outright and cannot tell that this uintptr is foreign,
-// so the conversion is routed through unsafe.Add, which is the identity on the
-// address and produces exactly the same pointer.
-//
-// The pointer never escapes: both helpers copy immediately, so the slice header
-// holding the foreign address dies on the stack frame.
+// The conversion itself is wbMemAt's, in warbird.go, so there is one statement
+// in the program of why a uintptr becomes an unsafe.Pointer. These are the only
+// callers that need a copy in each direction - the write direction is wbPatch,
+// which owns the protection flip that must bracket it.
 // =============================================================================
-
-func diPtrAt(u uintptr) unsafe.Pointer {
-   return unsafe.Add(unsafe.Pointer(nil), u)
-}
 
 func diReadMem(base uintptr, n int) []byte {
    out := make([]byte, n)
    if n == 0 {
       return out
    }
-   copy(out, unsafe.Slice((*byte)(diPtrAt(base)), n))
+   copy(out, unsafe.Slice((*byte)(wbMemAt(base)), n))
    return out
-}
-
-func diWriteMem(dst uintptr, src []byte) {
-   if len(src) == 0 {
-      return
-   }
-   copy(unsafe.Slice((*byte)(diPtrAt(dst)), len(src)), src)
 }
 
 // =============================================================================
@@ -283,14 +229,12 @@ func stageDecryptImg() int {
    relocs := le32(f, int(segs[0].off)+0x2C)
    num := le32(f, int(segs[0].off)+0x30)
 
-   origSum := sha256.Sum256(f)
-
    diLogf("dll     %s", dllPath)
-   diLogf("sha256  %x", origSum)
-   diLogf("image   0x%x (%s bytes)", sizeImg, diCommas(int(sizeImg)))
+   diLogf("sha256  %x", sha256.Sum256(f))
+   diLogf("image   0x%x (%d bytes)", sizeImg, sizeImg)
    diLogf("descriptors %d  segments %d  heap-exec %d", len(segs)+len(heaps), len(segs), len(heaps))
    diLogf("slot    0x%x  relocs 0x%x/%d", slot, relocs, num)
-   diLogln("")
+   diLogf("")
 
    // =========================================================================
    // Segment pass: ONE loaded image, op=1 against every real segment descriptor.
@@ -315,8 +259,10 @@ func stageDecryptImg() int {
    diLogf("segment descriptors %d ok %d", len(segs), ok)
 
    img := diReadMem(uintptr(base), int(sizeImg)) // harvest the whole image
-   _ = windows.FreeLibrary(base)
-   diLogln("")
+   if err := windows.FreeLibrary(base); err != nil {
+      diLogf("warning: FreeLibrary after segment pass: %v", err)
+   }
+   diLogf("")
 
    // =========================================================================
    // Heap-exec pass: ONE FRESH IMAGE PER BLOCK.
@@ -332,27 +278,32 @@ func stageDecryptImg() int {
    // =========================================================================
 
    // decryptBlock returns (rc, plaintext, protFailed). protFailed reports that
-   // VirtualProtect could not make the slot writable, so the block was skipped.
+   // VirtualProtect could not make the slot writable OR could not restore it, so
+   // the block was skipped. Both are charged here rather than to the block's
+   // code: a failed restore leaves the descriptor on a writable page, which the
+   // kernel answers with 0xc000000d, and that would otherwise be logged as a
+   // decrypt error against a block that never got its turn.
+   //
+   // The write-and-restore pair is wbPatch, not a local copy of it: -6 and -7
+   // need the same bracket, and one implementation means one place where the
+   // restore can be forgotten.
    decryptBlock := func(h imgDesc) (rc uint32, got []byte, protFailed bool) {
       lib, err := windows.LoadLibrary(dllPath)
       if err != nil {
          diFinish(fmt.Sprintf("FATAL: LoadLibraryW failed at heap block 0x%x: %v", h.rva, err), 1)
       }
-      defer func() { _ = windows.FreeLibrary(lib) }()
+      defer func() {
+         if err := windows.FreeLibrary(lib); err != nil {
+            diLogf("  warning: FreeLibrary at heap block 0x%x: %v", h.rva, err)
+         }
+      }()
 
       sac := uintptr(lib) + uintptr(slot)
-      var oldProt uint32
-      if err := windows.VirtualProtect(sac, 0x1000, diRWX, &oldProt); err != nil {
-         return 0, nil, true
-      }
-
       hdr := diReadMem(sac, 0x40)
       params := f[int(h.off)+0x40 : int(h.off)+0xF0] // this block's own crypto params
-      diWriteMem(sac, diMakeDesc(hdr, params, h.rva, h.ln))
-
-      var dummy uint32
-      // restore BEFORE syscall
-      _ = windows.VirtualProtect(sac, 0x1000, oldProt, &dummy)
+      if !wbPatch(uintptr(lib), slot, diMakeDesc(hdr, params, h.rva, h.ln)) {
+         return 0, nil, true
+      }
 
       rc = diCall(uintptr(lib), sac, uintptr(relocs), uintptr(num))
       got = diReadMem(uintptr(lib)+uintptr(h.rva), int(h.ln))
@@ -400,12 +351,12 @@ func stageDecryptImg() int {
       }
    }
 
-   diLogln("")
+   diLogf("")
    diLogf("heap-exec %d  changed %d  unchanged %d  error %d", len(heaps), done, same, errCount)
    for _, u := range fails {
       diLogf("  unchanged 0x%06x+0x%x owner 0x%x", u.rva, u.size, u.owner)
    }
-   diLogln("")
+   diLogf("")
 
    if err := os.WriteFile(imgPath, img, 0o644); err != nil {
       diFinish("FATAL: cannot write "+imgPath+": "+err.Error(), 1)
@@ -417,15 +368,8 @@ func stageDecryptImg() int {
    // descriptor, both chosen at runtime, so the log is still useful for
    // eyeballing real code.
    dump := func(tag string, rva uint32, n int) {
-      lo := int(rva)
-      hi := lo + n
-      if hi > len(img) {
-         hi = len(img)
-      }
-      if lo > len(img) {
-         lo = len(img)
-      }
-      diLogf("  %s 0x%06x %x", tag, rva, img[lo:hi])
+      lo := min(int(rva), len(img))
+      diLogf("  %s 0x%06x %x", tag, rva, img[lo:min(lo+n, len(img))])
    }
 
    if len(heaps) > 0 {
@@ -441,10 +385,9 @@ func stageDecryptImg() int {
       dump("largest segment", big.va, 16)
    }
 
-   diLogln("")
-   diLogf("written %s  (%s bytes)", imgPath, diCommas(len(img)))
-   imgSum := sha256.Sum256(img)
-   diLogf("sha256   %x", imgSum)
+   diLogf("")
+   diLogf("written %s  (%d bytes)", imgPath, len(img))
+   diLogf("sha256   %x", sha256.Sum256(img))
    diFinish("", 0)
    return 0
 }
