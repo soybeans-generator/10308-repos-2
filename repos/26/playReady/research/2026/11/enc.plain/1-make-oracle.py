@@ -1,5 +1,5 @@
-# =============================================================================
 # 1-make-oracle.py
+# =============================================================================
 #
 # Stage 1 of the chain: build the nibble-oracle inputs used by 3-derive-map.py.
 #
@@ -9,11 +9,11 @@
 #   known key, and checking whether a known plaintext appears. That requires,
 #   for every key nibble N in 0x0N for N in 0..f (excluding 0x00):
 #
-#       oracle/key_NN.pub    public key whose private scalar is nibble NN
-#                            repeated 64 times
-#       oracle/lic_NN.blob   licence blob addressed to that public key, whose
-#                            plaintext content key / signature block contains
-#                            the known sentinel "HELLO MICROSOFT!"
+#       key_NN.pub    public key whose private scalar is nibble NN
+#                     repeated 64 times
+#       lic_NN.blob   licence blob addressed to that public key, whose
+#                     plaintext content key / signature block contains
+#                     the known sentinel "HELLO MICROSOFT!"
 #
 #   The permutation entry is recovered because decrypting a blob addressed to
 #   key_NN with the unknown private key only succeeds if the forced mapped
@@ -23,14 +23,14 @@
 #   3-derive-map.py recovers that entry as the leftover permutation value.
 #
 # PIPELINE
-#   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob   (this script)
-#   2-decrypt-img.py   ->  wbtool_img.bin
-#   3-derive-map.py    ->  oracle_map.json
-#   4-derive-plain.py  ->  extracted.enc.plain
+#   1-make-oracle.py   ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
+#   2-decrypt-img.py   ->  testdata/wbtool_img.bin
+#   3-derive-map.py    ->  testdata/oracle_map.json
+#   4-derive-plain.py  ->  testdata/extracted.enc.plain
 #
-# OUTPUTS
-#   oracle/key_NN.pub     64 bytes, X||Y (no 0x04 prefix)
-#   oracle/lic_NN.blob    128 bytes, C1.x||C1.y||C2.x||C2.y
+# OUTPUTS   (all under testdata/, which is created on demand)
+#   testdata/oracle/key_NN.pub     64 bytes, X||Y (no 0x04 prefix)
+#   testdata/oracle/lic_NN.blob    128 bytes, C1.x||C1.y||C2.x||C2.y
 #
 # PROPERTIES
 #   - key_NN.pub is DETERMINISTIC: same bytes on every run, every machine.
@@ -52,6 +52,13 @@ import os
 import sys
 from cryptography.hazmat.primitives.asymmetric import ec
 
+# --- output root -------------------------------------------------------------
+# Every artefact this pipeline produces lives under testdata/. Keeping the
+# oracle beside the image it feeds means a run can never pick up a stale copy
+# from the current directory by accident.
+DATA = "testdata"
+os.makedirs(DATA, exist_ok=True)
+
 # --- secp256r1 / NIST P-256 ------------------------------------------------
 P  = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
 A  = P - 3
@@ -65,9 +72,10 @@ G  = (0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296,
 # and looks for exactly these bytes.
 SENT = b"HELLO MICROSOFT!" + b"\x00" * 16
 
-# --- output directory (default oracle/, overridable so a fresh set can be
-# generated and compared against the existing one before swapping) ------------
-OUT = sys.argv[1] if len(sys.argv) > 1 else "oracle"
+# --- output directory --------------------------------------------------------
+# Default testdata/oracle. An explicit argument still overrides it, so a fresh
+# set can be generated beside the existing one and compared before swapping.
+OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(DATA, "oracle")
 
 L = []
 def log(s=""):
@@ -198,3 +206,5 @@ if len(set(blobs)) != 15:
 log("")
 log(f"generated {len(keys)}/15 key+licence pairs in {OUT}\\")
 log("key_NN.pub is deterministic; lic_NN.blob is not (random ephemeral scalar).")
+
+# end of 1-make-oracle.py

@@ -1,5 +1,5 @@
-# =============================================================================
 # 3-derive-map.py  (oracle2) -- magic-independent stage 3
+# =============================================================================
 #
 # Replaces the previous stage 3. Same inputs, same outputs, same JSON schema,
 # so 1-make-oracle.py, 2-decrypt-img.py and 4-derive-plain.py are unchanged.
@@ -30,18 +30,33 @@
 #   1  all discovered sets x licences 01/02/03  -> live set + magic
 #   2  live set x licences 01..0f               -> full permutation
 #
-# OUTPUT  oracle_map.json  {"cluster": rva, "magic": hex, "map": {...}}
-#         derive_map.txt
+# INPUTS   testdata/wbtool_img.bin, testdata/extracted.enc.prv,
+#          testdata/oracle/lic_NN.blob
+# OUTPUT   testdata/oracle_map.json  {"cluster": rva, "magic": hex, "map": {...}}
+#          testdata/derive_map.txt
 # =============================================================================
 
 import ctypes, hashlib, json, os, re, struct, subprocess, sys
 
+# --- paths -------------------------------------------------------------------
+# Every input and every output lives under testdata/. There is deliberately no
+# fallback to the current directory: a stale extracted.enc.prv sitting next to
+# the script can no longer be picked up in place of the intended one.
+DATA = "testdata"
+os.makedirs(DATA, exist_ok=True)
+
+
+def data(name):
+    """testdata/<name> - the only place this pipeline reads or writes."""
+    return os.path.join(DATA, name)
+
+
 DLL    = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
-IMG    = "wbtool_img.bin"
-PRVF   = "extracted.enc.prv"
-ORACLE = "oracle"
-OUTF   = "oracle_map.json"
-LOG    = "derive_map.txt"
+IMG    = data("wbtool_img.bin")
+PRVF   = data("extracted.enc.prv")
+ORACLE = data("oracle")
+OUTF   = data("oracle_map.json")
+LOG    = data("derive_map.txt")
 
 CBLK, CN, CLEN = 16, 64, 0x400
 RWX  = 0x40
@@ -102,7 +117,7 @@ def raw_at(fb, secs, rva, n):
 
 
 def find_sets(img):
-    out = []
+    found = []
     for m in re.finditer(rb"[\x00-\x0f]{%d,}" % CLEN, img):
         lo, hi, o = m.start(), m.end(), m.start()
         while o + CLEN <= hi:
@@ -110,11 +125,11 @@ def find_sets(img):
                 o += 1; continue
             if all(len(set(img[o + i * CBLK:o + (i + 1) * CBLK])) == CBLK
                    for i in range(CN)):
-                out.append(o); o += CLEN
+                found.append(o); o += CLEN
             else:
                 o += 1
-    out.sort()
-    return [(f"set{i}", rva) for i, rva in enumerate(out)]
+    found.sort()
+    return [(f"set{i}", rva) for i, rva in enumerate(found)]
 
 
 def find_consumer(img, heaps):
@@ -157,14 +172,14 @@ if len(sys.argv) > 1 and sys.argv[1] == "--sweep":
     if not base:
         print("LOADFAIL"); sys.stdout.flush(); os._exit(4)
 
-    def wr(rva, data):
-        data = bytes(data)
-        span = (len(data) + 0xFFF) & ~0xFFF
+    def wr(rva, buf):
+        buf = bytes(buf)
+        span = (len(buf) + 0xFFF) & ~0xFFF
         old = ctypes.c_ulong(0)
         a = ctypes.c_void_p(base + rva)
         if not k32.VirtualProtect(a, span, RWX, ctypes.byref(old)):
             return False
-        ctypes.memmove(a, data, len(data))
+        ctypes.memmove(a, buf, len(buf))
         k32.VirtualProtect(a, span, old.value, ctypes.byref(ctypes.c_ulong(0)))
         return True
 
@@ -182,7 +197,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "--sweep":
 
     def carve(r, s):
         """Subtract heap-exec blocks from [r, r+s); return the remaining runs."""
-        out, cur, e = [], r, r + s
+        runs, cur, e = [], r, r + s
         i = 0
         for j, lo in enumerate(los):
             if lo <= r:
@@ -195,13 +210,13 @@ if len(sys.argv) > 1 and sys.argv[1] == "--sweep":
             if lo >= e:
                 break
             if lo > cur:
-                out.append((cur, min(lo, e)))
+                runs.append((cur, min(lo, e)))
             cur = max(cur, hi)
             if cur >= e:
                 break
         if cur < e:
-            out.append((cur, e))
-        return [(a, b - a) for a, b in out if b > a]
+            runs.append((cur, e))
+        return [(a, b - a) for a, b in runs if b > a]
 
     patched = skipped = 0
     for r, s in spans:
@@ -257,15 +272,15 @@ if len(sys.argv) > 1 and sys.argv[1] == "--sweep":
 
     for nn in LICS:
         blob = open(os.path.join(ORACLE, f"lic_{nn:02x}.blob"), "rb").read()
-        rc, sd, out = decrypt(blob)
-        print(f"CTRL {nn:02x} rc=0x{rc:08x} st={sd.hex()} {out.hex()}", flush=True)
+        rc, sd, res = decrypt(blob)
+        print(f"CTRL {nn:02x} rc=0x{rc:08x} st={sd.hex()} {res.hex()}", flush=True)
         for mm in range(16):
             wr(SETRVA, bytes([mm]) * CLEN)
             try:
-                rc, sd, out = decrypt(blob)
+                rc, sd, res = decrypt(blob)
             finally:
                 wr(SETRVA, orig)
-            print(f"OUT {nn:02x} {mm:02x} rc=0x{rc:08x} st={sd.hex()} {out.hex()}",
+            print(f"OUT {nn:02x} {mm:02x} rc=0x{rc:08x} st={sd.hex()} {res.hex()}",
                   flush=True)
     os._exit(0)
 
@@ -432,3 +447,5 @@ json.dump({"cluster": live[1], "magic": MAGIC.hex(),
 log("")
 log(f"written {OUTF}")
 open(LOG, "w", encoding="utf-8").write("\n".join(L) + "\n")
+
+# end of 3-derive-map.py

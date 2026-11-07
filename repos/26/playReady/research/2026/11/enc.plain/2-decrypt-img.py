@@ -1,5 +1,5 @@
-# =============================================================================
 # 2-decrypt-img.py
+# =============================================================================
 #
 # Stage 2 of the chain: decrypt the Warbird-protected code and tables in
 # Windows.Media.Protection.PlayReady.dll into a flat, plaintext image.
@@ -20,20 +20,22 @@
 #       therefore needs its own fresh LoadLibraryW.
 #
 # PIPELINE
-#   1-make-oracle.py   ->  oracle/key_NN.pub, oracle/lic_NN.blob
-#   2-decrypt-img.py   ->  wbtool_img.bin                      (this script)
-#   3-derive-map.py    ->  oracle_map.json
-#   4-derive-plain.py  ->  extracted.enc.plain
+#   1-make-oracle.py   ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
+#   2-decrypt-img.py   ->  testdata/wbtool_img.bin              (this script)
+#   3-derive-map.py    ->  testdata/oracle_map.json
+#   4-derive-plain.py  ->  testdata/extracted.enc.plain
 #
 # INPUT
 #   Windows.Media.Protection.PlayReady.dll, read directly from System32.
 #   Nothing about this build is assumed: descriptor locations, counts, sizes,
 #   the sacrificial slot and its relocation data are all discovered at runtime.
 #
-# OUTPUT
-#   wbtool_img.bin   SizeOfImage bytes, laid out so RVA == file offset.
-#                    Consumed by IMG in 3-derive-map.py and 4-derive-plain.py.
-#   decrypt_img.txt  log: descriptor counts, per-block results, sample bytes.
+# OUTPUT   (both written under testdata/)
+#   testdata/wbtool_img.bin   SizeOfImage bytes, laid out so RVA == file offset.
+#                             Consumed by IMG in 3-derive-map.py and
+#                             4-derive-plain.py.
+#   testdata/decrypt_img.txt  log: descriptor counts, per-block results, sample
+#                             bytes.
 #
 # ACCEPTANCE CHECK
 #   This stage cannot judge itself, because every address and every count is
@@ -63,14 +65,17 @@
 #     before the WB call, or the kernel rejects the descriptor with 0xc000000d.
 # =============================================================================
 
-import ctypes, hashlib, struct, sys
+import ctypes, hashlib, os, struct, sys
 
 # --- inputs / outputs --------------------------------------------------------
 DLL    = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"  # input
-OUT    = "wbtool_img.bin"        # output: consumed by 3-derive-map.py, 4-derive-plain.py
-LOG    = "decrypt_img.txt"       # output: log only
+DATA   = "testdata"              # every artefact is written here
+OUT    = os.path.join(DATA, "wbtool_img.bin")    # consumed by 3- and 4-
+LOG    = os.path.join(DATA, "decrypt_img.txt")   # log only
 
 RWX    = 0x40                    # PAGE_EXECUTE_READWRITE
+
+os.makedirs(DATA, exist_ok=True)
 
 L = []
 def log(s=""):
@@ -303,3 +308,5 @@ log("")
 log(f"written {OUT}  ({len(img):,} bytes)")
 log(f"sha256   {hashlib.sha256(bytes(img)).hexdigest()}")
 finish("", 0)
+
+# end of 2-decrypt-img.py

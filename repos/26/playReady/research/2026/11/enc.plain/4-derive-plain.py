@@ -1,5 +1,5 @@
-# =============================================================================
 # 4-derive-plain.py
+# =============================================================================
 #
 # Stage 4: extracted.enc.prv -> extracted.enc.plain
 #
@@ -34,8 +34,9 @@
 #   by walking the code graph outward from the 0x41-byte key consumer. The public
 #   key decides which (stage 1, stage 2) pairing is real.
 #
-# INPUTS   extracted.enc.prv, extracted.enc.pub, wbtool_img.bin, oracle_map.json
-# OUTPUT   extracted.enc.plain, derive_plain.txt
+# INPUTS   testdata/extracted.enc.prv, testdata/extracted.enc.pub,
+#          testdata/wbtool_img.bin, testdata/oracle_map.json
+# OUTPUT   testdata/extracted.enc.plain, testdata/derive_plain.txt
 #
 # KNOWN PITFALLS
 #   - The stage routines' own blocks must be LEFT CIPHERTEXT. They are heap-exec,
@@ -53,15 +54,28 @@
 
 import bisect, ctypes, hashlib, json, os, struct, subprocess, sys
 
-# --- inputs / outputs --------------------------------------------------------
-DLL   = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
-PRVF  = "extracted.enc.prv"
-PUBF  = "extracted.enc.pub"
-OUTF  = "extracted.enc.plain"
-LOG   = "derive_plain.txt"
+# --- paths -------------------------------------------------------------------
+# Every input and every output lives under testdata/. There is deliberately no
+# fallback to the current directory: a stale extracted.enc.prv or .enc.pub
+# sitting next to the script can no longer be picked up in place of the
+# intended one.
+DATA = "testdata"
+os.makedirs(DATA, exist_ok=True)
 
-IMG   = "wbtool_img.bin"
-MAPF  = "oracle_map.json"
+
+def data(name):
+    """testdata/<name> - the only place this pipeline reads or writes."""
+    return os.path.join(DATA, name)
+
+
+DLL   = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
+PRVF  = data("extracted.enc.prv")
+PUBF  = data("extracted.enc.pub")
+OUTF  = data("extracted.enc.plain")
+LOG   = data("derive_plain.txt")
+
+IMG   = data("wbtool_img.bin")
+MAPF  = data("oracle_map.json")
 
 RWX      = 0x40
 CURVE_N  = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
@@ -197,14 +211,14 @@ def worker(mode, a, b, prep, var):
         if not base:
             say("ERR loadlibrary"); os._exit(4)
 
-        def wr(rva, data):
-            data = bytes(data)
-            span = (len(data) + 0xFFF) & ~0xFFF
+        def wr(rva, buf):
+            buf = bytes(buf)
+            span = (len(buf) + 0xFFF) & ~0xFFF
             old = ctypes.c_ulong(0)
             p = ctypes.c_void_p(base + rva)
             if not k32.VirtualProtect(p, span, RWX, ctypes.byref(old)):
                 return False
-            ctypes.memmove(p, data, len(data))
+            ctypes.memmove(p, buf, len(buf))
             k32.VirtualProtect(p, span, old.value, ctypes.byref(ctypes.c_ulong(0)))
             return True
 
@@ -250,14 +264,14 @@ def worker(mode, a, b, prep, var):
         keep = VEH(onf)
         k32.AddVectoredExceptionHandler(1, keep)
 
-        def op3(desc_rva, ln, status, key, out, size2=None):
+        def op3(desc_rva, ln, status, key, buf_out, size2=None):
             args = ctypes.create_string_buffer(0x40)
             struct.pack_into("<Q", args, 0x00, 3)
             struct.pack_into("<Q", args, 0x08, base + desc_rva)
             struct.pack_into("<Q", args, 0x10, ctypes.addressof(status))
             struct.pack_into("<Q", args, 0x18, ctypes.addressof(key))
             struct.pack_into("<I", args, 0x20, 0x20)
-            struct.pack_into("<Q", args, 0x24, ctypes.addressof(out))
+            struct.pack_into("<Q", args, 0x24, ctypes.addressof(buf_out))
             if size2 is not None:
                 struct.pack_into("<I", args, 0x2C, size2)
             return Raw(0xB9, ctypes.cast(args, ctypes.c_void_p), ln, None) & 0xFFFFFFFF
@@ -372,6 +386,7 @@ log(f"dll    {DLL}")
 log(f"sha256 {hashlib.sha256(fb).hexdigest()}")
 log(f"image  {IMG}  ({len(img):,} bytes, SizeOfImage 0x{sizeImg:x})")
 log(f"prv    {PRVF}  ({len(PRV)} bytes, variant 0x{PRV[0x40]:02x} %3={PRV[0x40] % 3})")
+log(f"pub    {PUBF}")
 log(f"cluster 0x{CLUSTER:06x}  (from {MAPF})")
 if _raw.get("magic"):
     log(f"magic  {_raw['magic']}")
@@ -461,12 +476,12 @@ if not CAND:
 me = os.path.abspath(__file__)
 
 def run(args, tag):
-    """Run one child and return (kind, line, stderr, rc)."""
+    """Run one child and return (kind, line, stderr, rc, prep)."""
     try:
         p = subprocess.run([sys.executable, me] + args,
                            capture_output=True, text=True, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
-        return "TIMEOUT", "", "", -1
+        return "TIMEOUT", "", "", -1, []
     lines = [x for x in (p.stdout or "").splitlines() if x.strip()]
     pre = "--s1" if args[0] == "--s1" else "--s2"
     tagp = "S1" if pre == "--s1" else "S2"
@@ -596,3 +611,5 @@ log(f"written   {OUTF}  ({len(plain)} bytes)  "
     f"sha256 {hashlib.sha256(plain).hexdigest()}")
 
 open(LOG, "w", encoding="utf-8").write("\n".join(L) + "\n")
+
+# end of 4-derive-plain.py
