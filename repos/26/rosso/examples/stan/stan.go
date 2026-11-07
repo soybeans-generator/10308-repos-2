@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/stan"
+   "41.neocities.org/rosso/provider/stan"
    "fmt"
    "log"
    "os"

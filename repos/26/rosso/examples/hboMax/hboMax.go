@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/hboMax"
+   "41.neocities.org/rosso/provider/hboMax"
    "fmt"
    "log"
    "os"

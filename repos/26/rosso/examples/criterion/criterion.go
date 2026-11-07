@@ -3,7 +3,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/criterion"
+   "41.neocities.org/rosso/provider/criterion"
    "fmt"
    "log"
    "net/url"

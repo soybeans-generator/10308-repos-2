@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/plex"
+   "41.neocities.org/rosso/provider/plex"
    "log"
    "os"
 )

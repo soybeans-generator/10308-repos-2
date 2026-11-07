@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/peacock"
+   "41.neocities.org/rosso/provider/peacock"
    "log"
    "os"
    "path"

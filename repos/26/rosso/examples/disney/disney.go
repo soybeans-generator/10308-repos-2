@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/disney"
+   "41.neocities.org/rosso/provider/disney"
    "fmt"
    "log"
    "os"
