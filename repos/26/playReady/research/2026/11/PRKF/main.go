@@ -1,35 +1,36 @@
 // main.go begin
 //go:build windows
 
-// prkf is the PlayReady key-extraction pipeline: seven steps, one binary, one
-// package, one folder. Each step is selected by a flag:
+// prkf is the PlayReady key-extraction pipeline: seven steps across eight
+// files, one binary, one package, one folder. Each step is selected by a flag:
 //
-//   prkf -1   extract.go        carve the CHAI chain, extract key components
-//   prkf -2   findsub.go        locate the signing-key routine descriptor
-//   prkf -3   decrypt.go        decrypt the signing key
-//   prkf -4   make-oracle.go    build the nibble oracle
-//   prkf -5   2-decrypt-img.go  decrypt the Warbird image
-//   prkf -6   3-derive-map.go   derive oracle_map.json
-//   prkf -7   4-derive-plain.go derive extracted.enc.plain
+//   prkf -1   extract.go     carve the CHAI chain, extract the key components
+//   prkf -2   signing.go     locate the signing-key routine descriptor
+//   prkf -3   signing.go     decrypt the signing key
+//   prkf -4   oracle.go      build the nibble oracle
+//   prkf -5   image.go       decrypt the Warbird image
+//   prkf -6   nibblemap.go   derive oracle_map.json
+//   prkf -7   plainkey.go    derive extracted.enc.plain
+//
+// warbird.go is the eighth file and holds no step: it is the kernel call ABI
+// that -2 and -3 share, plus the probe child that -2 re-executes.
 //
 // This file is only the driver: parse the flag, reject arguments, make the
 // testdata directory, dispatch, and name the pipeline's inputs. It holds no
 // step logic.
 //
-// warbird.go holds the kernel call ABI that -2 and -3 share, and the probe
-// child that -2 re-executes. The ABI constants (warbirdOp, argsLen, keyLen,
-// probeEnv) live there; dllPath lives in findsub.go, which owns the DLL the
-// scan reads.
+// -2 and -3 share a file because they are one branch: -2 writes prsubs.json
+// and -3 reads it, and the record is the whole interface between them.
 //
 // Run the steps in order, from the same working directory. -1 feeds both
-// branches: -2 writes prsubs.json for -3 to read, and -4 writes the oracle
-// directory plus the extracted.enc.{pub,prv} pair that -6 and -7 consume. -5
-// writes wbtool_img.bin, which -6 and -7 both read; -6 writes oracle_map.json,
-// which -7 reads. Every path goes through dataFile or the step's own data
-// constants, so the sample is read from testdata/ and everything the pipeline
-// creates lands beside it. The working directory stays clean, and
-// `rm -rf testdata` throws the whole run away - including the sample, which has
-// to be put back before the next run.
+// branches: -2 writes prsubs.json for -3 to read, and -1 writes the
+// extracted.enc.{pub,prv} pair that -6 and -7 consume. -4 writes the oracle
+// directory; -5 writes wbtool_img.bin, which -6 and -7 both read; -6 writes
+// oracle_map.json, which -7 reads. Every path goes through dataFile or the
+// step's own data constants, so the sample is read from testdata/ and
+// everything the pipeline creates lands beside it. The working directory stays
+// clean, and `rm -rf testdata` throws the whole run away - including the
+// sample, which has to be put back before the next run.
 //
 // dllPath is the one path that is not under testdata/: the PlayReady module is
 // read, hashed and mapped where Windows installed it. -5 reads the same module

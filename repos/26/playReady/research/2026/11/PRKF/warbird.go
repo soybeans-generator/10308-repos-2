@@ -1,11 +1,11 @@
 // warbird.go begin
 //go:build windows
 
-// warbird.go is the Warbird call: the kernel's argument block, the routine's
-// status convention, the call itself, and the probe child that exercises one
+// The Warbird call: the kernel's argument block, the routine's status
+// convention, the call itself, and the probe child that exercises one
 // descriptor.
 //
-// Both prkf -2 and prkf -3 make this call, and both go through callWarbird, so
+// prkf -2 and -3 both make this call, and both go through callWarbird, so
 // there is exactly one place where a Go pointer becomes a uintptr. That is not
 // cosmetic: Proc.Call and LazyProc.Call take ...uintptr, so the conversion
 // cannot be avoided, but it can be confined to one function whose contract is
@@ -48,7 +48,7 @@
 // written as "NTSTATUS != 0" will never fire. statusOK is the one
 // implementation of that check.
 //
-// NOTE: dllPath is declared in findsub.go, which owns the DLL the scan reads;
+// NOTE: dllPath is declared in signing.go, which owns the DLL the scan reads;
 // this file borrows it for the child. Everything else here is ABI or the
 // child's own trace.
 package main

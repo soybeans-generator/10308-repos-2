@@ -1,14 +1,14 @@
-// 2-decrypt-img.go begin
+// image.go begin
 //go:build windows
 
 // =============================================================================
 //
-// Stage 2 of the chain: decrypt the Warbird-protected code and tables in
+// prkf -5: decrypt the Warbird-protected code and tables in
 // Windows.Media.Protection.PlayReady.dll into a flat, plaintext image.
 //
 // WHY THIS EXISTS
-//   PlayReady keeps the interesting parts of the library — the license blob
-//   parser, the ECC key handling, the per-nibble bijection subtables — as
+//   PlayReady keeps the interesting parts of the library - the license blob
+//   parser, the ECC key handling, the per-nibble bijection subtables - as
 //   Warbird-encrypted blocks. The decryption keys live in the kernel and are
 //   never exported, but the kernel will decrypt a block on request for any
 //   descriptor whose embedded SHA-256 validates. So the image is decrypted
@@ -22,10 +22,10 @@
 //       therefore needs its own fresh LoadLibraryW.
 //
 // PIPELINE
-//   enc.plain -1  ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
-//   enc.plain -2  ->  testdata/wbtool_img.bin              (this stage)
-//   enc.plain -3  ->  testdata/oracle_map.json
-//   enc.plain -4  ->  testdata/extracted.enc.plain
+//   prkf -4  ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
+//   prkf -5  ->  testdata/wbtool_img.bin              (this step)
+//   prkf -6  ->  testdata/oracle_map.json
+//   prkf -7  ->  testdata/extracted.enc.plain
 //
 // INPUT
 //   Windows.Media.Protection.PlayReady.dll, read directly from System32.
@@ -34,25 +34,26 @@
 //
 // OUTPUT
 //   testdata/wbtool_img.bin   SizeOfImage bytes, laid out so RVA == file offset.
-//                             Consumed by IMG in 3-derive-map and 4-derive-plain.
+//                             Consumed by -6 and -7.
 //   testdata/decrypt_img.txt  log: descriptor counts, per-block results, sample
 //                             bytes.
 //
 // USAGE
-//   enc.plain -2
+//   prkf -5
 //
-//   No flags. The DLL path and both output paths are the constants below.
+//   No flags of its own. The DLL path and both output paths are the constants
+//   below.
 //
 // ACCEPTANCE CHECK
-//   This stage cannot judge itself, because every address and every count is
+//   This step cannot judge itself, because every address and every count is
 //   per-build. What it must report is:
 //       descriptors <n>  segments <n>  heap-exec <n>      (informational)
 //       slot 0x<...>  relocs 0x<...>/<n>                  (resolved, not hardcoded)
 //       segment descriptors <n> ok <n>                    (all must succeed)
 //       heap-exec <n>  changed <n>  unchanged <n>  error 0
-//   The real proof is 4-derive-plain printing pubkey MATCH: that requires the
-//   stage routines to be real code, the blocks they call to be decrypted, and the
-//   live bijection set to be intact. It is the only version-independent check.
+//   The real proof is -7 printing pubkey MATCH: that requires the stage routines
+//   to be real code, the blocks they call to be decrypted, and the live
+//   bijection set to be intact. It is the only version-independent check.
 //
 // DO NOT COMPARE THE FILE HASH BETWEEN RUNS
 //   Every LoadLibraryW bakes the current process load base into IAT slots and
@@ -62,8 +63,8 @@
 // KNOWN PITFALLS
 //   - Descriptor size cap must stay at 0x200000. The two largest descriptors on
 //     the recorded build are 0x829c and 0x3cac; a 0x2000 cap silently skips them,
-//     which loses the gap blocks 0x334290..0x3370ef and makes 4-derive-plain
-//     execute ciphertext.
+//     which loses the gap blocks 0x334290..0x3370ef and makes -7 execute
+//     ciphertext.
 //   - Segment descriptors must be decrypted per descriptor, not per deduped RVA.
 //     Descriptor span lists overlap; deduping by RVA drops later/larger spans
 //     (7818 spans instead of 7937) and corrupts the downstream scalar.
@@ -71,7 +72,7 @@
 //     before the WB call, or the kernel rejects the descriptor with 0xc000000d.
 //
 // BUILD
-//   GOOS=windows GOARCH=amd64 go build -o enc.plain.exe .
+//   GOOS=windows GOARCH=amd64 go build -o prkf.exe .
 //   (requires golang.org/x/sys/windows)
 // =============================================================================
 
@@ -104,7 +105,7 @@ const (
 )
 
 var (
-   diOutPath = filepath.Join(diDataDir, "wbtool_img.bin")  // consumed by 3- and 4-
+   diOutPath = filepath.Join(diDataDir, "wbtool_img.bin")  // consumed by -6 and -7
    diLogPath = filepath.Join(diDataDir, "decrypt_img.txt") // log only
 
    diLogLines []string
@@ -314,8 +315,8 @@ func stageDecryptImg() int {
          size := diU32(b, off+0x20)
          // 0x200000, not 0x2000: the two largest descriptors on the recorded
          // build are 0x829c and 0x3cac bytes. A 0x2000 cap silently skips them,
-         // which loses the gap blocks 0x334290..0x3370ef and makes
-         // 4-derive-plain fault. Do not lower it.
+         // which loses the gap blocks 0x334290..0x3370ef and makes -7 fault.
+         // Do not lower it.
          if size < 0x40 || size > 0x200000 || off+int(size) > len(b) {
             continue
          }
@@ -549,4 +550,4 @@ type diSeg struct {
    size    uint32
 }
 
-// 2-decrypt-img.go end
+// image.go end

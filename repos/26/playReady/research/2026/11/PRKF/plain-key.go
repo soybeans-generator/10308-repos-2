@@ -1,7 +1,7 @@
-// 4-derive-plain.go begin
+// plainkey.go begin
 //go:build windows
 
-// Stage 4 (prkf -7): extracted.enc.prv -> extracted.enc.plain
+// prkf -7: extracted.enc.prv -> extracted.enc.plain
 //
 //   stage 1  prv[0x00:0x20]  --stage-1 routine-->  OBF
 //   stage 2  OBF (mutated in place) --stage-2 routine-->  mut
@@ -527,7 +527,7 @@ func dpLoadMap(raw []byte) (map[int]int, uint32, string, error) {
       return nil, 0, "", err
    }
    if o.Map == nil {
-      return nil, 0, "", fmt.Errorf("%s is in the old flat format - re-run stage 3", dpMapPath)
+      return nil, 0, "", fmt.Errorf("%s is in the old flat format - re-run prkf -6", dpMapPath)
    }
    m := make(map[int]int, len(o.Map))
    for k, v := range o.Map {
@@ -1063,4 +1063,4 @@ type dpSpan struct {
    size uint32
 }
 
-// end of 4-derive-plain.go
+// plainkey.go end

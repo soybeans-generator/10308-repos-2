@@ -1,11 +1,10 @@
-// 3-derive-map.go begin
+// nibblemap.go begin
 //go:build windows
 
-// Magic-independent stage 3 (prkf -6)
+// prkf -6: magic-independent stage 3 of the nibble chain
 // =============================================================================
 //
-// Stage 3: wbtool_img.bin + extracted.enc.prv + the oracle licences
-//          -> oracle_map.json
+// wbtool_img.bin + extracted.enc.prv + the oracle licences -> oracle_map.json
 //
 // DISCRIMINATOR (no magic needed)
 //   For set S, forced mapped nibble m, licence NN:
@@ -774,4 +773,4 @@ func dmRun(setrva uint32, lics []int) dmSweep {
    return r
 }
 
-// end of 3-derive-map.go
+// nibblemap.go end

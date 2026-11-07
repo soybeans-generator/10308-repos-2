@@ -1,7 +1,7 @@
 // extract.go begin
 //go:build windows
 
-// extract.go is prkf -1, in two halves that cannot be run separately.
+// prkf -1, in two halves that cannot be run separately.
 //
 //   cmdCert   carves the CHAI certificate chain out of testdata/msprcore.bla
 //   cmdKeys   parses the PRKF key-material section and writes the components

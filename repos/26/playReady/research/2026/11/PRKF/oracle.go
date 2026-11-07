@@ -1,15 +1,13 @@
-// make-oracle.go begin
-
+// oracle.go begin
 //go:build windows
 
 // =============================================================================
 //
-// Stage 1 of the chain (prkf -4): build the nibble-oracle inputs used by
-// 3-derive-map.go, which is step -6.
+// prkf -4: build the nibble-oracle inputs used by nibblemap.go, which is -6.
 //
 // WHY THIS EXISTS
 //
-//   3-derive-map measures the build's 16-entry nibble permutation by forcing
+//   nibblemap measures the build's 16-entry nibble permutation by forcing
 //   the mapped nibble to a constant value M against a license blob built for a
 //   known key, and checking whether a known plaintext appears. That requires,
 //   for every key nibble N in 0x0N for N in 0..f (excluding 0x00):
@@ -25,7 +23,7 @@
 //   nibble M satisfies MAP[M] = NN.
 //
 //   Nibble 0x00 is skipped here because scalar 0 is not a valid private key;
-//   3-derive-map recovers that entry as the leftover permutation value.
+//   -6 recovers that entry as the leftover permutation value.
 //
 // PIPELINE
 //
@@ -40,7 +38,7 @@
 //
 //   There are no flags of its own. -1 through -7 are the entire command line
 //   surface, and the driver in main.go owns it; every input and output path
-//   here is a constant in the stage that uses it.
+//   here is a constant in the step that uses it.
 //
 // OUTPUTS   (all under testdata/, which is created on demand)
 //
@@ -54,7 +52,7 @@
 //     file hash.
 //   - lic_NN.blob is NOT reproducible: it uses a random ephemeral scalar, so
 //     the bytes differ on every run. Validity is proven instead by
-//     3-derive-map reaching a live set and 4-derive-plain reaching pubkey MATCH.
+//     -6 reaching a live set and -7 reaching pubkey MATCH.
 //
 // ORACLE PRIVATE SCALARS (for reference / manual checks)
 //
@@ -76,13 +74,13 @@ import (
 )
 
 // moData is the artefact root shared by all seven steps. It is the same
-// directory main.go calls outDir; the two are not unified because this stage
+// directory main.go calls outDir; the two are not unified because this step
 // and the three that follow it are self-contained, and outDir is the driver's.
 const moData = "testdata"
 
 // The licence plaintext: signature key = "HELLO MICROSOFT!", content key = zeros.
-// 3-derive-map recovers the magic sequence as the 32-byte output shared by every
-// licence XOR these bytes, so the licence blob has to land exactly on them.
+// -6 recovers the magic sequence as the 32-byte output shared by every licence
+// XOR these bytes, so the licence blob has to land exactly on them.
 const moSentinelText = "HELLO MICROSOFT!"
 
 // --- secp256r1 / NIST P-256 -------------------------------------------------
@@ -411,4 +409,4 @@ func moMul(pt *moPoint, k *big.Int) *moPoint {
    return r
 }
 
-// make-oracle.go end
+// oracle.go end
