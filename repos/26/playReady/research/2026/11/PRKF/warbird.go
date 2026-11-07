@@ -19,14 +19,17 @@
 //
 // # WHY THE PROBE IS A SEPARATE PROCESS
 //
-// This was measured, not assumed. An in-process version was tried: it printed
-// "heap descriptors: 981" and then died on a native exception before the first
-// progress line, having completed almost no descriptors. A fault in a
-// descriptor's code is a Windows SEH exception raised inside the DLL, not a Go
-// panic. The Go runtime only converts exceptions on Go-managed stacks into
-// panics, so recover() never runs and the whole process is terminated. Across
-// 981 arbitrary code blobs that is the normal case, not an edge case, and no
-// skip list can rescue it: each fault would have to be discovered by crashing.
+// A fault in a descriptor's code is a Windows SEH exception raised inside the
+// DLL, not a Go panic. The Go runtime only converts exceptions on Go-managed
+// stacks into panics, so recover() never runs and the whole process is
+// terminated. Across 981 arbitrary code blobs that is the normal case, not an
+// edge case, and no skip list can rescue it: each fault would have to be
+// discovered by crashing, and a crash in the parent would end the scan before
+// it reached the descriptor that matters.
+//
+// One child per descriptor confines a fault to that child. The parent sees a
+// child with no RESULT line, records NO_OUTPUT with the child's exit status
+// and its last trace line, and continues with the next descriptor.
 //
 // # NO DEADLINE
 //

@@ -17,11 +17,6 @@
 // probeEnv) live there; dllPath lives in findsub.go, which owns the DLL the
 // scan reads.
 //
-// Steps -1 and -2 of the old four-step pipeline are now one step. They read
-// the same input (msprcore.bla) and write disjoint outputs; nothing downstream
-// ever wanted the carved chain without the keys, so the split only forced an
-// ordering rule on the caller.
-//
 // Run the steps in order, from the same working directory: -2 writes
 // prsubs.json, -3 reads it, and -3 consumes what -1 wrote. Every path goes
 // through dataFile, so the sample is read from testdata/ and everything the

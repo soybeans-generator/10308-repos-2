@@ -10,25 +10,6 @@
 #
 #   Proven by d*G == extracted.enc.pub. Nothing is written unless it holds.
 #
-# WHAT CHANGED FROM THE PREVIOUS VERSION
-#   1. FAULT REPORTING. The VEH used to print "RESULT FAULT ...", but both
-#      drivers filtered on startswith("S1"/"S2"), so every fault was logged as
-#      "no output" and the fault code / address / module were discarded. The
-#      prefix is now mode-aware: "S1 FAULT" / "S2 FAULT". This is why the
-#      previous log contained no diagnostic for a failing stage 2.
-#   2. STDERR + RETURNCODE are logged whenever a child produces no usable line,
-#      so a traceback or an import error can no longer disappear.
-#   3. PREP IS OVERLAP-SAFE BY DEFAULT. Patch segment spans, but subtract the
-#      heap-exec blocks. wbtool_img.bin holds DECRYPTED code at those RVAs, so
-#      copying it over a block the kernel will decrypt again yields garbage.
-#      PREP=full reproduces the old behaviour, PREP=none patches nothing; both
-#      are selectable so the three can be compared directly.
-#   4. EVERY CALL PRINTS rc AND STATUS, including rejects, so "wrong routine"
-#      and "never called" are distinguishable.
-#   5. ON FAILURE a localization matrix runs automatically: each candidate with
-#      real inputs, then with zeroed inputs, to separate a data-dependent fault
-#      from a structural one.
-#
 # NO ADDRESS IN THIS FILE IS HARDCODED
 #   Both stage routines are selected at runtime by the key's variant byte, found
 #   by walking the code graph outward from the 0x41-byte key consumer. The public
@@ -38,14 +19,29 @@
 #          testdata/wbtool_img.bin, testdata/oracle_map.json
 # OUTPUT   testdata/extracted.enc.plain, testdata/derive_plain.txt
 #
+# REPORTING
+#   Every child prints rc and status for every call, rejects included, so
+#   "wrong routine" and "never called" are distinguishable. A child that
+#   produces no usable line has its stderr and return code logged. The VEH fault
+#   line carries the stage tag - "S1 FAULT" / "S2 FAULT" - which is the prefix
+#   the driver filters on, so a fault is never recorded as "no output".
+#
 # KNOWN PITFALLS
 #   - The stage routines' own blocks must be LEFT CIPHERTEXT. They are heap-exec,
 #     so the kernel decrypts each exactly once during the op=3 call.
 #   - Segment blocks must still be patched, otherwise the helpers the stages call
 #     are ciphertext and the call faults. PREP=carve is the correct middle.
+#   - PREP is overlap-safe by default: it patches segment spans but subtracts the
+#     heap-exec blocks. wbtool_img.bin holds DECRYPTED code at those RVAs, so
+#     copying it over a block the kernel will decrypt again yields garbage.
+#     PREP=full patches whole spans and PREP=none patches nothing; all three are
+#     selectable so they can be compared directly.
 #   - A fault is reported with code, absolute address, signed offset, module and
 #     bytes, then hard-exits via os._exit; sys.exit cannot unwind out of a ctypes
 #     callback.
+#   - On failure a localization matrix runs automatically: each candidate with
+#     real inputs, then with zeroed inputs, to separate a data-dependent fault
+#     from a structural one.
 #
 # SECURITY
 #   extracted.enc.plain decrypts any licence blob addressed to that identity.

@@ -1,6 +1,6 @@
+// 2-decrypt-img.go begin
 //go:build windows
 
-// 2-decrypt-img.go
 // =============================================================================
 //
 // Stage 2 of the chain: decrypt the Warbird-protected code and tables in
@@ -22,10 +22,10 @@
 //       therefore needs its own fresh LoadLibraryW.
 //
 // PIPELINE
-//   1-make-oracle      ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
-//   2-decrypt-img      ->  testdata/wbtool_img.bin              (this program)
-//   3-derive-map       ->  testdata/oracle_map.json
-//   4-derive-plain     ->  testdata/extracted.enc.plain
+//   make-oracle      ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
+//   2-decrypt-img    ->  testdata/wbtool_img.bin              (this program)
+//   3-derive-map     ->  testdata/oracle_map.json
+//   4-derive-plain   ->  testdata/extracted.enc.plain
 //
 // INPUT
 //   Windows.Media.Protection.PlayReady.dll, read directly from System32.
@@ -117,8 +117,8 @@ var (
 // =============================================================================
 
 // call issues op=1 (segment decrypt) for the descriptor at `sac` inside `base`.
-// NTSTATUS comes back in RAX, so r1 is the whole answer; the Python masks it
-// with 0xFFFFFFFF and so do we.
+// NTSTATUS comes back in RAX, so r1 is the whole answer; only the low 32 bits
+// are the status.
 func call(base, sac, rel, num uintptr) uint32 {
    var a [0x30]byte
    binary.LittleEndian.PutUint64(a[0x00:], 1)                // op = 1, segment decrypt
@@ -137,7 +137,7 @@ func call(base, sac, rel, num uintptr) uint32 {
    return uint32(r1)
 }
 
-// commas renders 1234567 as "1,234,567" (Python's {n:,}).
+// commas renders 1234567 as "1,234,567".
 func commas(n int) string {
    neg := n < 0
    if neg {
@@ -166,8 +166,8 @@ func finish(msg string, code int) {
 }
 
 // =============================================================================
-// Logging. The Python version buffers every line and flushes on exit so the
-// log survives an early `finish()`.
+// Logging. Every line is buffered and printed; finish() writes the buffer, so
+// the log survives an early exit.
 // =============================================================================
 
 func logf(format string, a ...any) {
@@ -200,7 +200,6 @@ func main() {
    nsec := int(u16(f, lf+6))   // NumberOfSections
    optsz := int(u16(f, lf+20)) // SizeOfOptionalHeader
    sizeImg := u32(f, lf+24+56) // SizeOfImage
-   // SizeOfHeaders at lf+24+60 is parsed by the Python but never used here.
 
    p := lf + 24 + optsz
    secs := make([]section, 0, nsec)
@@ -222,7 +221,7 @@ func main() {
       start := int(s.rawPtr)
       end := start + int(s.rawSize)
       if end > len(f) {
-         end = len(f) // Python slicing silently truncates; so do we
+         end = len(f) // clamp to the bytes actually present
       }
       if start >= len(f) {
          continue
@@ -325,8 +324,8 @@ func main() {
    //   - decrypt, read back, free
    // =========================================================================
 
-   // decryptBlock returns (rc, plaintext, protFailed). protFailed mirrors the
-   // Python `continue` when VirtualProtect could not make the slot writable.
+   // decryptBlock returns (rc, plaintext, protFailed). protFailed reports that
+   // VirtualProtect could not make the slot writable, so the block was skipped.
    decryptBlock := func(h heap) (rc uint32, got []byte, protFailed bool) {
       lib, err := windows.LoadLibrary(dllPath)
       if err != nil {
@@ -497,8 +496,7 @@ func readMem(base uintptr, n int) []byte {
 }
 
 // =============================================================================
-// Little-endian readers over a byte slice. Panic on out-of-range, same as
-// struct.unpack_from does.
+// Little-endian readers over a byte slice. Panic on out-of-range.
 // =============================================================================
 
 func u16(b []byte, off int) uint16 { return binary.LittleEndian.Uint16(b[off:]) }
@@ -535,3 +533,5 @@ type seg struct {
    fileOff int    // file offset of the descriptor
    size    uint32
 }
+
+// 2-decrypt-img.go end

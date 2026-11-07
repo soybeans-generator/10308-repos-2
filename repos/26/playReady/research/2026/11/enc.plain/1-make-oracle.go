@@ -1,5 +1,5 @@
-// Command make-oracle is the Go translation of 1-make-oracle.py.
-//
+// make-oracle.go begin
+
 // =============================================================================
 //
 // Stage 1 of the chain: build the nibble-oracle inputs used by 3-derive-map.
@@ -26,10 +26,10 @@
 //
 // PIPELINE
 //
-//   1-make-oracle    ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
-//   2-decrypt-img    ->  testdata/wbtool_img.bin
-//   3-derive-map     ->  testdata/oracle_map.json
-//   4-derive-plain   ->  testdata/extracted.enc.plain
+//   make-oracle    ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
+//   2-decrypt-img  ->  testdata/wbtool_img.bin
+//   3-derive-map   ->  testdata/oracle_map.json
+//   4-derive-plain ->  testdata/extracted.enc.plain
 //
 // OUTPUTS   (all under testdata/, which is created on demand)
 //
@@ -39,11 +39,11 @@
 // PROPERTIES
 //
 //   - key_NN.pub is DETERMINISTIC: same bytes on every run, every machine.
-//     Byte-identical to the values recorded during development, so a rebuilt
-//     oracle is verifiable with a file hash.
+//     Byte-identical across runs, so a rebuilt oracle is verifiable with a
+//     file hash.
 //   - lic_NN.blob is NOT reproducible: it uses a random ephemeral scalar, so
 //     the bytes differ on every run. Validity is proven instead by
-//     3-derive-map reaching GOLD match and 4-derive-plain reaching pubkey MATCH.
+//     3-derive-map reaching a live set and 4-derive-plain reaching pubkey MATCH.
 //
 // ORACLE PRIVATE SCALARS (for reference / manual checks)
 //
@@ -65,8 +65,8 @@ import (
 )
 
 // The licence plaintext: signature key = "HELLO MICROSOFT!", content key = zeros.
-// 2-derive-map XORs the routine's 32-byte output with the W10 magic sequence
-// and looks for exactly these bytes.
+// 3-derive-map recovers the magic sequence as the 32-byte output shared by every
+// licence XOR these bytes, so the licence blob has to land exactly on them.
 const sentinelText = "HELLO MICROSOFT!"
 
 // --- secp256r1 / NIST P-256 -------------------------------------------------
@@ -396,3 +396,5 @@ func mul(pt *point, k *big.Int) *point {
    }
    return r
 }
+
+// make-oracle.go end
