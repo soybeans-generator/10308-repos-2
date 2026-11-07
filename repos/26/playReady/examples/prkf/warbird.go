@@ -66,44 +66,27 @@ import (
    "unsafe"
 )
 
-const (
-   // descTotal is the total size of a heap-exec descriptor, digest included.
-   // The descriptor's own size field holds this same value, which is what makes
-   // 0xF0 a signature rather than a guess: every other value belongs to a
-   // segment descriptor.
-   descTotal = 0xF0
+// keyLen is the only kernel-ABI constant kept at package scope, because every
+// step names it: 32 bytes is the P-256 private scalar length, the size -3's
+// routine accepts, and the size it tests for itself with
+// `cmp dword ptr [rcx+10h], 20h`. The other three - op=3, the 0x34-byte args
+// block and the 0xF0 heap-exec size - each appear once or twice and are written
+// where they are used.
+const keyLen = 0x20
 
-   // warbirdOp is op=3 (WbHeapExecuteCall); argsLen is the size of the kernel's
-   // call-args struct. Both are kernel ABI, not build data: the DLL and the
-   // running kernel must agree on them, so neither can change unilaterally.
-   warbirdOp = 3
-   argsLen   = 0x34
-
-   // 32 bytes: the P-256 private scalar length, the size -3's routine accepts,
-   // and the size it tests for itself with `cmp dword ptr [rcx+10h], 20h`.
-   keyLen = 0x20
-
-   // PAGE_EXECUTE_READWRITE
-   wbPAGE_RWX = 0x40
-)
-
-// One entry point per native routine the program calls, shared by every step
-// that needs it. Declaring them here rather than per file is what lets wbPatch
-// and wbVEH exist once: three files patch pages and two install a fault
-// handler, and they all have to agree about which kernel32 they are calling.
+// wbVirtualProtect and wbNtQuery are the only two LazyProcs kept at package
+// scope. Both are called from hot paths - wbPatch runs once per patched range,
+// and NtQuerySystemInformation is the Warbird gate every step calls - so a
+// LazyProc built at the call site would be re-resolved by Find on every call.
+// The other three entry points are each called once and are built where used.
 //
 // K32GetMappedFileNameW, not GetMappedFileNameW: the unprefixed name lives in
 // psapi.dll, and a LazyProc built for it on kernel32 panics on first Call -
 // which here is inside the VEH callback, turning a reported fault into a silent
 // process death.
 var (
-   wbKernel32 = syscall.NewLazyDLL("kernel32.dll")
-   wbNtdll    = syscall.NewLazyDLL("ntdll.dll")
-
-   wbVirtualProtect = wbKernel32.NewProc("VirtualProtect")
-   wbMappedName     = wbKernel32.NewProc("K32GetMappedFileNameW")
-   wbAddVEH         = wbKernel32.NewProc("AddVectoredExceptionHandler")
-   wbNtQuery        = wbNtdll.NewProc("NtQuerySystemInformation")
+   wbVirtualProtect = syscall.NewLazyDLL("kernel32.dll").NewProc("VirtualProtect")
+   wbNtQuery        = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
 )
 
 // callWarbird makes one op=3 call and is the only place a Go pointer becomes a
@@ -123,7 +106,7 @@ var (
 // set, so there is nothing there to check.
 func callWarbird(a *wbArgs) uintptr {
    // SystemExtendedProcessInformation (0xB9) is the Warbird call gate.
-   r1, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(a)), argsLen, 0)
+   r1, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(a)), 0x34, 0)
    runtime.KeepAlive(a)
    return r1
 }
@@ -205,11 +188,13 @@ func wbPatch(base uintptr, rva uint32, buf []byte) bool {
    if len(buf) == 0 {
       return true
    }
+   const rwx = 0x40 // PAGE_EXECUTE_READWRITE
+
    p := base + uintptr(rva)
    n := (uintptr(len(buf)) + 0xFFF) &^ 0xFFF
 
    var old, dummy uint32
-   if r, _, _ := wbVirtualProtect.Call(p, n, wbPAGE_RWX, uintptr(unsafe.Pointer(&old))); r == 0 {
+   if r, _, _ := wbVirtualProtect.Call(p, n, rwx, uintptr(unsafe.Pointer(&old))); r == 0 {
       return false
    }
    copy(unsafe.Slice((*byte)(wbMemAt(p)), len(buf)), buf)
@@ -245,7 +230,8 @@ func wbVEH(base uintptr, say func(string)) bool {
    cb := syscall.NewCallback(func(ep *excPointers) uintptr {
       mod := "-"
       var nm [512]uint16
-      if r, _, _ := wbMappedName.Call(^uintptr(0), ep.Record.Address,
+      if r, _, _ := syscall.NewLazyDLL("kernel32.dll").NewProc("K32GetMappedFileNameW").Call(
+         ^uintptr(0), ep.Record.Address,
          uintptr(unsafe.Pointer(&nm[0])), 512); r != 0 {
          if s := syscall.UTF16ToString(nm[:]); s != "" {
             mod = s[strings.LastIndexByte(s, '\\')+1:]
@@ -263,7 +249,7 @@ func wbVEH(base uintptr, say func(string)) bool {
       os.Exit(3)
       return 0
    })
-   h, _, _ := wbAddVEH.Call(1, cb)
+   h, _, _ := syscall.NewLazyDLL("kernel32.dll").NewProc("AddVectoredExceptionHandler").Call(1, cb)
    return h != 0
 }
 
@@ -365,7 +351,7 @@ func splitDescs(fb []byte, secs []imgSection) (segs, heaps []imgDesc) {
 // the kernel treats that way, and the size field is covered by the digest, so
 // the test cannot be spoofed by a corrupt byte.
 func (d imgDesc) heap() bool {
-   return d.size == descTotal
+   return d.size == 0xF0
 }
 
 // imgInterval is a half-open RVA range: one heap-exec block, or a merged run of
@@ -525,7 +511,7 @@ func segSpans(fb []byte, d imgDesc, sizeImg uint32) []imgSpan {
 // aligned: Go would insert four bytes of padding before a pointer field and
 // move the output pointer to +0x28, where the routine never looks. The struct
 // ends at +0x34; Go rounds its size up to 0x38, but the tail is never written
-// and never read, because the call is told argsLen.
+// and never read, because the call is told 0x34.
 //
 // Status and Key are real *byte fields, so the GC can follow them: keeping a
 // wbArgs alive keeps both buffers alive. Out cannot be followed, which is why
@@ -558,7 +544,7 @@ type wbArgs struct {
 // is the whole point of the call.
 func newWbArgs(descAddr uint64, status, key, out []byte, size uint32) *wbArgs {
    a := &wbArgs{
-      Op:      warbirdOp,
+      Op:      3,
       Desc:    descAddr,
       Status:  &status[0],
       Key:     &key[0],

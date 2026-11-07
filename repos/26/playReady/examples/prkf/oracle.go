@@ -65,6 +65,11 @@
 // EXIT CODES
 //   Nothing here calls os.Exit. stageMakeOracle returns 1 for every fatal
 //   condition, so main owns the only termination in the program.
+//
+// GLOBALS
+//   moN and moP are the only two, and both are read in more than three places.
+//   The curve's B coefficient and the constant 3 each appear once or twice and
+//   are locals in stageMakeOracle, next to the equation they belong to.
 
 package main
 
@@ -80,17 +85,9 @@ import (
    "filippo.io/nistec"
 )
 
-// The licence plaintext: signature key = "HELLO MICROSOFT!", content key = zeros.
-// -6 recovers the magic sequence as the 32-byte output shared by every licence
-// XOR these bytes, so the licence blob has to land exactly on them.
-const moSentinelText = "HELLO MICROSOFT!"
-
 var (
-   moParams = elliptic.P256().Params()
-   moN      = moParams.N
-   moP      = moParams.P
-   moB      = moParams.B
-   moThree  = big.NewInt(3)
+   moN = elliptic.P256().Params().N
+   moP = elliptic.P256().Params().P
 )
 
 // moFail reports a fatal condition on stderr and yields exit code 1. It returns
@@ -145,8 +142,12 @@ func stageMakeOracle() int {
       return moFail("create %s: %v", outDir, err)
    }
 
-   // --- sanity: the sentinel has to be an x-coordinate on the curve
-   sent := append([]byte(moSentinelText), make([]byte, 16)...)
+   // --- sanity: the sentinel has to be an x-coordinate on the curve.
+   // The licence plaintext: signature key = "HELLO MICROSOFT!", content key =
+   // zeros. -6 recovers the magic sequence as the 32-byte output shared by
+   // every licence XOR these bytes, so the licence blob has to land exactly on
+   // them.
+   sent := append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
    if len(sent) != 32 {
       return moFail("sentinel is %d bytes, expected 32", len(sent))
    }
@@ -154,9 +155,10 @@ func stageMakeOracle() int {
 
    // y^2 = x^3 + a*x + b, with a = -3. P = 3 mod 4, so ModSqrt is the square
    // root. SetBytes below is what proves the pair is really on the curve.
-   rhs := new(big.Int).Exp(mx, moThree, moP)
-   rhs.Sub(rhs, new(big.Int).Mul(moThree, mx))
-   rhs.Add(rhs, moB)
+   three := big.NewInt(3)
+   rhs := new(big.Int).Exp(mx, three, moP)
+   rhs.Sub(rhs, new(big.Int).Mul(three, mx))
+   rhs.Add(rhs, elliptic.P256().Params().B)
    rhs.Mod(rhs, moP)
    my := new(big.Int).ModSqrt(rhs, moP)
    if my == nil {

@@ -1,6 +1,3 @@
-pointless fmt
-logf("set%-3d0x%06x  %-26s%-8d%s", i, rva, fmt.Sprint(distinct), len(shared), verdict)
-
 pointless globals
 rule of 3
 

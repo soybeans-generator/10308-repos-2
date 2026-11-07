@@ -12,22 +12,15 @@
 //   prkf -6   nibblemap.go   derive oracle_map.json
 //   prkf -7   plainkey.go    derive extracted.enc.plain
 //
-// Three files hold no step of their own:
+// Three files hold no step of their own: warbird.go is the descriptor format,
+// the PE census, the span and block carving, the kernel ABI, the page patch and
+// the fault handler; child.go is the two bodies this binary re-executes and the
+// trace plumbing they share; main.go is the manifest, the dispatch, and -1.
 //
-//   warbird.go  the descriptor format, the PE census, the span and block
-//               carving, the kernel call ABI, the page patch and the fault
-//               handler - everything -2, -5, -6 and -7 share
-//   child.go    the two bodies this binary re-executes, and the trace plumbing
-//               they share: -2's descriptor probe and -7's trial
-//   main.go     the manifest, the dispatch, and -1
-//
-// # THE SPLIT
-//
-// A step owns its driver. The budget is about 25 KB per file, and the two steps
-// whose driver and child together exceed it (-2 and -7) put the child in
-// child.go - the same split -2 needs anyway, since a fault in a descriptor's
-// code kills the process and the probe has to be its own. -6 keeps its sweep
-// child: driver and worker together still fit.
+// A step owns its driver, and a file may hold about 25 KB. The two steps whose
+// driver and child together exceed that (-2 and -7) put the child in child.go -
+// the split -2 needs anyway, since a fault in a descriptor's code kills the
+// process. -6 keeps its sweep child: driver and worker still fit.
 //
 // # DATA FLOW
 //
@@ -36,15 +29,11 @@
 //   -1 -> -2 -> -3                  the signing key
 //   -1 -> -4, -5 -> -6 -> -7        the encryption key
 //
-// Every artefact lives under outDir (testdata/). Each name is declared once, at
-// the end of this file, so no step spells a path and no two can disagree.
+// Every artefact lives under outDir (testdata/), and each name is declared once
+// at the end of this file, so no step spells a path and no two can disagree:
 //
 //   in   msprcore.bla          the PlayReady sample, put here by hand
-//   -1   extracted.cert        carved CHAI chain
-//   -1   extracted.sig.pub     signing public key
-//   -1   extracted.sig.prv     signing private component, 32 B, obfuscated
-//   -1   extracted.enc.pub     encryption public key
-//   -1   extracted.enc.prv     encryption private component, 65 B
+//   -1   extracted.{cert,sig.pub,sig.prv,enc.pub,enc.prv}
 //   -2   prsubs.json           signing routine descriptor, keyed by DLL sha256
 //   -2   findprsub.txt         per-descriptor probe log
 //   -3   extracted.sig.plain   signing private scalar, 32 B, plain
@@ -57,59 +46,25 @@
 //   -7   extracted.enc.plain   encryption private scalar, 32 B, plain
 //   -7   derive_plain.txt      trial log
 //
-// dllPath is the one path outside outDir. The module is read, hashed and
-// mapped where Windows installed it, never copied: a descriptor is an RVA into
-// that image, so the bytes hashed and the image executed must be the same one.
+// dllPath is the one path outside outDir. The module is read, hashed and mapped
+// where Windows installed it, never copied: a descriptor is an RVA into that
+// image, so the bytes hashed and the image executed must be the same one.
 //
 // # CHILD PROCESSES
 //
-// Three steps re-execute this binary rather than working in-process:
-//
-//   -2  one child per candidate descriptor, selected by PRKF_PROBE_DESC
-//   -6  one child per (set, licence) sweep, selected by the "sweep" argument
-//   -7  one child per (stage 1, stage 2) trial, selected by "s1"/"s2"
-//
-// The first is an environment variable, so `prkf -h` lists the seven steps and
-// nothing else; the other two are positional, so the command line surface stays
-// at exactly -1 through -7. See child.go for why the -2 probe must be its own
-// process.
+// Three steps re-execute this binary rather than working in-process: -2 one
+// child per candidate descriptor, selected by PRKF_PROBE_DESC; -6 one child per
+// (set, licence) sweep, selected by the "sweep" argument; -7 one child per
+// (stage 1, stage 2) trial, selected by "s1"/"s2". The first is an environment
+// variable, so `prkf -h` lists the seven steps and nothing else; the other two
+// are positional, so the command line surface stays at exactly -1 through -7.
 //
 // # EXIT CODES
 //
-// main is the only place in the program that calls os.Exit, with one exception
-// documented at wbVEH: the exception-handler callback, which has no caller to
-// return to and must not panic. Every worker and stage returns its code instead,
-// so "did this step fail" is answered by a signature rather than by a hidden
-// jump.
-//
-// # THE CHAIN (-1, first half)
-//
-// It scans for CHAI headers, keeps only chains that parse self-consistently
-// (the certificate entries must tile the chain exactly), prefers a chain whose
-// preceding u32 big-endian length prefix equals its total length, and writes
-// the carved bytes to certPath.
-//
-// # THE KEYS (-1, second half)
-//
-// It finds the 0x1009 key-material section, parses every 0x100f record inside
-// it, and writes four components:
-//
-//   sigPubPath   signing public key
-//   sigPrvPath   signing private component (32 bytes, still obfuscated)
-//   encPubPath   encryption public key
-//   encPrvPath   encryption private component (65 bytes)
-//
-// The signing record is the one immediately preceding the unique 65-byte
-// encryption record; see the comment at that site for why no header field can
-// discriminate.
-//
-// The structural parse is the only check in either half. No sample key files
-// are consulted: internal consistency identifies the chain, and the record
-// layout plus the uniqueness of the 65-byte private component identify the two
-// keys.
-//
-// Run the steps in order, from the same working directory. `rm -rf testdata`
-// throws the whole run away, including the sample.
+// main is the only place that calls os.Exit, with one exception documented at
+// wbVEH: the callback, which has no caller to return to and must not panic.
+// Every worker and stage returns its code instead. Run the steps in order, from
+// the same working directory; `rm -rf testdata` throws the whole run away.
 package main
 
 import (
@@ -125,10 +80,10 @@ import (
 
 // ------------------------------------------------- first half: the CHAI chain
 
-const (
-   chaiHdr = 20 // magic(4) version(4) total_length(4) flags(4) cert_count(4)
-   certHdr = 16 // magic(4) version(4) total_length(4) certificate_length(4)
-)
+// certHdr is the fixed part of one certificate entry, and it is read in four
+// places in parseChain, so it earns a package-level name. The CHAI header's own
+// size is used twice, both inside parseChain, and is a local there.
+const certHdr = 16 // magic(4) version(4) total_length(4) certificate_length(4)
 
 // ------------------------------------------------------------------ manifest
 
@@ -188,11 +143,6 @@ var (
    plainLogPath = dataFile("derive_plain.txt")
 )
 
-var (
-   magicCHAI = []byte("CHAI")
-   magicCERT = []byte("CERT")
-)
-
 // cmdCert carves the CHAI certificate chain out of corePath and writes it to
 // certPath. Selection is structural: a candidate must tile its own certificate
 // entries exactly, and a chain whose preceding length prefix matches its total
@@ -208,9 +158,10 @@ func cmdCert() error {
    fmt.Printf("%s : %d bytes\n", corePath, len(buf))
 
    // ---- collect every structurally valid candidate -----------------
+   magic := []byte("CHAI")
    var candidates []*chain
    for i := 0; ; {
-      j := bytes.Index(buf[i:], magicCHAI)
+      j := bytes.Index(buf[i:], magic)
       if j < 0 {
          break
       }
@@ -299,8 +250,10 @@ func cmdExtract() error {
 // ---------------------------------------------- second half: the key records
 
 // cmdKeys parses the PRKF key-material section and writes the four key
-// components. It re-reads corePath rather than taking buf from cmdCert: the
-// two halves are independent, and neither holds state for the other.
+// components: sigPubPath, sigPrvPath (32 bytes, still obfuscated), encPubPath
+// and encPrvPath (65 bytes). It re-reads corePath rather than taking buf from
+// cmdCert: the two halves are independent, and neither holds state for the
+// other.
 func cmdKeys() error {
    b, err := os.ReadFile(corePath)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
@@ -540,7 +493,10 @@ type chain struct {
 // version is not needed to locate anything, and the per-certificate lengths
 // are consumed in the loop rather than retained.
 func parseChain(buf []byte, base int) (*chain, bool) {
-   if base < 0 || base+4 > len(buf) || !bytes.Equal(buf[base:base+4], magicCHAI) {
+   // magic(4) version(4) total_length(4) flags(4) cert_count(4)
+   const chaiHdr = 20
+
+   if base < 0 || base+4 > len(buf) || !bytes.Equal(buf[base:base+4], []byte("CHAI")) {
       return nil, false
    }
 
@@ -565,7 +521,7 @@ func parseChain(buf []byte, base int) (*chain, bool) {
    off := base + chaiHdr
 
    for n := uint32(0); n < certCount; n++ {
-      if off+certHdr > end || !bytes.Equal(buf[off:off+4], magicCERT) {
+      if off+certHdr > end || !bytes.Equal(buf[off:off+4], []byte("CERT")) {
          return nil, false
       }
 

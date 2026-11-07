@@ -36,8 +36,8 @@
 // 5 on bad input or a recovered panic, 6 when no fault handler could be
 // installed.
 //
-// NOTE: probeEnv is the -2 selection variable; -6's and -7's children are
-// selected positionally. The ABI (keyLen, warbirdOp, argsLen, wbArgs,
+// NOTE: -2's child is selected by the PRKF_PROBE_DESC environment variable;
+// -6's and -7's children are selected positionally. The ABI (keyLen, wbArgs,
 // newWbArgs, callWarbird, loadWarbird, statusOK) is in warbird.go.
 package main
 
@@ -59,20 +59,11 @@ import (
    "unsafe"
 )
 
-const (
-   // probeEnv carries a descriptor VA into a probe child. runChild sets it on
-   // the children it spawns and nothing else does; the environment is used
-   // instead of a flag so the child mode never appears in `prkf -h`.
-   probeEnv = "PRKF_PROBE_DESC"
-)
-
-var (
-   childT0 = time.Now()
-
-   // dpZ32 is the all-zero 32-byte block the -7 trial child compares a stage-1
-   // output against: a routine that returns zeros has not run.
-   dpZ32 = make([]byte, 0x20)
-)
+// childT0 is the one package-level value here, and it cannot be inlined: its
+// whole job is to capture the process start once, so that every trace line can
+// carry a millisecond offset. Reading time.Now() at the trace site would print
+// 0ms for every line.
+var childT0 = time.Now()
 
 // ------------------------------------------------------- the -7 trial child
 
@@ -171,7 +162,8 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code 
 
       rc := op3(desc, 0x2C, st, kb, ob, nil)
       sd := st[:4]
-      if rc != 0 || !statusOK(sd) || bytes.Equal(ob[:0x20], dpZ32) {
+      var zero [0x20]byte
+      if rc != 0 || !statusOK(sd) || bytes.Equal(ob[:0x20], zero[:]) {
          say("REJECT rc=0x%08x st=%s out=%s",
             rc, hex.EncodeToString(sd), hex.EncodeToString(ob[:0x20]))
       } else {
@@ -275,17 +267,18 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code 
 // probeTarget reports whether this process was started as a probe child, and
 // for which descriptor. Called from main before the FlagSet exists.
 //
-// A malformed value is returned rather than exited on: main is the only place
-// in the program that terminates, and it already knows the exit code for a bad
-// command line.
+// The variable is used instead of a flag so the child mode never appears in
+// `prkf -h`; it is written by runChild and by nothing else. A malformed value is
+// returned rather than exited on: main is the only place in the program that
+// terminates, and it already knows the exit code for a bad command line.
 func probeTarget() (uint32, bool, error) {
-   s := os.Getenv(probeEnv)
+   s := os.Getenv("PRKF_PROBE_DESC")
    if s == "" {
       return 0, false, nil
    }
    v, err := strconv.ParseUint(s, 0, 32)
    if err != nil {
-      return 0, true, fmt.Errorf("%s=%q: %w", probeEnv, s, err)
+      return 0, true, fmt.Errorf("PRKF_PROBE_DESC=%q: %w", s, err)
    }
    return uint32(v), true, nil
 }
@@ -369,7 +362,7 @@ type childOut struct {
 // is the only evidence there is.
 func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
    cmd := exec.Command(self)
-   cmd.Env = append(os.Environ(), probeEnv+"="+fmt.Sprintf("%#x", descVA))
+   cmd.Env = append(os.Environ(), "PRKF_PROBE_DESC="+fmt.Sprintf("%#x", descVA))
 
    var stdout bytes.Buffer
    cmd.Stdout = &stdout
@@ -494,8 +487,8 @@ func (w *worker) probe(tag string, data []byte, size uint32) (*probeResult, erro
    copy(out, fill)
 
    args := newWbArgs(uint64(w.base)+uint64(w.descVA), status, keyBuf, out, size)
-   trace("probe %s calling kernel op=%d desc=%#x status=%p key=%p out=%p size=%#x",
-      tag, warbirdOp, w.base+uintptr(w.descVA), &status[0], &keyBuf[0], &out[0], size)
+   trace("probe %s calling kernel op=3 desc=%#x status=%p key=%p out=%p size=%#x",
+      tag, w.base+uintptr(w.descVA), &status[0], &keyBuf[0], &out[0], size)
 
    r1 := callWarbird(args)
 

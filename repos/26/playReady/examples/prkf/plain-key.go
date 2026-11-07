@@ -59,6 +59,12 @@
 //   - On failure a localization matrix runs automatically: each candidate with
 //     real inputs, then zeroed inputs, to separate a data-dependent fault from a
 //     structural one.
+//
+// GLOBALS
+//   dpPattern is the only one: the size-check signature is read in three places
+//   here and nowhere else. The tuning numbers - timeout, tolerance, window,
+//   hop and block caps - are locals next to the code that uses them, and the
+//   trial child's ABI is in child.go.
 
 package main
 
@@ -79,14 +85,6 @@ import (
    "time"
 )
 
-const (
-   dpTimeout = 300 * time.Second
-   dpTol     = 0x20
-   dpWinSz   = 0x400
-   dpMaxHops = 5
-   dpMaxBlk  = 400
-)
-
 var dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
 
 // One trial, one process.
@@ -97,6 +95,13 @@ var dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
 // variant 0 real inputs / 1 zero out-buffer / 2 all zero / 3 no second size
 
 func dpDriver() (code int) {
+   const (
+      tol     = 0x20 // a lea/call target this close to a descriptor VA is that descriptor
+      winSz   = 0x400
+      maxHops = 5
+      maxBlk  = 400
+   )
+
    var lines []string
    say := func(f string, a ...any) {
       s := fmt.Sprintf(f, a...)
@@ -202,14 +207,14 @@ func dpDriver() (code int) {
    }
    matchDesc := func(t int) (uint32, bool) {
       var best uint32
-      bestDist := dpTol + 1
+      bestDist := tol + 1
       for _, d := range descKeys {
          dist := max(int(d)-t, t-int(d))
          if dist < bestDist {
             best, bestDist = d, dist
          }
       }
-      return best, bestDist <= dpTol
+      return best, bestDist <= tol
    }
 
    sites := bytes.Count(in.img, dpPattern)
@@ -230,7 +235,7 @@ func dpDriver() (code int) {
    visited := map[[2]int]bool{}
    frontier := [][2]int{{int(c0), int(n0)}}
 
-   for depth := 0; len(frontier) > 0 && depth < dpMaxHops && len(visited) < dpMaxBlk; {
+   for depth := 0; len(frontier) > 0 && depth < maxHops && len(visited) < maxBlk; {
       depth++
       var nxt [][2]int
 
@@ -264,7 +269,7 @@ func dpDriver() (code int) {
             if _, c, n, ok := blockOf(t); ok {
                nxt = append(nxt, [2]int{int(c), int(n)})
             } else if t >= 0x1000 && t < len(in.img)-0x40 {
-               nxt = append(nxt, [2]int{t, min(dpWinSz, len(in.img)-t)})
+               nxt = append(nxt, [2]int{t, min(winSz, len(in.img)-t)})
             }
          }
       }
@@ -630,7 +635,7 @@ type dpResult struct {
 // dpRunChild spawns one trial as `exe -7 <mode> <args...>`. Positional, so no
 // flag is ever involved.
 func dpRunChild(exe, mode string, args ...string) dpResult {
-   ctx, cancel := context.WithTimeout(context.Background(), dpTimeout)
+   ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
    defer cancel()
 
    cmd := exec.CommandContext(ctx, exe, append([]string{"-7", mode}, args...)...)

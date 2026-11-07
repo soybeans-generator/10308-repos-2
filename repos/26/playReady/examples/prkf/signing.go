@@ -6,9 +6,9 @@
 // it, both call the same ABI in warbird.go, and both name the same DLL.
 //
 // -2 scans the DLL for Warbird heap-exec descriptors, then re-executes this
-// binary once per candidate, scanWorkers at a time, and reads the RESULT line
-// each child prints. Discovery rests entirely on properties of the routine
-// itself, read from its disassembly - no sample key files:
+// binary once per candidate, eight at a time, and reads the RESULT line each
+// child prints. Discovery rests entirely on properties of the routine itself,
+// read from its disassembly - no sample key files:
 //
 //  1. accepts exactly 0x20 bytes and succeeds
 //     (it begins: cmp dword ptr [rcx+10h], 20h)
@@ -32,10 +32,9 @@
 // never names a growing duration, the parent is stuck rather than a child;
 // Ctrl-Break prints a goroutine dump by itself.
 //
-// NOTE: this file owns scanWorkers and the -2 scan. dllPath is in main.go's
-// manifest; descTotal, scanDescs and splitDescs are in warbird.go; the child
-// this driver spawns - and probeEnv, the variable that selects it - are in
-// child.go.
+// NOTE: dllPath is in main.go's manifest; descTotal's 0xF0 test, scanDescs and
+// splitDescs are in warbird.go; the child this driver spawns, and the
+// PRKF_PROBE_DESC variable that selects it, are in child.go.
 //
 // -3 decrypts sigPrvPath -> sigPlainPath, writing output only after every
 // available check passes.
@@ -61,9 +60,9 @@
 // (E_INVALIDARG) plus an unwritten output buffer; output == input -> wrong
 // routine; d*G != sig.pub -> descriptor, argument layout or input is wrong.
 //
-// NOTE: keyLen, argsLen, statusOK, wbArgs, newWbArgs, loadWarbird and
-// callWarbird are in warbird.go. This half imports neither unsafe nor syscall:
-// the one pointer conversion and the one module load are inside warbird.go.
+// NOTE: keyLen, statusOK, wbArgs, newWbArgs, loadWarbird and callWarbird are
+// in warbird.go. This half imports neither unsafe nor syscall: the one pointer
+// conversion and the one module load are inside warbird.go.
 package main
 
 import (
@@ -82,11 +81,6 @@ import (
    "sync"
    "time"
 )
-
-// How many probe subprocesses run at once. Each child loads the DLL and makes
-// three calls, so this trades process-table pressure for wall clock; 8 keeps a
-// typical machine busy without starving it.
-const scanWorkers = 8
 
 // ------------------------------------------------------------ -3: decrypt
 
@@ -223,10 +217,10 @@ func cmdFindSub() error {
    }
    w("self   " + self)
 
-   // Probe every descriptor, scanWorkers at a time. Each probe is its own
-   // process (see child.go), so the children share nothing and the parent
-   // only collects stdout. Results are stored by descriptor index, so the log
-   // and the ACCEPT lines below stay in descriptor order no matter which child
+   // Probe every descriptor, eight at a time. Each probe is its own process
+   // (see child.go), so the children share nothing and the parent only
+   // collects stdout. Results are stored by descriptor index, so the log and
+   // the ACCEPT lines below stay in descriptor order no matter which child
    // finishes first.
    results := make([]childOut, len(descs))
 
@@ -283,12 +277,11 @@ func cmdFindSub() error {
       }
    }()
 
-   // nw == 0 only when there is nothing to scan, where zero workers is
-   // correct: the send loop below is then empty, so nothing can block.
-   nw := scanWorkers
-   if nw > len(descs) {
-      nw = len(descs)
-   }
+   // Eight workers: each child loads the DLL and makes three calls, so this
+   // trades process-table pressure for wall clock. nw == 0 only when there is
+   // nothing to scan, where zero workers is correct - the send loop below is
+   // then empty, so nothing can block.
+   nw := min(8, len(descs))
 
    jobs := make(chan int)
    var wg sync.WaitGroup
