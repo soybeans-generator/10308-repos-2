@@ -1,29 +1,13 @@
 // findsub.go begin
 //go:build windows
 
-// cmdFindSub implements prkf -2.
+// findsub.go is prkf -2: find the signing-key routine's descriptor.
 //
-// Locates the signing-key routine's descriptor for this DLL build.
-//
-// It re-executes this binary once per candidate descriptor, scanWorkers at a
-// time, and reads the RESULT line each child prints. The child learns which
-// descriptor to probe from an environment variable, so it takes no arguments
-// and no flag of its own.
-//
-// # WHY THE PROBE IS A SEPARATE PROCESS
-//
-// This was measured, not assumed. An in-process version was tried: it printed
-// "heap descriptors: 981" and then died on a native exception before the first
-// progress line, having completed almost no descriptors. A fault in a
-// descriptor's code is a Windows SEH exception raised inside the DLL, not a Go
-// panic. The Go runtime only converts exceptions on Go-managed stacks into
-// panics, so recover() never runs and the whole process is terminated. Across
-// 981 arbitrary code blobs that is the normal case, not an edge case, and no
-// skip list can rescue it: each fault would have to be discovered by crashing.
-//
-// The second reason is timeouts. A goroutine blocked inside
-// NtQuerySystemInformation cannot be cancelled or killed, so probeTimeout is
-// only enforceable by killing a process.
+// It scans the DLL for Warbird heap-exec descriptors, then re-executes this
+// binary once per candidate, scanWorkers at a time, and reads the RESULT line
+// each child prints. The child, the call it makes, and the argument block all
+// live in warbird.go; this file owns the DLL, the descriptor layout, and the
+// parent side of the scan.
 //
 // This program does NOT use sample key files. Discovery rests entirely on
 // properties of the routine itself, read from its disassembly:
@@ -36,11 +20,6 @@
 //     (a key transform cannot ignore its input)
 //  4. REJECTS a size other than 0x20
 //     (property 1's converse; no generic routine enforces this)
-//
-// IMPORTANT: rejection is reported in the STATUS DWORD, not in NTSTATUS.
-// The routine writes 0x80070057 (E_INVALIDARG) to the status pointer and
-// returns normally, so NtQuerySystemInformation still returns 0. A check
-// written as "NTSTATUS != 0" will never fire.
 //
 // Property 4 is the discriminating one - it collapses the large set of
 // descriptors that merely return success. Verification against a real key is
@@ -55,16 +34,40 @@
 // Outputs, both in testdata/:
 //
 //   prsubs.json     build-specific values, keyed by the DLL sha256
-//   findprsub.txt   per-descriptor probe results, for diagnosing a failure
+//   findprsub.txt   per-descriptor probe results and every child's trace
 //
-// NOTE: this file owns the package-wide dllPath, keyLen and outOff constants;
-// prkf -3 uses the same ones rather than redeclaring them.
+// The DLL is the one input that is not in testdata/ - see dllPath.
+//
+// # DIAGNOSTICS
+//
+// A scan that stalls has three possible shapes - one child spinning, several
+// spinning, or the parent deadlocked - and from the progress line alone they
+// look identical. The log distinguishes them:
+//
+//   job N start / job N end   one line per descriptor, with wall clock
+//   trace[i desc] ...         the child's own phase trace, streamed live
+//   watchdog ...              every 5s while work is in flight, names the
+//                             descriptors still running and for how long
+//
+// A stuck descriptor therefore leaves its last trace line as the final record
+// for that index: `probe B begin` means the child never returned from the
+// kernel call for probe B. There is no deadline to cut the run short, so
+// interrupt it and read the log.
+//
+// If the log shows work in flight but the watchdog lines never name a growing
+// duration, the parent itself is stuck rather than a child. This file does not
+// dump the parent's stacks: send the process Ctrl-Break and the Go runtime
+// prints a goroutine dump by itself, which is the same evidence without an
+// import of runtime here.
+//
+// NOTE: this file owns dllPath, descTotal and scanWorkers. keyLen, warbirdOp,
+// argsLen and probeEnv are the Warbird ABI and live in warbird.go, which also
+// holds the probe child; prkf -3 builds the same argument block rather than
+// redeclaring it.
 package main
 
 import (
    "bytes"
-   "context"
-   "crypto/rand"
    "crypto/sha256"
    "debug/pe"
    "encoding/binary"
@@ -73,46 +76,33 @@ import (
    "errors"
    "fmt"
    "os"
-   "os/exec"
-   "runtime"
    "sort"
    "strconv"
    "strings"
    "sync"
-   "syscall"
    "time"
-   "unsafe"
 )
 
 const (
+   // dllPath is the PlayReady module, read and mapped where Windows installed
+   // it. It is the only path in the program outside testdata/, and it stays
+   // outside on purpose: the descriptor is an RVA into the mapped image, so the
+   // bytes hashed here and the image the Warbird gate executes from have to be
+   // the same module, and a copy loaded out of testdata/ is a different
+   // mapping that the gate is not documented to accept. Everything the
+   // pipeline reads or writes goes through dataFile; this one file is read in
+   // place.
    dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
-
-   // 32 bytes: the P-256 private scalar length, the size this routine accepts,
-   // and the size it tests for itself with `cmp dword ptr [rcx+10h], 20h`.
-   keyLen = 0x20
-
-   // The routine reads its output pointer from args+0x14 - i.e. struct+0x24,
-   // because the args it sees begin 0x10 into the kernel's WarbirdCallArgs.
-   // The read is unaligned, so this value cannot be inferred from alignment.
-   outOff = 0x24
 
    // Size of one Warbird heap-exec descriptor, including its 32-byte digest.
    // The descriptor's own size field holds this same value, which is what
    // makes it usable as a signature.
    descTotal = 0xF0
 
-   // Per-descriptor wall-clock budget for the worker subprocess.
-   probeTimeout = 40 * time.Second
-
    // How many probe subprocesses run at once. Each child loads the DLL and
    // makes three calls, so this trades process-table pressure for wall clock;
    // 8 keeps a typical machine busy without starving it.
    scanWorkers = 8
-
-   // probeEnv carries a descriptor VA into a probe child. runChild sets it on
-   // the children it spawns and nothing else does; the environment is used
-   // instead of a flag so the child mode never appears in `prkf -h`.
-   probeEnv = "PRKF_PROBE_DESC"
 )
 
 // cmdFindSub is the entry point for prkf -2.
@@ -134,20 +124,23 @@ func cmdFindSub() error {
    }
    defer f.Close()
 
-   secs := peSections(f)
-   ranges := sectionRanges(secs)
-
-   logPath := outFile("findprsub.txt")
+   logPath := dataFile("findprsub.txt")
    logf, err := os.Create(logPath)
    if err != nil {
       return err
    }
    defer logf.Close()
    // *os.File writes are unbuffered, so each line reaches the log as soon as
-   // it is written - useful when the scan dies partway through.
-   w := func(s string) { fmt.Fprintln(logf, s) }
+   // it is written - useful when the scan dies partway through. logMu exists
+   // because the workers and the watchdog both write.
+   var logMu sync.Mutex
+   w := func(s string) {
+      logMu.Lock()
+      fmt.Fprintln(logf, s)
+      logMu.Unlock()
+   }
 
-   // Deferred, not printed inline: the two error returns below (zero accepted,
+   // Deferred, not printed inline: the error returns below (zero accepted,
    // ambiguous) are exactly when the total time is worth knowing. Registered
    // after logf's Close, so it still has an open file to write to.
    defer func() {
@@ -162,7 +155,7 @@ func cmdFindSub() error {
    w("start  " + start.Format("2006-01-02 15:04:05"))
    w("")
 
-   descs := heapDescs(data, secs, ranges)
+   descs := heapDescs(data, f.Sections)
    w(fmt.Sprintf("heap descriptors: %d", len(descs)))
    fmt.Printf("heap descriptors: %d\n", len(descs))
 
@@ -170,26 +163,73 @@ func cmdFindSub() error {
    if err != nil {
       return err
    }
+   w("self   " + self)
 
    // Probe every descriptor, scanWorkers at a time. Each probe is its own
-   // process (see the file comment), so the children share nothing and the
-   // parent only collects stdout. Results are stored by descriptor index, so
-   // the log and the ACCEPT lines below stay in descriptor order no matter
-   // which child finishes first.
+   // process (see warbird.go), so the children share nothing and the parent
+   // only collects stdout. Results are stored by descriptor index, so the log
+   // and the ACCEPT lines below stay in descriptor order no matter which child
+   // finishes first.
    results := make([]childOut, len(descs))
+
+   type running struct {
+      desc uint32
+      t0   time.Time
+   }
 
    var (
       mu       sync.Mutex
       done     int
       accepted int
+      active   = make(map[int]running)
    )
 
+   // The watchdog answers the question the progress line cannot: when nothing
+   // finishes, is one child stuck or all of them, and for how long. It prints
+   // the descriptors still in flight, never the parent's stacks - see the
+   // diagnostics note at the top of the file.
+   stopWatch := make(chan struct{})
+   watchDone := make(chan struct{})
+   go func() {
+      defer close(watchDone)
+      tk := time.NewTicker(5 * time.Second)
+      defer tk.Stop()
+      for {
+         select {
+         case <-stopWatch:
+            return
+         case <-tk.C:
+            mu.Lock()
+            d, n := done, len(active)
+            snap := make([]string, 0, n)
+            now := time.Now()
+            for idx, r := range active {
+               snap = append(snap, fmt.Sprintf("idx=%d desc=%#x running=%s",
+                  idx, r.desc, now.Sub(r.t0).Round(time.Millisecond)))
+            }
+            mu.Unlock()
+
+            if n == 0 {
+               continue
+            }
+            sort.Strings(snap)
+
+            head := fmt.Sprintf("watchdog: done=%d/%d inflight=%d", d, len(descs), n)
+            w(head)
+            fmt.Println(head)
+            for _, s := range snap {
+               w("  " + s)
+               fmt.Println("  " + s)
+            }
+         }
+      }
+   }()
+
+   // nw == 0 only when there is nothing to scan, where zero workers is
+   // correct: the send loop below is then empty, so nothing can block.
    nw := scanWorkers
    if nw > len(descs) {
       nw = len(descs)
-   }
-   if nw < 1 {
-      nw = 1
    }
 
    jobs := make(chan int)
@@ -199,7 +239,23 @@ func cmdFindSub() error {
       go func() {
          defer wg.Done()
          for i := range jobs {
-            res := runChild(self, descs[i].descVA)
+            desc := descs[i].descVA
+
+            mu.Lock()
+            active[i] = running{desc: desc, t0: time.Now()}
+            mu.Unlock()
+
+            w(fmt.Sprintf("job %d start desc=%#x", i, desc))
+
+            res := runChild(self, i, desc, w)
+
+            mu.Lock()
+            delete(active, i)
+            mu.Unlock()
+
+            w(fmt.Sprintf("job %d end   desc=%#x elapsed=%s exit=%s",
+               i, desc, res.elapsed.Round(time.Millisecond), res.exit))
+
             results[i] = res // distinct index per job: no shared write
 
             mu.Lock()
@@ -220,16 +276,29 @@ func cmdFindSub() error {
    close(jobs)
    wg.Wait()
 
+   // Stopped before the log is read, and waited for: the watchdog writes to
+   // logf, and logf is closed by the deferred Close on return.
+   close(stopWatch)
+   <-watchDone
+
    var acc []descriptor
+   var slow []int
    for i, res := range results {
       w(res.line)
-      if res.stderr != "" {
-         w("  stderr: " + res.stderr)
+      if res.elapsed > time.Second {
+         slow = append(slow, i)
       }
       if strings.Contains(res.line, " ACCEPT ") {
          acc = append(acc, descs[i])
          fmt.Println("ACCEPT " + res.line)
       }
+   }
+
+   w("")
+   w(fmt.Sprintf("children slower than 1s: %d", len(slow)))
+   for _, i := range slow {
+      w(fmt.Sprintf("  idx=%d desc=%#x elapsed=%s exit=%s",
+         i, descs[i].descVA, results[i].elapsed.Round(time.Millisecond), results[i].exit))
    }
 
    w("")
@@ -252,22 +321,18 @@ func cmdFindSub() error {
    d := acc[0]
    rec := subRecord{
       SHA256:  shaHex,
-      DLLSize: len(data),
       DescVA:  d.descVA,
       CodeRVA: d.codeRVA,
       SegLen:  d.codeLen,
    }
 
-   pretty, err := json.MarshalIndent(rec, "", "  ")
-   if err != nil {
-      return err
-   }
-   cachePath := outFile("prsubs.json")
-   if err := os.WriteFile(cachePath, pretty, 0o644); err != nil {
-      return err
-   }
+   // One marshal: the cache is the same text the log and stdout carry.
    compact, err := json.Marshal(rec)
    if err != nil {
+      return err
+   }
+   cachePath := dataFile("prsubs.json")
+   if err := os.WriteFile(cachePath, compact, 0o644); err != nil {
       return err
    }
 
@@ -277,126 +342,6 @@ func cmdFindSub() error {
    fmt.Println("written " + cachePath)
    fmt.Printf("cache: %s\n", compact)
    return nil
-}
-
-func firstLine(s string) string {
-   for _, l := range strings.Split(s, "\n") {
-      l = strings.TrimSpace(l)
-      if l == "" {
-         continue
-      }
-      if len(l) > 200 {
-         l = l[:200] + "..."
-      }
-      return l
-   }
-   return ""
-}
-
-func inside(rva, length uint32, ranges []rng) bool {
-   lo := uint64(rva)
-   hi := lo + uint64(length)
-   for _, r := range ranges {
-      if r.lo <= lo && hi <= r.hi {
-         return true
-      }
-   }
-   return false
-}
-
-// probeTarget reports whether this process was started as a probe child, and
-// for which descriptor. Called from main before the FlagSet exists.
-func probeTarget() (uint32, bool) {
-   s := os.Getenv(probeEnv)
-   if s == "" {
-      return 0, false
-   }
-   v, err := strconv.ParseUint(s, 0, 32)
-   if err != nil {
-      fmt.Fprintf(os.Stderr, "prkf: %s=%q: %v\n", probeEnv, s, err)
-      os.Exit(2)
-   }
-   return uint32(v), true
-}
-
-func runOne(descVA uint32) {
-   // Two distinct 32-byte inputs: the routine must map them to distinct
-   // outputs, which is what distinguishes a transform from a copy.
-   inputA := make([]byte, keyLen)
-   for i := range inputA {
-      inputA[i] = byte(i)
-   }
-   inputB := make([]byte, keyLen)
-   for i := range inputB {
-      inputB[i] = byte(keyLen + i)
-   }
-
-   dll, err := syscall.LoadDLL(dllPath)
-   if err != nil {
-      fmt.Fprintf(os.Stderr, "LoadLibrary %s: %v\n", dllPath, err)
-      os.Exit(2)
-   }
-
-   w := &worker{
-      ntq:    syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation"),
-      base:   uintptr(dll.Handle), // HMODULE == image base for a DLL
-      descVA: descVA,
-      got:    make(map[string]*probeResult, 3),
-   }
-
-   w.probe("A", inputA, keyLen)
-   w.probe("B", inputB, keyLen)
-   w.probe("C", inputA, keyLen-1) // one byte short - must be rejected
-   w.emit(inputA, inputB)
-}
-
-func sawSuccess(r *probeResult) bool {
-   // Success is NTSTATUS 0 AND a zero status dword - not NTSTATUS alone.
-   return r != nil && r.ntstatus == 0 && bytes.Equal(r.status, []byte{0, 0, 0, 0})
-}
-
-type childOut struct {
-   line   string // the RESULT line, synthesized if the child died
-   stderr string // first non-empty stderr line, for the log
-}
-
-// runChild re-executes this binary as the worker for one descriptor.
-func runChild(self string, descVA uint32) childOut {
-   ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-   defer cancel()
-
-   // The descriptor travels in the environment (see probeEnv); the child gets
-   // no arguments at all.
-   cmd := exec.CommandContext(ctx, self)
-   cmd.Env = append(os.Environ(), probeEnv+"="+fmt.Sprintf("%#x", descVA))
-
-   var stdout, stderr bytes.Buffer
-   cmd.Stdout = &stdout
-   cmd.Stderr = &stderr
-
-   // A crash or a timeout is a legitimate REJECT, not a driver error.
-   _ = cmd.Run()
-
-   last := ""
-   for _, l := range strings.Split(stdout.String(), "\n") {
-      l = strings.TrimRight(l, "\r")
-      if strings.HasPrefix(l, "RESULT") {
-         return childOut{line: l}
-      }
-      if strings.HasPrefix(l, "PROBE ") {
-         last = strings.TrimSpace(strings.TrimPrefix(l, "PROBE "))
-      }
-   }
-
-   note := firstLine(stderr.String())
-   switch {
-   case ctx.Err() == context.DeadlineExceeded:
-      return childOut{line: fmt.Sprintf("RESULT %#x TIMEOUT (probe %s)", descVA, last), stderr: note}
-   case last != "":
-      return childOut{line: fmt.Sprintf("RESULT %#x REJECT FAULT (probe %s)", descVA, last), stderr: note}
-   default:
-      return childOut{line: fmt.Sprintf("RESULT %#x NO_OUTPUT", descVA), stderr: note}
-   }
 }
 
 // ------------------------------------------------------------- descriptors
@@ -420,20 +365,32 @@ type descriptor struct {
 //
 // Only descriptors whose code segment lies entirely inside a mapped section
 // are returned, sorted by code RVA.
-func heapDescs(data []byte, secs []peSection, ranges []rng) []descriptor {
+func heapDescs(data []byte, secs []*pe.Section) []descriptor {
+   // A section is mapped over the larger of its virtual and raw extents, so a
+   // code span is rejected only when it lies outside both. Built once: it is
+   // consulted for every candidate in every section.
+   ranges := make([]rng, 0, len(secs))
+   for _, s := range secs {
+      extent := uint64(s.VirtualSize)
+      if uint64(s.Size) > extent {
+         extent = uint64(s.Size)
+      }
+      ranges = append(ranges, rng{uint64(s.VirtualAddress), uint64(s.VirtualAddress) + extent})
+   }
+
    type key struct{ va, rva, ln uint32 }
    found := make(map[key]struct{})
    le := binary.LittleEndian
 
    for _, s := range secs {
-      if s.rawSize < descTotal {
+      if s.Size < descTotal {
          continue
       }
-      start := int(s.rawPtr)
+      start := int(s.Offset)
       if start >= len(data) {
          continue
       }
-      end := start + int(s.rawSize)
+      end := start + int(s.Size)
       if end > len(data) {
          end = len(data) // clamp to the bytes actually present
       }
@@ -457,8 +414,15 @@ func heapDescs(data []byte, secs []peSection, ranges []rng) []descriptor {
          // top nibble of both fields is a flag; the rest is an RVA
          codeRVA := encrVA & 0x0FFFFFFF
          codeLen := codeSz & 0x0FFFFFFF
-         if codeLen != 0 && inside(codeRVA, codeLen, ranges) {
-            found[key{descVA & 0x0FFFFFFF, codeRVA, codeLen}] = struct{}{}
+         if codeLen == 0 {
+            continue
+         }
+         lo, hi := uint64(codeRVA), uint64(codeRVA)+uint64(codeLen)
+         for _, r := range ranges {
+            if r.lo <= lo && hi <= r.hi {
+               found[key{descVA & 0x0FFFFFFF, codeRVA, codeLen}] = struct{}{}
+               break
+            }
          }
       }
    }
@@ -467,7 +431,9 @@ func heapDescs(data []byte, secs []peSection, ranges []rng) []descriptor {
    for k := range found {
       out = append(out, descriptor{descVA: k.va, codeRVA: k.rva, codeLen: k.ln})
    }
-   sort.SliceStable(out, func(i, j int) bool {
+   // A total order over keys the map already deduplicated: no equal elements
+   // can reach the comparator, so stability would buy nothing.
+   sort.Slice(out, func(i, j int) bool {
       a, b := out[i], out[j]
       if a.codeRVA != b.codeRVA {
          return a.codeRVA < b.codeRVA
@@ -480,149 +446,16 @@ func heapDescs(data []byte, secs []peSection, ranges []rng) []descriptor {
    return out
 }
 
-// ---------------------------------------------------------------- PE layout
-
-type peSection struct {
-   vaddr, vsize, rawPtr, rawSize uint32
-}
-
-func peSections(f *pe.File) []peSection {
-   out := make([]peSection, 0, len(f.Sections))
-   for _, s := range f.Sections {
-      out = append(out, peSection{
-         vaddr:   s.VirtualAddress,
-         vsize:   s.VirtualSize,
-         rawPtr:  s.Offset, // PointerToRawData
-         rawSize: s.Size,   // SizeOfRawData
-      })
-   }
-   return out
-}
-
-// ------------------------------------------------------- worker: the probes
-
-type probeResult struct {
-   ntstatus uint32
-   status   []byte // the 4 status bytes the routine wrote
-   out      []byte
-   fill     []byte
-}
-
+// rng is one mapped section's address extent.
 type rng struct{ lo, hi uint64 }
 
-func sectionRanges(secs []peSection) []rng {
-   out := make([]rng, 0, len(secs))
-   for _, s := range secs {
-      extent := uint64(s.vsize)
-      if uint64(s.rawSize) > extent {
-         extent = uint64(s.rawSize)
-      }
-      out = append(out, rng{uint64(s.vaddr), uint64(s.vaddr) + extent})
-   }
-   return out
-}
-
-// ---------------------------------------------------------------- driver
+// ---------------------------------------------------------------- the cache
 
 type subRecord struct {
    SHA256  string `json:"sha256"`
-   DLLSize int    `json:"dll_size"`
    DescVA  uint32 `json:"desc_va"`
    CodeRVA uint32 `json:"code_rva"`
    SegLen  uint32 `json:"seg_len"`
-}
-
-type worker struct {
-   ntq    *syscall.LazyProc
-   base   uintptr
-   descVA uint32
-   got    map[string]*probeResult
-}
-
-func (w *worker) emit(inputA, inputB []byte) {
-   // All three probes ran: probe() either stores its result or kills the
-   // process, so every key is present here.
-   a, b, c := w.got["A"], w.got["B"], w.got["C"]
-
-   okAccept := sawSuccess(a) && !bytes.Equal(a.out, a.fill) && !bytes.Equal(a.out, inputA)
-   okAccept2 := sawSuccess(b) && !bytes.Equal(b.out, b.fill) && !bytes.Equal(b.out, inputB)
-   okInput := !bytes.Equal(a.out, b.out)
-   okReject := !sawSuccess(c)
-
-   verdict := "REJECT"
-   if okAccept && okAccept2 && okInput && okReject {
-      verdict = "ACCEPT"
-   }
-
-   fmt.Printf("RESULT %#x %s "+
-      "A(st=%#010x,sv=%s) "+
-      "B(st=%#010x,sv=%s) "+
-      "C(st=%#010x,sv=%s) "+
-      "input_dep=%t size_enforced=%t out=%s\n",
-      w.descVA, verdict,
-      a.ntstatus, hex.EncodeToString(a.status),
-      b.ntstatus, hex.EncodeToString(b.status),
-      c.ntstatus, hex.EncodeToString(c.status),
-      okInput, okReject,
-      hex.EncodeToString(a.out))
-   os.Exit(0) // skip deferred cleanup: the worker has nothing to flush
-}
-
-// probe performs one WB heap-exec call.
-//
-// Arg block for the kernel's WarbirdCallArgs with op=3. The arguments the
-// routine itself sees begin at +0x10, which is why the routine's documented
-// +0x14 output field lands at +0x24 here:
-//
-//   +0x00  op = 3 (WbHeapExecuteCall)
-//   +0x08  descriptor address
-//   +0x10  -> status dword
-//   +0x18  -> 32-byte key
-//   +0x20  u32 key size
-//   +0x24  -> output buffer
-func (w *worker) probe(tag string, data []byte, size uint32) {
-   // Announce progress on stdout. If the descriptor's code faults, this
-   // process dies before it can report, and the driver attributes the crash
-   // to the last tag seen.
-   fmt.Printf("PROBE %s\n", tag)
-
-   fill := make([]byte, keyLen)
-   if _, err := rand.Read(fill); err != nil {
-      fmt.Fprintf(os.Stderr, "rand: %v\n", err)
-      os.Exit(2)
-   }
-   keyBuf := make([]byte, keyLen)
-   copy(keyBuf, data) // always keyLen bytes; a short data leaves the tail zero
-   status := make([]byte, 0x10)
-   out := make([]byte, keyLen)
-   copy(out, fill)
-
-   args := make([]byte, 0x34)
-   le := binary.LittleEndian
-   le.PutUint64(args[0x00:], 3)
-   le.PutUint64(args[0x08:], uint64(w.base)+uint64(w.descVA))
-   le.PutUint64(args[0x10:], uint64(uintptr(unsafe.Pointer(&status[0]))))
-   le.PutUint64(args[0x18:], uint64(uintptr(unsafe.Pointer(&keyBuf[0]))))
-   le.PutUint32(args[0x20:], size)
-   le.PutUint64(args[outOff:], uint64(uintptr(unsafe.Pointer(&out[0]))))
-
-   r1, _, _ := w.ntq.Call(0xB9, uintptr(unsafe.Pointer(&args[0])), 0x34, 0)
-
-   // The pointers above are hidden from the GC behind uintptr; keep every
-   // backing array alive across the call.
-   runtime.KeepAlive(args)
-   runtime.KeepAlive(keyBuf)
-   runtime.KeepAlive(status)
-   runtime.KeepAlive(out)
-
-   sv := make([]byte, 4)
-   copy(sv, status[:4])
-   w.got[tag] = &probeResult{
-      ntstatus: uint32(r1),
-      status:   sv,
-      out:      out,
-      fill:     fill,
-   }
 }
 
 // findsub.go end

@@ -2,173 +2,65 @@
 //go:build windows
 
 // prkf is the PlayReady key-extraction pipeline: three steps, one binary, one
-// package, one folder. Each step is selected by a flag and keeps its
-// implementation in the file it was always in:
+// package, one folder. Each step is selected by a flag:
 //
-//   prkf -1    main.go + keys.go   carve the CHAI chain, extract key components
-//   prkf -2    findsub.go          locate the signing-key routine descriptor
-//   prkf -3    decrypt.go          decrypt the signing key
+//   prkf -1    extract.go   carve the CHAI chain, extract key components
+//   prkf -2    findsub.go   locate the signing-key routine descriptor
+//   prkf -3    decrypt.go   decrypt the signing key
 //
-// Steps -1 and -2 of the old four-step pipeline are now one step. They read
-// the same input (msprcore.bla) and write disjoint outputs; nothing downstream
-// ever wanted the carved chain without the keys, so the split only forced an
-// ordering rule on the caller. The two implementations stay in separate files,
-// because carving a container and parsing its records are different jobs, but
-// prkf -1 runs both and fails if either half fails.
+// This file is only the driver: parse the flag, reject arguments, make the
+// testdata directory, dispatch, and name the pipeline's one input. It holds no
+// step logic.
 //
-// Run the steps in order, in one directory: -2 writes prsubs.json, -3 reads
-// it, and -3 consumes what -1 wrote. Every file the pipeline creates lands in
-// testdata/, so a run is disposable and the working directory stays clean.
+// warbird.go holds the kernel call ABI that -2 and -3 share, and the probe
+// child that -2 re-executes. The ABI constants (warbirdOp, argsLen, keyLen,
+// probeEnv) live there; dllPath lives in findsub.go, which owns the DLL the
+// scan reads.
+//
+// Run the steps in order, from the same working directory: -2 writes
+// prsubs.json, -3 reads it, and -3 consumes what -1 wrote. Every path goes
+// through dataFile, so the sample is read from testdata/ and everything the
+// pipeline creates lands beside it. The working directory stays clean, and
+// `rm -rf testdata` throws the whole run away - including the sample, which
+// has to be put back before the next run.
+//
+// dllPath is the one path that is not under testdata/: the PlayReady module is
+// read, hashed and mapped where Windows installed it.
 //
 // -2 also re-executes this binary, one child per candidate descriptor, to
 // probe it. The child is selected by an environment variable rather than a
 // flag or an argument, so `prkf -h` lists the three steps and nothing else.
-// See findsub.go for why the probe must be a separate process.
-//
-// The four files share one namespace, so a handful of identifiers had to be
-// renamed: see the note at the top of each file.
+// See warbird.go for why the probe must be a separate process.
 package main
 
 import (
-   "bytes"
-   "encoding/binary"
-   "errors"
    "flag"
    "fmt"
    "os"
    "path/filepath"
 )
 
-// ------------------------------------------------------- step 1: the chain
-
-const (
-   corePath = "msprcore.bla" // input, working directory
-   certOut  = "extracted.cert"
-
-   chaiHdr = 20 // magic(4) version(4) total_length(4) flags(4) cert_count(4)
-   certHdr = 16 // magic(4) version(4) total_length(4) certificate_length(4)
-)
-
-// ------------------------------------------------------------------ driver
-
-// outDir is where every file this program creates is written. Inputs are
-// still read from the working directory (msprcore.bla); only outputs are
-// redirected here.
+// outDir is the one directory the pipeline uses: the sample it reads and every
+// file it writes. Inputs are fixtures here, not in the working directory, so a
+// run touches nothing outside it and can be discarded as a unit.
 //
-// Nothing else in the pipeline should spell a directory: write through
-// outFile so the whole run can be thrown away with `rm -rf testdata`.
+// Nothing else in the pipeline should spell a directory: read and write
+// through dataFile.
 const outDir = "testdata"
 
-var (
-   magicCHAI = []byte("CHAI")
-   magicCERT = []byte("CERT")
-)
-
-// cmdCert is the first half of prkf -1.
+// corePath is the pipeline's one input, read from testdata/ like every other
+// path. Both halves of prkf -1 read it, so it is named here, by the driver,
+// rather than by either half.
 //
-// Carves the CHAI certificate chain out of msprcore.bla.
-//
-// It scans for CHAI headers, keeps only chains that parse self-consistently
-// (the certificate entries must tile the chain exactly), prefers a chain
-// whose preceding u32 big-endian length prefix equals its total length, and
-// writes the carved bytes to testdata/extracted.cert.
-//
-// The structural parse is the only check. A candidate must be internally
-// consistent to be considered at all, and no reference file is consulted.
-//
-// All names are fixed below; the driver has already rejected arguments.
-func cmdCert() error {
-   if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
-      return errors.New("missing input: " + corePath)
-   }
-   buf, err := os.ReadFile(corePath)
-   if err != nil {
-      return err
-   }
-   fmt.Printf("%s : %d bytes\n", corePath, len(buf))
-
-   // ---- collect every structurally valid candidate -----------------
-   var candidates []*chain
-   for i := 0; ; {
-      j := bytes.Index(buf[i:], magicCHAI)
-      if j < 0 {
-         break
-      }
-      i += j
-      if c, ok := parseChain(buf, i); ok {
-         candidates = append(candidates, c)
-      }
-      i++
-   }
-
-   if len(candidates) == 0 {
-      return errors.New("no valid CHAI chain found")
-   }
-
-   fmt.Printf("\n%d valid CHAI candidate(s):\n", len(candidates))
-   for _, c := range candidates {
-      tag := "no length prefix"
-      if c.prefixOK {
-         tag = "length-prefix confirmed"
-      }
-      fmt.Printf("  @ 0x%x  %d bytes  %d certs  flags=0x%x  [%s]\n",
-         c.base, c.totalLength, c.certCount, c.flags, tag)
-   }
-
-   // prefer the length-prefix-confirmed chain; fall back to first valid
-   ch := candidates[0]
-   for _, c := range candidates {
-      if c.prefixOK {
-         ch = c
-         break
-      }
-   }
-   if len(candidates) > 1 {
-      how := "first valid, unconfirmed"
-      if ch.prefixOK {
-         how = "length prefix"
-      }
-      fmt.Printf("\nselected 0x%x (%s)\n", ch.base, how)
-   }
-
-   base, totalLength := ch.base, ch.totalLength
-   blob := buf[base : base+int(totalLength)]
-
-   // ---- context around the chain -----------------------------------
-   lo := base - 16
-   if lo < 0 {
-      lo = 0
-   }
-   fmt.Printf("\nbytes 0x%x..0x%x (before CHAI):\n", lo, base)
-   fmt.Printf("  % x\n", buf[lo:base])
-   switch {
-   case !ch.hasPrefix:
-      fmt.Println("  (chain starts before offset 4 - no length prefix possible)")
-   case ch.prefixOK:
-      fmt.Printf("u32be at CHAI-4 = 0x%08x == chain length -> PRKF length-prefix confirmed\n", ch.prefix)
-   default:
-      fmt.Printf("u32be at CHAI-4 = 0x%08x != chain length (%d) -> not a PRKF-length-prefixed span\n",
-         ch.prefix, totalLength)
-   }
-
-   for _, w := range ch.warnings {
-      fmt.Printf("warning: %s\n", w)
-   }
-
-   // ---- write ------------------------------------------------------
-   out := outFile(certOut)
-   if err := os.WriteFile(out, blob, 0o644); err != nil {
-      return err
-   }
-   fmt.Printf("\nwrote %s (%d bytes)\n", out, len(blob))
-   return nil
-}
+// It is a var, not a const, only because dataFile resolves outDir; outDir is
+// itself a constant, so the value is fixed for the life of the process.
+var corePath = dataFile("msprcore.bla")
 
 // cmdExtract implements prkf -1: carve the chain, then extract the keys.
 //
 // The two halves read the same file and write disjoint outputs, so the order
 // is arbitrary. Carving runs first because it is the cheaper structural check
-// on msprcore.bla and its failure message is more specific than "not a PRKF".
+// on the sample and its failure message is more specific than "not a PRKF".
 //
 // A failure in either half aborts the step: a run that produced a chain but no
 // keys is not a state any later step can use.
@@ -178,6 +70,13 @@ func cmdExtract() error {
    }
    fmt.Println() // separate the two halves' reports
    return cmdKeys()
+}
+
+// dataFile returns the path inside outDir for a pipeline file, whether the
+// pipeline reads it or writes it. Both directions go through here, so no step
+// has to know the directory's name and no file can escape it.
+func dataFile(name string) string {
+   return filepath.Join(outDir, name)
 }
 
 // ensureOutDir creates outDir if it does not exist. Called once from main
@@ -196,12 +95,12 @@ func main() {
    }
 
    step1 := flag.Bool("1", false,
-      "carve the CHAI chain ("+outFile("extracted.cert")+") and extract the key "+
-         "components ("+outFile("extracted")+".{sig,enc}.{pub,prv})")
+      "carve the CHAI chain ("+dataFile("extracted.cert")+") and extract the key "+
+         "components ("+dataFile("extracted")+".{sig,enc}.{pub,prv})")
    step2 := flag.Bool("2", false,
-      "locate the signing-key routine ("+outFile("prsubs.json")+", "+outFile("findprsub.txt")+")")
+      "locate the signing-key routine ("+dataFile("prsubs.json")+", "+dataFile("findprsub.txt")+")")
    step3 := flag.Bool("3", false,
-      "decrypt the signing key ("+outFile("extracted.sig.plain")+")")
+      "decrypt the signing key ("+dataFile("extracted.sig.plain")+")")
 
    flag.Parse()
 
@@ -247,103 +146,6 @@ func main() {
       fmt.Fprintln(os.Stderr, err)
       os.Exit(1)
    }
-}
-
-// outFile returns the path inside outDir for a pipeline-written file.
-func outFile(name string) string {
-   return filepath.Join(outDir, name)
-}
-
-// u32be reads a big-endian uint32 at off, reporting whether it fit.
-func u32be(buf []byte, off int) (uint32, bool) {
-   if off < 0 || off+4 > len(buf) {
-      return 0, false
-   }
-   return binary.BigEndian.Uint32(buf[off:]), true
-}
-
-type chain struct {
-   base        int
-   totalLength uint32
-   flags       uint32
-   certCount   uint32
-   warnings    []string
-   prefix      uint32
-   hasPrefix   bool
-   prefixOK    bool
-}
-
-// parseChain is a self-validating parse of a CHAI chain at base.
-//
-// Only the header fields that are actually used are decoded: the certificate
-// version is not needed to locate anything, and the per-certificate lengths
-// are consumed in the loop rather than retained.
-func parseChain(buf []byte, base int) (*chain, bool) {
-   if base < 0 || base+4 > len(buf) || !bytes.Equal(buf[base:base+4], magicCHAI) {
-      return nil, false
-   }
-
-   totalLength, okTL := u32be(buf, base+8)
-   flags, okFl := u32be(buf, base+12)
-   certCount, okCC := u32be(buf, base+16)
-   if !okTL || !okFl || !okCC {
-      return nil, false
-   }
-   if totalLength < chaiHdr || int(totalLength) > len(buf)-base {
-      return nil, false
-   }
-
-   c := &chain{
-      base:        base,
-      totalLength: totalLength,
-      flags:       flags,
-      certCount:   certCount,
-   }
-
-   end := base + int(totalLength)
-   off := base + chaiHdr
-
-   for n := uint32(0); n < certCount; n++ {
-      if off+certHdr > end || !bytes.Equal(buf[off:off+4], magicCERT) {
-         return nil, false
-      }
-
-      // No bounds check needed on these reads: off+certHdr <= end <= len(buf)
-      // was just established, so both fields lie inside the chain.
-      cTot := binary.BigEndian.Uint32(buf[off+8:])
-      cLen := binary.BigEndian.Uint32(buf[off+12:])
-
-      if cTot < certHdr || off+int(cTot) > end {
-         return nil, false
-      }
-
-      // An entry is header + certificate body + trailer, and the trailer is
-      // not zero: every entry in a real chain carries a fixed-size signature
-      // block after the certificate (144 bytes in msprcore.bla, 288 for the
-      // leaf, which carries two). So certificate_length is expected to be
-      // smaller than the entry - requiring equality would warn on every
-      // valid chain. The only real defect is a body that does not fit.
-      if cLen > cTot-certHdr {
-         c.warnings = append(c.warnings, fmt.Sprintf(
-            "cert %d @ 0x%x: certificate_length %d exceeds the entry body (%d)",
-            n, off, cLen, cTot-certHdr))
-      }
-
-      off += int(cTot)
-   }
-   if off != end { // entries must tile the chain exactly
-      return nil, false
-   }
-
-   if base >= 4 {
-      if p, ok := u32be(buf, base-4); ok {
-         c.prefix = p
-         c.hasPrefix = true
-         c.prefixOK = p == totalLength
-      }
-   }
-
-   return c, true
 }
 
 // main.go end
