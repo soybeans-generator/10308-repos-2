@@ -352,9 +352,6 @@ type descriptor struct {
    codeLen uint32
 }
 
-// rng is one mapped section's address extent.
-type rng struct{ lo, hi uint64 }
-
 // heapDescs collects digest-validated Warbird heap-exec descriptors.
 //
 // Descriptor layout, relative to its base:
@@ -448,6 +445,9 @@ func heapDescs(data []byte, secs []*pe.Section) []descriptor {
    })
    return out
 }
+
+// rng is one mapped section's address extent.
+type rng struct{ lo, hi uint64 }
 
 // ---------------------------------------------------------------- the cache
 

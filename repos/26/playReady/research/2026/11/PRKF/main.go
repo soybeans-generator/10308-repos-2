@@ -72,6 +72,13 @@ func cmdExtract() error {
    return cmdKeys()
 }
 
+// dataFile returns the path inside outDir for a pipeline file, whether the
+// pipeline reads it or writes it. Both directions go through here, so no step
+// has to know the directory's name and no file can escape it.
+func dataFile(name string) string {
+   return filepath.Join(outDir, name)
+}
+
 // ensureOutDir creates outDir if it does not exist. Called once from main
 // before dispatch, so no step has to care.
 func ensureOutDir() error {
@@ -139,13 +146,6 @@ func main() {
       fmt.Fprintln(os.Stderr, err)
       os.Exit(1)
    }
-}
-
-// dataFile returns the path inside outDir for a pipeline file, whether the
-// pipeline reads it or writes it. Both directions go through here, so no step
-// has to know the directory's name and no file can escape it.
-func dataFile(name string) string {
-   return filepath.Join(outDir, name)
 }
 
 // main.go end
