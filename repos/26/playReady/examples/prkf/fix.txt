@@ -1,14 +1,6 @@
-reduce os/exec
-
-reduce runtime
-
-reduce unsafe
-
-reduce syscall
+remove sort
 
 remove bloat
-
-remove sort
 
 replace hand written ECC
 
@@ -17,3 +9,7 @@ small main
 speed
 
 stupid for loops
+
+combine flags
+
+re order flags

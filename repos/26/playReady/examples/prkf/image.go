@@ -75,8 +75,6 @@ import (
    "os"
    "strings"
    "unsafe"
-
-   "golang.org/x/sys/windows"
 )
 
 // =============================================================================
@@ -85,6 +83,9 @@ import (
 // NtQuerySystemInformation(0xB9) is the Warbird syscall. op=1 is "segment
 // decrypt": the kernel decodes the descriptor, validates its digest, and
 // decrypts [rva, rva+size) in the loaded image at `base`.
+//
+// wbNtQuery, wbLoad and wbFree are all in warbird.go, so this file imports no
+// syscall at all: it only passes uintptr bases around.
 // =============================================================================
 
 // diCall issues op=1 (segment decrypt) for the descriptor at `sac` inside
@@ -238,7 +239,7 @@ func stageDecryptImg() (code int) {
    // deduping by RVA drops the later/larger spans. That mistake produced 7818
    // spans instead of 7937 and a wrong downstream scalar.
    // =========================================================================
-   base, err := windows.LoadLibrary(dllPath)
+   base, err := wbLoad(dllPath)
    if err != nil {
       return fail("LoadLibraryW failed: %v", err)
    }
@@ -247,14 +248,14 @@ func stageDecryptImg() (code int) {
    for _, s := range segs {
       rel := le32(f, int(s.off)+0x2C) // this descriptor's own relocations
       n := le32(f, int(s.off)+0x30)
-      if diCall(uintptr(base), uintptr(base)+uintptr(s.va), uintptr(rel), uintptr(n)) == 0 {
+      if diCall(base, base+uintptr(s.va), uintptr(rel), uintptr(n)) == 0 {
          ok++
       }
    }
    logf("segment descriptors %d ok %d", len(segs), ok)
 
-   img := diReadMem(uintptr(base), int(sizeImg)) // harvest the whole image
-   if err := windows.FreeLibrary(base); err != nil {
+   img := diReadMem(base, int(sizeImg)) // harvest the whole image
+   if err := wbFree(base); err != nil {
       logf("warning: FreeLibrary after segment pass: %v", err)
    }
    logf("")
@@ -286,25 +287,25 @@ func stageDecryptImg() (code int) {
    // need the same bracket, and one implementation means one place where the
    // restore can be forgotten.
    decryptBlock := func(h imgDesc) (rc uint32, got []byte, protFailed bool, err error) {
-      lib, err := windows.LoadLibrary(dllPath)
+      lib, err := wbLoad(dllPath)
       if err != nil {
          return 0, nil, false, fmt.Errorf("LoadLibraryW failed at heap block 0x%x: %w", h.rva, err)
       }
       defer func() {
-         if ferr := windows.FreeLibrary(lib); ferr != nil {
+         if ferr := wbFree(lib); ferr != nil {
             logf("  warning: FreeLibrary at heap block 0x%x: %v", h.rva, ferr)
          }
       }()
 
-      sac := uintptr(lib) + uintptr(slot)
+      sac := lib + uintptr(slot)
       hdr := diReadMem(sac, 0x40)
       params := f[int(h.off)+0x40 : int(h.off)+0xF0] // this block's own crypto params
-      if !wbPatch(uintptr(lib), slot, diMakeDesc(hdr, params, h.rva, h.ln)) {
+      if !wbPatch(lib, slot, diMakeDesc(hdr, params, h.rva, h.ln)) {
          return 0, nil, true, nil
       }
 
-      rc = diCall(uintptr(lib), sac, uintptr(relocs), uintptr(num))
-      got = diReadMem(uintptr(lib)+uintptr(h.rva), int(h.ln))
+      rc = diCall(lib, sac, uintptr(relocs), uintptr(num))
+      got = diReadMem(lib+uintptr(h.rva), int(h.ln))
       return rc, got, false, nil
    }
 

@@ -574,7 +574,9 @@ func dmWorker(setArg, descArg, licsArg string) int {
    // no FAULT line, the sweep comes back with no OUT rows, and the driver reads
    // that as "incomplete" - the one diagnosis this step must not confuse with a
    // result.
-   if !wbVEH(base, func(s string) { fmt.Println(s) }) {
+   if !wbVEH(base, func(s string) {
+      fmt.Println(s)
+   }) {
       return dmLoadFail("AddVectoredExceptionHandler returned NULL")
    }
 

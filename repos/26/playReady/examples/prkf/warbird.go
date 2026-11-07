@@ -48,19 +48,21 @@
 // signature rather than a hidden jump. The callback is the one exception and
 // cannot be otherwise - see wbVEH.
 //
-// NOTE: dllPath is declared in main.go's manifest. Everything here is either
-// the on-disk descriptor format or kernel ABI.
+// NOTE: this is the only file that imports syscall. Every native call in the
+// program - the four dynamically resolved exports, the module loader, and the
+// callback trampoline - is declared or wrapped here, so there is one place to
+// audit. dllPath is declared in main.go's manifest.
 package main
 
 import (
    "bytes"
+   "cmp"
    "crypto/sha256"
    "encoding/binary"
    "encoding/hex"
    "fmt"
    "os"
-   "runtime"
-   "sort"
+   "slices"
    "strings"
    "syscall"
    "unsafe"
@@ -103,13 +105,18 @@ var (
 // uintptr for the kernel.
 //
 // The conversion is unavoidable: Call takes ...uintptr, and syscall offers no
-// pointer-typed variant.
+// pointer-typed variant. It needs no runtime.KeepAlive because
+// syscall.(*LazyProc).Call is declared //go:uintptrescapes: the compiler treats
+// the converted pointer as escaping for the duration of the call, so a - and
+// through its Status and Key fields the buffers they point at - cannot be
+// collected or moved while the kernel is reading them. image.go's diCall and
+// nibblemap.go's sweep child rely on the same directive and have never had a
+// KeepAlive; this makes all four argument blocks agree.
 //
-// The KeepAlive is not decorative. Through the wbArgs pointer the callee's
-// directive (go:uintptrescapes) is not visible to the compiler, so the referent
-// of the converted pointer is not kept alive on our behalf. Without this call,
-// a is dead after the conversion and its struct, and with it the status and key
-// buffers, may be collected while the kernel is using them.
+// What the directive does NOT cover is Out. Its address is stored as a uintptr
+// inside the struct, so the GC cannot follow it and no directive can help; the
+// caller must keep the output buffer live until it has read the result. Both
+// call sites do, because reading the output is the whole point of the call.
 //
 // NTSTATUS comes back in r1; the upper half of the register is garbage. The
 // third return of Call is GetLastError, which NtQuerySystemInformation does not
@@ -117,7 +124,6 @@ var (
 func callWarbird(a *wbArgs) uintptr {
    // SystemExtendedProcessInformation (0xB9) is the Warbird call gate.
    r1, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(a)), 0x34, 0)
-   runtime.KeepAlive(a)
    return r1
 }
 
@@ -136,11 +142,11 @@ func le32(b []byte, o int) uint32 {
 // mapped here before any call: the descriptor is a virtual address relative to
 // that image base in this process, not a file offset.
 //
-// The *DLL handle is not retained or released. The module has to stay mapped
-// for the life of the process - releasing it would invalidate the base this
-// function returns - and both callers are short-lived.
+// The handle is not retained or released. The module has to stay mapped for the
+// life of the process - releasing it would invalidate the base this function
+// returns - and both callers are short-lived.
 func loadWarbird() (base uintptr, err error) {
-   dll, err := syscall.LoadDLL(dllPath)
+   base, err = wbLoad(dllPath)
    if err != nil {
       return 0, fmt.Errorf("loading %s: %w", dllPath, err)
    }
@@ -150,7 +156,7 @@ func loadWarbird() (base uintptr, err error) {
    if err := wbNtQuery.Find(); err != nil {
       return 0, fmt.Errorf("NtQuerySystemInformation: %w", err)
    }
-   return uintptr(dll.Handle), nil
+   return base, nil
 }
 
 // rawAt returns the file's own bytes for an RVA, or nil when the RVA is not
@@ -172,6 +178,28 @@ func rawAt(fb []byte, secs []imgSection, rva, n uint32) []byte {
 // why this and not NTSTATUS is the rejection signal.
 func statusOK(b []byte) bool {
    return len(b) >= 4 && b[0]|b[1]|b[2]|b[3] == 0
+}
+
+// wbFree releases one reference taken by wbLoad. The error is returned rather
+// than swallowed: -5 reloads the module once per heap block, so a leak here is
+// a leak of hundreds of mappings, and a caller that logs it can say which block.
+func wbFree(h uintptr) error {
+   return syscall.FreeLibrary(syscall.Handle(h))
+}
+
+// wbLoad maps a module into this process and returns its base address.
+//
+// LoadLibrary rather than LoadDLL: the *DLL wrapper only exists so a caller can
+// resolve exports by name, and nothing here does - the four entry points are
+// resolved through LazyProc. Every caller wants the base and nothing else, and
+// an unretained *DLL would let the wrapper be collected while the module stays
+// mapped, which is exactly the confusion this signature avoids.
+func wbLoad(path string) (uintptr, error) {
+   h, err := syscall.LoadLibrary(path)
+   if err != nil {
+      return 0, err
+   }
+   return uintptr(h), nil
 }
 
 // ------------------------------------------------------- raw memory + faults
@@ -383,7 +411,9 @@ func heapIntervals(heaps []imgDesc) []imgInterval {
 // mergeIntervals sorts and coalesces ranges, so carveRuns can binary-search
 // them.
 func mergeIntervals(ivs []imgInterval) []imgInterval {
-   sort.Slice(ivs, func(i, j int) bool { return ivs[i].lo < ivs[j].lo })
+   slices.SortFunc(ivs, func(a, b imgInterval) int {
+      return cmp.Compare(a.lo, b.lo)
+   })
 
    var out []imgInterval
    for _, p := range ivs {
@@ -407,9 +437,20 @@ type imgRun struct{ start, length uint32 }
 func carveRuns(merged []imgInterval, r, s uint32) []imgRun {
    var out []imgRun
    cur, end := r, r+s
-   i := max(sort.Search(len(merged), func(i int) bool { return merged[i].lo > r })-1, 0)
 
-   for _, m := range merged[i:] {
+   // Start at the last interval whose lo is at or below r. BinarySearchFunc
+   // reports the first entry that is not less than the target, so an exact hit
+   // is that entry and a miss leaves pos one past the last candidate - the same
+   // index sort.Search(len, lo > r) - 1 produced, without the off-by-one risk of
+   // subtracting unconditionally.
+   pos, found := slices.BinarySearchFunc(merged, r, func(m imgInterval, target uint32) int {
+      return cmp.Compare(m.lo, target)
+   })
+   if !found {
+      pos = max(pos-1, 0)
+   }
+
+   for _, m := range merged[pos:] {
       if m.hi <= cur {
          continue
       }
@@ -546,11 +587,12 @@ type wbArgs struct {
 // an empty slice panics here, at construction, rather than passing a null
 // pointer to the kernel.
 //
-// Lifetime: status and key are reachable through the struct's pointer fields,
-// so callWarbird's KeepAlive covers them. out is not - only its address is
-// stored, as a uintptr the GC cannot follow - so the caller must keep out live
-// until it has read the result. Both call sites do, because reading the output
-// is the whole point of the call.
+// Lifetime: status and key are reachable through the struct's pointer fields, so
+// keeping the struct alive keeps both buffers alive, and the directive on Call
+// keeps it alive for the duration. out is not - only its address is stored, as a
+// uintptr the GC cannot follow - so the caller must keep out live until it has
+// read the result. Both call sites do, because reading the output is the whole
+// point of the call.
 func newWbArgs(descAddr uint64, status, key, out []byte, size uint32) *wbArgs {
    a := &wbArgs{
       Op:      3,

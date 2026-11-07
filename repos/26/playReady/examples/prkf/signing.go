@@ -67,6 +67,7 @@ package main
 
 import (
    "bytes"
+   "cmp"
    "crypto/ecdh"
    "crypto/rand"
    "crypto/sha256"
@@ -75,7 +76,7 @@ import (
    "errors"
    "fmt"
    "os"
-   "sort"
+   "slices"
    "strconv"
    "strings"
    "sync"
@@ -267,7 +268,7 @@ func cmdFindSub() error {
             if n == 0 {
                continue
             }
-            sort.Strings(snap)
+            slices.Sort(snap)
 
             head := fmt.Sprintf("watchdog: done=%d/%d inflight=%d", d, len(descs), n)
             w(head)
@@ -511,16 +512,17 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    }
 
    // A total order over keys the map already deduplicated: no equal elements
-   // can reach the comparator, so stability would buy nothing.
-   sort.Slice(out, func(i, j int) bool {
-      a, b := out[i], out[j]
-      if a.rva != b.rva {
-         return a.rva < b.rva
+   // can reach the comparator, so stability would buy nothing. Slices are
+   // compared field by field, rva first, so the descriptor order matches the
+   // code layout the log reports.
+   slices.SortFunc(out, func(a, b imgDesc) int {
+      if c := cmp.Compare(a.rva, b.rva); c != 0 {
+         return c
       }
-      if a.descVA != b.descVA {
-         return a.descVA < b.descVA
+      if c := cmp.Compare(a.descVA, b.descVA); c != 0 {
+         return c
       }
-      return a.ln < b.ln
+      return cmp.Compare(a.ln, b.ln)
    })
    return out
 }

@@ -61,7 +61,6 @@ import (
    "math/big"
    "os"
    "os/exec"
-   "runtime"
    "strconv"
    "strings"
    "sync"
@@ -151,7 +150,9 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code 
    }
    say("PREP %s patched %d skipped %d", prep, patched, skipped)
 
-   if !wbVEH(base, func(s string) { say("%s", s) }) {
+   if !wbVEH(base, func(s string) {
+      say("%s", s)
+   }) {
       say("ERR AddVectoredExceptionHandler returned NULL - a fault would be invisible")
       return 6
    }
@@ -159,6 +160,12 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code 
    // op3 is not newWbArgs: it passes a variable args length (the whole point of
    // the variant matrix) and writes a second size dword at +0x2C, which is
    // wbArgs's blank padding and therefore unaddressable from Go.
+   //
+   // No runtime.KeepAlive is needed: syscall.(*LazyProc).Call is declared
+   // //go:uintptrescapes, so the compiler treats every converted pointer here as
+   // escaping for the duration of the call. a is a local array and stays put;
+   // status, key and out are read again by the caller after op3 returns, which
+   // keeps their backing arrays live regardless.
    op3 := func(descRVA, ln uint32, status, key, out []byte, size2 *uint32) uint32 {
       var a [0x40]byte
       binary.LittleEndian.PutUint64(a[0x00:], 3)
@@ -171,10 +178,6 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code 
          binary.LittleEndian.PutUint32(a[0x2C:], *size2)
       }
       r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
-      runtime.KeepAlive(a)
-      runtime.KeepAlive(status)
-      runtime.KeepAlive(key)
-      runtime.KeepAlive(out)
       return uint32(r)
    }
 
@@ -363,7 +366,9 @@ func runOne(descVA uint32) int {
 // process rather than of any one step, so it is resolved on first use and
 // reused, and each caller decides what its own error message should say.
 func selfExe() (string, error) {
-   selfOnce.Do(func() { selfPath, selfErr = os.Executable() })
+   selfOnce.Do(func() {
+      selfPath, selfErr = os.Executable()
+   })
    return selfPath, selfErr
 }
 
@@ -581,7 +586,8 @@ func (w *worker) probe(tag string, data []byte, size uint32) (*probeResult, erro
    r1 := callWarbird(args)
 
    // Reading out here is also what keeps its backing array alive across the
-   // call: only its address was handed to the kernel.
+   // call: only its address was handed to the kernel, which the directive on
+   // Call cannot see.
    trace("probe %s returned st=%#010x sv=%x out=%x",
       tag, uint32(r1), status[:4], out[:8])
 
