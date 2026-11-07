@@ -33,6 +33,13 @@
 // the stage tag ("S1 FAULT" / "S2 FAULT") the driver filters on, so a fault is
 // never recorded as "no output".
 //
+// EXIT CODES
+//   Nothing here calls os.Exit. dpDriver returns 1 on failure and 0 on success.
+//   The trial child itself is in child.go and returns 0 (a RESULT line), 4
+//   (module load), 5 (bad input or a recovered panic) or 6 (no VEH). The trial
+//   log is written by dpDriver's deferred flush, so no failure path can leave it
+//   unwritten.
+//
 // The descriptor format, the PE census, the span lookup, the block carving, the
 // page patch and the fault handler are shared with -5 and -6 and live in
 // warbird.go.
@@ -60,20 +67,16 @@ import (
    "context"
    "crypto/ecdh"
    "crypto/sha256"
-   "encoding/binary"
    "encoding/hex"
    "encoding/json"
    "fmt"
    "math/big"
    "os"
    "os/exec"
-   "runtime"
    "slices"
    "strconv"
    "strings"
-   "syscall"
    "time"
-   "unsafe"
 )
 
 const (
@@ -84,10 +87,7 @@ const (
    dpMaxBlk  = 400
 )
 
-var (
-   dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
-   dpZ32     = make([]byte, 0x20)
-)
+var dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
 
 // One trial, one process.
 //
@@ -96,20 +96,28 @@ var (
 //
 // variant 0 real inputs / 1 zero out-buffer / 2 all zero / 3 no second size
 
-func dpDriver() {
+func dpDriver() (code int) {
    var lines []string
    say := func(f string, a ...any) {
       s := fmt.Sprintf(f, a...)
       lines = append(lines, s)
       fmt.Println(s)
    }
-   die := func(f string, a ...any) {
+   fail := func(f string, a ...any) int {
       say("FATAL: "+f, a...)
+      return 1
+   }
+   // The trial log is the only record of how the pairing was found, so it is
+   // flushed by a defer rather than by each exit: a failure path that forgot to
+   // write it would leave the run with no evidence at all.
+   defer func() {
       if err := os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
          fmt.Fprintf(os.Stderr, "prkf -7: %s: %v\n", plainLogPath, err)
+         if code == 0 {
+            code = 1
+         }
       }
-      os.Exit(1)
-   }
+   }()
    show := func(r dpResult) string {
       if r.line != "" {
          return r.line
@@ -119,33 +127,33 @@ func dpDriver() {
 
    for _, f := range []string{mapPath, imgPath, encPrvPath, encPubPath} {
       if st, err := os.Stat(f); err != nil || st.IsDir() {
-         die("missing %s", f)
+         return fail("missing %s", f)
       }
    }
 
    in, err := dpLoadInputs()
    if err != nil {
-      die("%v", err)
+      return fail("%v", err)
    }
 
    // A 16-entry permutation: 16 keys in 0..15, each mapping to a distinct value.
    // Both halves are checked because stage 4 indexes mapt with a nibble and a
    // missing key would panic mid-child instead of failing here.
    if len(in.mapt) != 16 {
-      die("oracle_map.json is not a 16-entry permutation (%d entries)", len(in.mapt))
+      return fail("oracle_map.json is not a 16-entry permutation (%d entries)", len(in.mapt))
    }
    var seenVal uint32
    for k, v := range in.mapt {
       if k < 0 || k > 15 || v < 0 || v > 15 {
-         die("oracle_map.json: %d -> %d is out of range", k, v)
+         return fail("oracle_map.json: %d -> %d is out of range", k, v)
       }
       seenVal |= 1 << uint(v)
    }
    if seenVal != 0xFFFF {
-      die("oracle_map.json is not a 16-entry permutation (repeated value)")
+      return fail("oracle_map.json is not a 16-entry permutation (repeated value)")
    }
    if in.cluster < 0x1000 {
-      die("oracle_map.json cluster RVA 0x%x looks invalid", in.cluster)
+      return fail("oracle_map.json cluster RVA 0x%x looks invalid", in.cluster)
    }
 
    sum := sha256.Sum256(in.fb)
@@ -207,12 +215,12 @@ func dpDriver() {
    sites := bytes.Count(in.img, dpPattern)
    say("key-consumer size-check sites: %d at 0x%x", sites, bytes.Index(in.img, dpPattern))
    if sites != 1 {
-      die("expected exactly one 'cmp dword ptr [rcx+0x14], 0x41' in the image")
+      return fail("expected exactly one 'cmp dword ptr [rcx+0x14], 0x41' in the image")
    }
 
    dv0, c0, n0, ok := blockOf(bytes.Index(in.img, dpPattern))
    if !ok {
-      die("no heap-exec block owns the size check")
+      return fail("no heap-exec block owns the size check")
    }
    say("key consumer: descriptor 0x%06x  code 0x%06x+0x%x", dv0, c0, n0)
    say("")
@@ -275,12 +283,12 @@ func dpDriver() {
    say("stage candidates: %#x", candList)
    say("")
    if len(candList) == 0 {
-      die("no stage candidates - the lea/call idiom differs on this build")
+      return fail("no stage candidates - the lea/call idiom differs on this build")
    }
 
    exe, err := os.Executable()
    if err != nil {
-      die("cannot locate own executable: %v", err)
+      return fail("cannot locate own executable: %v", err)
    }
 
    obfs := map[uint32]string{}
@@ -299,7 +307,7 @@ func dpDriver() {
    say("stage-1 candidates that produced an OBF: %d", len(obfs))
    say("")
    if len(obfs) == 0 {
-      die("no candidate produced an OBF - stage 1 is not in the candidate set")
+      return fail("no candidate produced an OBF - stage 1 is not in the candidate set")
    }
 
    // The first OBF in descriptor order, not in string order: deterministic
@@ -414,20 +422,20 @@ func dpDriver() {
             say("        stderr: %s", r.stderr)
          }
       }
-      die("no (stage 1, stage 2) pairing reproduced extracted.enc.pub")
+      return fail("no (stage 1, stage 2) pairing reproduced extracted.enc.pub")
    }
 
    plain, err := hex.DecodeString(found[5])
    if err != nil {
-      die("bad plain hex from child: %v", err)
+      return fail("bad plain hex from child: %v", err)
    }
    s1, err := strconv.ParseUint(found[0], 10, 32)
    if err != nil {
-      die("bad stage-1 descriptor from child: %q", found[0])
+      return fail("bad stage-1 descriptor from child: %q", found[0])
    }
    s2, err := strconv.ParseUint(found[1], 10, 32)
    if err != nil {
-      die("bad stage-2 descriptor from child: %q", found[1])
+      return fail("bad stage-2 descriptor from child: %q", found[1])
    }
 
    say("stage 1   0x%06x  (descriptor 0x%06x)", heapDesc[uint32(s1)].rva, s1)
@@ -440,23 +448,19 @@ func dpDriver() {
    d := new(big.Int).SetBytes(plain)
    priv, err := ecdh.P256().NewPrivateKey(d.FillBytes(make([]byte, 32)))
    if err != nil {
-      die("derived scalar out of range: %v", err)
+      return fail("derived scalar out of range: %v", err)
    }
    if got := priv.PublicKey().Bytes()[1:]; !bytes.Equal(got, in.pub) {
-      die("scalar does not reproduce %s\n  got  %x\n  want %x", encPubPath, got, in.pub)
+      return fail("scalar does not reproduce %s\n  got  %x\n  want %x", encPubPath, got, in.pub)
    }
 
    say("pubkey    MATCH")
    if err := os.WriteFile(encPlainPath, plain, 0o644); err != nil {
-      die("write %s: %v", encPlainPath, err)
+      return fail("write %s: %v", encPlainPath, err)
    }
    psum := sha256.Sum256(plain)
    say("written   %s  (%d bytes)  sha256 %x", encPlainPath, len(plain), psum)
-
-   if err := os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-      fmt.Fprintf(os.Stderr, "prkf -7: %s: %v\n", plainLogPath, err)
-      os.Exit(1)
-   }
+   return 0
 }
 
 func dpLastLine(s string) string {
@@ -469,197 +473,6 @@ func dpTag(mode string) string {
       return "S1"
    }
    return "S2"
-}
-
-func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
-   t := dpTag(mode)
-   say := func(f string, a ...any) {
-      fmt.Printf("%s "+f+"\n", append([]any{t}, a...)...)
-   }
-   defer func() {
-      if r := recover(); r != nil {
-         say("ERR %v", r)
-         os.Exit(5)
-      }
-   }()
-
-   in, err := dpLoadInputs()
-   if err != nil {
-      say("ERR %v", err)
-      os.Exit(5)
-   }
-
-   ptr, err := syscall.UTF16PtrFromString(dllPath)
-   if err != nil {
-      say("ERR loadlibrary")
-      os.Exit(4)
-   }
-   base, _, _ := wbLoadLibraryW.Call(uintptr(unsafe.Pointer(ptr)))
-   if base == 0 {
-      say("ERR loadlibrary")
-      os.Exit(4)
-   }
-
-   patched, skipped := 0, 0
-   if prep != "none" {
-      for _, s := range in.seg {
-         if uint64(s.rva)+uint64(s.size) > uint64(len(in.img)) {
-            continue
-         }
-         c := rawAt(in.fb, in.secs, s.rva, s.size)
-         if c == nil || bytes.Equal(in.img[s.rva:s.rva+s.size], c) {
-            continue
-         }
-         runs := []imgRun{{s.rva, s.size}}
-         if prep != "full" {
-            runs = carveRuns(in.merged, s.rva, s.size)
-            if len(runs) == 0 {
-               skipped++
-            }
-         }
-         for _, x := range runs {
-            if wbPatch(base, x.start, in.img[x.start:x.start+x.length]) {
-               patched++
-            } else {
-               skipped++
-            }
-         }
-      }
-   }
-   say("PREP %s patched %d skipped %d", prep, patched, skipped)
-
-   if !wbVEH(base, func(s string) { say("%s", s) }) {
-      say("ERR AddVectoredExceptionHandler returned NULL - a fault would be invisible")
-      os.Exit(6)
-   }
-
-   // op3 is not newWbArgs: it passes a variable args length (the whole point of
-   // the variant matrix) and writes a second size dword at +0x2C, which is
-   // wbArgs's blank padding and therefore unaddressable from Go.
-   op3 := func(descRVA, ln uint32, status, key, out []byte, size2 *uint32) uint32 {
-      var a [0x40]byte
-      binary.LittleEndian.PutUint64(a[0x00:], 3)
-      binary.LittleEndian.PutUint64(a[0x08:], uint64(base)+uint64(descRVA))
-      binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&status[0]))))
-      binary.LittleEndian.PutUint64(a[0x18:], uint64(uintptr(unsafe.Pointer(&key[0]))))
-      binary.LittleEndian.PutUint32(a[0x20:], 0x20)
-      binary.LittleEndian.PutUint64(a[0x24:], uint64(uintptr(unsafe.Pointer(&out[0]))))
-      if size2 != nil {
-         binary.LittleEndian.PutUint32(a[0x2C:], *size2)
-      }
-      r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
-      runtime.KeepAlive(a)
-      runtime.KeepAlive(status)
-      runtime.KeepAlive(key)
-      runtime.KeepAlive(out)
-      return uint32(r)
-   }
-
-   if mode == "s1" {
-      st := make([]byte, 0x40)
-      kb := make([]byte, 0x40)
-      ob := make([]byte, 0x40)
-      copy(kb, in.prv[:0x20])
-
-      rc := op3(desc, 0x2C, st, kb, ob, nil)
-      sd := st[:4]
-      if rc != 0 || !statusOK(sd) || bytes.Equal(ob[:0x20], dpZ32) {
-         say("REJECT rc=0x%08x st=%s out=%s",
-            rc, hex.EncodeToString(sd), hex.EncodeToString(ob[:0x20]))
-      } else {
-         say("OK %s", hex.EncodeToString(ob[:0x20]))
-      }
-      os.Exit(0)
-   }
-
-   obf, err := hex.DecodeString(obfHex)
-   if err != nil {
-      say("ERR %v", err)
-      os.Exit(5)
-   }
-
-   var in1, in2 []byte
-   switch variant {
-   case 2:
-      in1, in2 = make([]byte, 0x20), make([]byte, 0x20)
-   case 1:
-      in1, in2 = obf, make([]byte, 0x20)
-   default:
-      in1, in2 = obf, in.prv[0x20:0x40]
-   }
-
-   ln := uint32(0x30)
-   if variant == 3 {
-      ln = 0x2C
-   }
-
-   st2 := make([]byte, 0x40)
-   ib := make([]byte, 0x40)
-   ob2 := make([]byte, 0x40)
-   copy(ib, in1)
-   copy(ob2, in2)
-
-   var s2 *uint32
-   if variant != 3 {
-      v := uint32(0x20)
-      s2 = &v
-   }
-
-   if rc := op3(desc, ln, st2, ib, ob2, s2); rc != 0 || !statusOK(st2) {
-      say("REJECT var=%d rc=0x%08x st=%s", variant, rc, hex.EncodeToString(st2[:4]))
-      os.Exit(0)
-   }
-   mut := ib[:0x20]
-
-   // stage 3: 64 per-nibble subtables, stage 4: 16-entry permutation
-   nibs := func(x []byte) []byte {
-      ns := make([]byte, 64)
-      for i := range ns {
-         sh := uint(0)
-         if i%2 == 0 {
-            sh = 4
-         }
-         ns[i] = x[i>>1] >> sh & 0xF
-      }
-      return ns
-   }
-   pack := func(ns []byte) []byte {
-      out := make([]byte, 32)
-      for i := 0; i < 64; i += 2 {
-         out[i/2] = ns[i]<<4 | ns[i+1]
-      }
-      return out
-   }
-
-   nm := nibs(mut)
-   mp := make([]byte, 64)
-   for i := range mp {
-      mp[i] = in.img[int(in.cluster)+i*16+int(nm[i])]
-   }
-   mapped := pack(mp)
-
-   nn := nibs(mapped)
-   pl := make([]byte, 64)
-   for i := range pl {
-      v, ok := in.mapt[int(nn[i])]
-      if !ok {
-         panic(fmt.Sprintf("KeyError: %d", nn[i]))
-      }
-      pl[i] = byte(v)
-   }
-   plain := pack(pl)
-
-   d := new(big.Int).SetBytes(plain)
-   res := "NOMATCH"
-   priv, err := ecdh.P256().NewPrivateKey(d.FillBytes(make([]byte, 32)))
-   if err == nil && bytes.Equal(priv.PublicKey().Bytes()[1:], in.pub) {
-      res = "MATCH"
-   }
-   say("%s var=%d mut=%s mapped=%s plain=%s", res, variant,
-      hex.EncodeToString(mut),
-      hex.EncodeToString(mapped),
-      hex.EncodeToString(plain))
-   os.Exit(0)
 }
 
 // --- stage entry point ------------------------------------------------------
@@ -704,16 +517,14 @@ func stageDerivePlain(args []string) int {
             variant = v
          }
       }
-      dpWorker(mode, uint32(d), obf, prep, variant)
-      return 0
+      return dpWorker(mode, uint32(d), obf, prep, variant)
    }
    if len(args) > 0 {
       fmt.Fprintf(os.Stderr, "prkf -7: unexpected argument %q\n", args[0])
       return 2
    }
 
-   dpDriver()
-   return 0
+   return dpDriver()
 }
 
 type dpInputs struct {
@@ -786,12 +597,10 @@ func dpLoadInputs() (*dpInputs, error) {
    // -7 patches each range once, so unlike -5 it deduplicates by RVA. The
    // order of first appearance is kept, which is the order the descriptors
    // appear in the file.
+   segs, heaps := splitDescs(in.fb, in.secs)
+   in.heaps = heaps
    seen := map[uint32]bool{}
-   for _, d := range scanDescs(in.fb, in.secs) {
-      if d.heap() {
-         in.heaps = append(in.heaps, d)
-         continue
-      }
+   for _, d := range segs {
       for _, sp := range segSpans(in.fb, d, in.sizeImg) {
          if seen[sp.rva] {
             continue
@@ -801,13 +610,7 @@ func dpLoadInputs() (*dpInputs, error) {
       }
    }
 
-   var ivs []imgInterval
-   for _, h := range in.heaps {
-      if h.ln != 0 {
-         ivs = append(ivs, imgInterval{h.rva, h.rva + h.ln})
-      }
-   }
-   in.merged = mergeIntervals(ivs)
+   in.merged = mergeIntervals(heapIntervals(heaps))
    return in, nil
 }
 

@@ -48,6 +48,11 @@
 //   fields, so no two decrypted images hash alike even though they are
 //   functionally identical. The hash in the log is a per-run identifier only.
 //
+// EXIT CODES
+//   Nothing here calls os.Exit. stageDecryptImg returns 1 for every fatal
+//   condition, and the log is written by its deferred flush, so a failure path
+//   cannot leave the log unwritten.
+//
 // KNOWN PITFALLS
 //
 //   - Descriptor size cap must stay at 0x200000; see scanDescs in warbird.go.
@@ -106,25 +111,18 @@ func diCall(base, sac, rel, num uintptr) uint32 {
    return uint32(r1)
 }
 
-// diFinish writes the log and exits. A failure to write it is reported on
-// stderr, and turns a would-be success into a failure: imgLogPath is a declared
-// output, so a run that produced no log did not produce everything it promised.
-func diFinish(msg string, code int) {
-   if msg != "" {
-      diLogf("%s", msg)
-   }
-   if err := os.WriteFile(imgLogPath, []byte(strings.Join(diLogLines, "\n")+"\n"), 0o644); err != nil {
-      fmt.Fprintf(os.Stderr, "prkf -5: %s: %v\n", imgLogPath, err)
-      if code == 0 {
-         code = 1
-      }
-   }
-   os.Exit(code)
+// diFail records a fatal condition in the log and yields exit code 1. It does
+// not write the log or terminate: stageDecryptImg's deferred flush owns that,
+// so no return path can leave the log unwritten.
+func diFail(format string, a ...any) int {
+   diLogf("FATAL: "+format, a...)
+   return 1
 }
 
 // =============================================================================
-// Logging. Every line is buffered and printed; diFinish() writes the buffer, so
-// the log survives an early exit.
+// Logging. Every line is buffered and printed; stageDecryptImg's deferred flush
+// writes the buffer on every return path, so the log survives an early exit
+// without any exit call here.
 // =============================================================================
 
 func diLogf(format string, a ...any) {
@@ -181,9 +179,18 @@ func diReadMem(base uintptr, n int) []byte {
 
 // =============================================================================
 
-func stageDecryptImg() int {
+func stageDecryptImg() (code int) {
+   defer func() {
+      if err := os.WriteFile(imgLogPath, []byte(strings.Join(diLogLines, "\n")+"\n"), 0o644); err != nil {
+         fmt.Fprintf(os.Stderr, "prkf -5: %s: %v\n", imgLogPath, err)
+         if code == 0 {
+            code = 1
+         }
+      }
+   }()
+
    if err := os.MkdirAll(outDir, 0o755); err != nil {
-      diFinish("FATAL: cannot create "+outDir+": "+err.Error(), 1)
+      return diFail("cannot create %s: %v", outDir, err)
    }
 
    // =========================================================================
@@ -196,22 +203,14 @@ func stageDecryptImg() int {
    // =========================================================================
    f, err := os.ReadFile(dllPath)
    if err != nil {
-      diFinish("FATAL: cannot read "+dllPath+": "+err.Error(), 1)
+      return diFail("cannot read %s: %v", dllPath, err)
    }
 
    sizeImg, secs := peSections(f)
-
-   var segs, heaps []imgDesc
-   for _, d := range scanDescs(f, secs) {
-      if d.heap() {
-         heaps = append(heaps, d)
-      } else {
-         segs = append(segs, d)
-      }
-   }
+   segs, heaps := splitDescs(f, secs)
 
    if len(segs) == 0 {
-      diFinish("FATAL: no segment descriptors found", 1)
+      return diFail("no segment descriptors found")
    }
 
    // --- Warbird calling convention constants --------------------------------
@@ -245,7 +244,7 @@ func stageDecryptImg() int {
    // =========================================================================
    base, err := windows.LoadLibrary(dllPath)
    if err != nil {
-      diFinish("FATAL: LoadLibraryW failed: "+err.Error(), 1)
+      return diFail("LoadLibraryW failed: %v", err)
    }
 
    ok := 0
@@ -277,24 +276,27 @@ func stageDecryptImg() int {
    //   - decrypt, read back, free
    // =========================================================================
 
-   // decryptBlock returns (rc, plaintext, protFailed). protFailed reports that
-   // VirtualProtect could not make the slot writable OR could not restore it, so
-   // the block was skipped. Both are charged here rather than to the block's
-   // code: a failed restore leaves the descriptor on a writable page, which the
-   // kernel answers with 0xc000000d, and that would otherwise be logged as a
-   // decrypt error against a block that never got its turn.
+   // decryptBlock returns (rc, plaintext, protFailed, err). protFailed reports
+   // that VirtualProtect could not make the slot writable OR could not restore
+   // it, so the block was skipped. Both are charged here rather than to the
+   // block's code: a failed restore leaves the descriptor on a writable page,
+   // which the kernel answers with 0xc000000d, and that would otherwise be
+   // logged as a decrypt error against a block that never got its turn.
+   //
+   // A load failure is returned as an error rather than terminating here: the
+   // caller decides the exit code and the deferred flush still runs.
    //
    // The write-and-restore pair is wbPatch, not a local copy of it: -6 and -7
    // need the same bracket, and one implementation means one place where the
    // restore can be forgotten.
-   decryptBlock := func(h imgDesc) (rc uint32, got []byte, protFailed bool) {
+   decryptBlock := func(h imgDesc) (rc uint32, got []byte, protFailed bool, err error) {
       lib, err := windows.LoadLibrary(dllPath)
       if err != nil {
-         diFinish(fmt.Sprintf("FATAL: LoadLibraryW failed at heap block 0x%x: %v", h.rva, err), 1)
+         return 0, nil, false, fmt.Errorf("LoadLibraryW failed at heap block 0x%x: %w", h.rva, err)
       }
       defer func() {
-         if err := windows.FreeLibrary(lib); err != nil {
-            diLogf("  warning: FreeLibrary at heap block 0x%x: %v", h.rva, err)
+         if ferr := windows.FreeLibrary(lib); ferr != nil {
+            diLogf("  warning: FreeLibrary at heap block 0x%x: %v", h.rva, ferr)
          }
       }()
 
@@ -302,12 +304,12 @@ func stageDecryptImg() int {
       hdr := diReadMem(sac, 0x40)
       params := f[int(h.off)+0x40 : int(h.off)+0xF0] // this block's own crypto params
       if !wbPatch(uintptr(lib), slot, diMakeDesc(hdr, params, h.rva, h.ln)) {
-         return 0, nil, true
+         return 0, nil, true, nil
       }
 
       rc = diCall(uintptr(lib), sac, uintptr(relocs), uintptr(num))
       got = diReadMem(uintptr(lib)+uintptr(h.rva), int(h.ln))
-      return rc, got, false
+      return rc, got, false, nil
    }
 
    done, same, errCount := 0, 0, 0
@@ -326,7 +328,10 @@ func stageDecryptImg() int {
       }
       before := append([]byte(nil), img[h.rva:h.rva+h.ln]...)
 
-      rc, got, protFailed := decryptBlock(h)
+      rc, got, protFailed, err := decryptBlock(h)
+      if err != nil {
+         return diFail("%v", err)
+      }
       if protFailed {
          errCount++
          continue
@@ -359,7 +364,7 @@ func stageDecryptImg() int {
    diLogf("")
 
    if err := os.WriteFile(imgPath, img, 0o644); err != nil {
-      diFinish("FATAL: cannot write "+imgPath+": "+err.Error(), 1)
+      return diFail("cannot write %s: %v", imgPath, err)
    }
 
    // --- build signature -----------------------------------------------------
@@ -388,7 +393,6 @@ func stageDecryptImg() int {
    diLogf("")
    diLogf("written %s  (%d bytes)", imgPath, len(img))
    diLogf("sha256   %x", sha256.Sum256(img))
-   diFinish("", 0)
    return 0
 }
 

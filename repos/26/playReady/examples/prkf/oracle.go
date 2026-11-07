@@ -61,6 +61,10 @@
 //   itself uses. Only the sentinel's y-coordinate needs anything else:
 //   big.Int.ModSqrt, since P = 3 mod 4. crypto/elliptic is imported for
 //   Params() alone, which is not deprecated: it reads P and B for that ModSqrt.
+//
+// EXIT CODES
+//   Nothing here calls os.Exit. stageMakeOracle returns 1 for every fatal
+//   condition, so main owns the only termination in the program.
 
 package main
 
@@ -89,20 +93,22 @@ var (
    moThree  = big.NewInt(3)
 )
 
-func moFatal(format string, args ...any) {
+// moFail reports a fatal condition on stderr and yields exit code 1. It returns
+// the code rather than exiting so stageMakeOracle has one exit point.
+func moFail(format string, args ...any) int {
    fmt.Fprintf(os.Stderr, "FATAL: "+format+"\n", args...)
-   os.Exit(1)
+   return 1
 }
 
 // moRandScalar draws a uniform non-zero scalar mod N.
-func moRandScalar() *big.Int {
+func moRandScalar() (*big.Int, error) {
    for {
       k, err := rand.Int(rand.Reader, moN)
       if err != nil {
-         moFatal("read random: %v", err)
+         return nil, fmt.Errorf("read random: %w", err)
       }
       if k.Sign() != 0 {
-         return k
+         return k, nil
       }
    }
 }
@@ -118,13 +124,13 @@ func moScalar(v *big.Int) []byte {
 
 // moXY returns a point as X||Y, the 64-byte form every PlayReady key file uses.
 // An infinity result - possible only if a sum cancels - has no 65-byte encoding
-// and is fatal here rather than silently written as 64 zero bytes.
-func moXY(nib int, what string, p *nistec.P256Point) []byte {
+// and is an error here rather than silently written as 64 zero bytes.
+func moXY(nib int, what string, p *nistec.P256Point) ([]byte, error) {
    b := p.Bytes()
    if len(b) != 65 || b[0] != 4 {
-      moFatal("nibble %02x: %s is the identity", nib, what)
+      return nil, fmt.Errorf("nibble %02x: %s is the identity", nib, what)
    }
-   return b[1:]
+   return b[1:], nil
 }
 
 // --- stage entry point ------------------------------------------------------
@@ -136,13 +142,13 @@ func stageMakeOracle() int {
    // oracle beside the image it feeds means a run can never pick up a stale
    // copy from the current directory by accident.
    if err := os.MkdirAll(outDir, 0o755); err != nil {
-      moFatal("create %s: %v", outDir, err)
+      return moFail("create %s: %v", outDir, err)
    }
 
    // --- sanity: the sentinel has to be an x-coordinate on the curve
    sent := append([]byte(moSentinelText), make([]byte, 16)...)
    if len(sent) != 32 {
-      moFatal("sentinel is %d bytes, expected 32", len(sent))
+      return moFail("sentinel is %d bytes, expected 32", len(sent))
    }
    mx := new(big.Int).SetBytes(sent)
 
@@ -154,7 +160,7 @@ func stageMakeOracle() int {
    rhs.Mod(rhs, moP)
    my := new(big.Int).ModSqrt(rhs, moP)
    if my == nil {
-      moFatal("'HELLO MICROSOFT!' || 0^16 is not an x-coordinate on P-256")
+      return moFail("'HELLO MICROSOFT!' || 0^16 is not an x-coordinate on P-256")
    }
    // canonical (even) root, so the Y in the log is stable across runs
    if my.Bit(0) == 1 {
@@ -167,11 +173,11 @@ func stageMakeOracle() int {
    my.FillBytes(enc[33:])
    m, err := nistec.NewP256Point().SetBytes(enc)
    if err != nil {
-      moFatal("sentinel point rejected by nistec: %v", err)
+      return moFail("sentinel point rejected by nistec: %v", err)
    }
 
    if err := os.MkdirAll(out, 0o755); err != nil {
-      moFatal("create %s: %v", out, err)
+      return moFail("create %s: %v", out, err)
    }
    if abs, err := filepath.Abs(out); err == nil {
       fmt.Printf("output    %s\n", abs)
@@ -194,44 +200,58 @@ func stageMakeOracle() int {
       raw := new(big.Int).SetBytes(bytes.Repeat([]byte{byte(nib * 0x11)}, 32))
       k := new(big.Int).Mod(raw, moN)
       if k.Sign() == 0 {
-         moFatal("nibble %02x reduces to a zero scalar", nib)
+         return moFail("nibble %02x reduces to a zero scalar", nib)
       }
 
       q, err := nistec.NewP256Point().ScalarBaseMult(moScalar(k))
       if err != nil {
-         moFatal("nibble %02x: ScalarBaseMult: %v", nib, err)
+         return moFail("nibble %02x: ScalarBaseMult: %v", nib, err)
       }
 
       // --- key file: X||Y, no 0x04 prefix, exactly what .sig.pub/.enc.pub use
-      pub := moXY(nib, "public key", q)
+      pub, err := moXY(nib, "public key", q)
+      if err != nil {
+         return moFail("%v", err)
+      }
       if pubs[string(pub)] {
-         moFatal("nibble %02x duplicates an earlier public key", nib)
+         return moFail("nibble %02x duplicates an earlier public key", nib)
       }
       pubs[string(pub)] = true
       if err := os.WriteFile(filepath.Join(out, fmt.Sprintf("key_%02x.pub", nib)), pub, 0o644); err != nil {
-         moFatal("write key_%02x.pub: %v", nib, err)
+         return moFail("write key_%02x.pub: %v", nib, err)
       }
 
       // --- licence blob: ECIES  C1 = r*G,  C2 = M + r*Q
       // Decryption with scalar k gives C2 - k*C1 = M, so the plaintext point's
       // X-coordinate is the sentinel and the routine's output is SENT XOR magic.
-      r := moRandScalar()
+      r, err := moRandScalar()
+      if err != nil {
+         return moFail("%v", err)
+      }
       c1, err := nistec.NewP256Point().ScalarBaseMult(moScalar(r))
       if err != nil {
-         moFatal("nibble %02x: C1 = r*G: %v", nib, err)
+         return moFail("nibble %02x: C1 = r*G: %v", nib, err)
       }
       rq, err := nistec.NewP256Point().ScalarMult(q, moScalar(r))
       if err != nil {
-         moFatal("nibble %02x: r*Q: %v", nib, err)
+         return moFail("nibble %02x: r*Q: %v", nib, err)
       }
       c2 := nistec.NewP256Point().Add(m, rq)
 
-      blob := append(moXY(nib, "C1", c1), moXY(nib, "C2", c2)...)
+      c1b, err := moXY(nib, "C1", c1)
+      if err != nil {
+         return moFail("%v", err)
+      }
+      c2b, err := moXY(nib, "C2", c2)
+      if err != nil {
+         return moFail("%v", err)
+      }
+      blob := append(append([]byte(nil), c1b...), c2b...)
       if len(blob) != 0x80 {
-         moFatal("nibble %02x: blob is %d bytes", nib, len(blob))
+         return moFail("nibble %02x: blob is %d bytes", nib, len(blob))
       }
       if err := os.WriteFile(filepath.Join(out, fmt.Sprintf("lic_%02x.blob", nib)), blob, 0o644); err != nil {
-         moFatal("write lic_%02x.blob: %v", nib, err)
+         return moFail("write lic_%02x.blob: %v", nib, err)
       }
 
       // --- round-trip: C2 - k*C1 must be the sentinel point. The routine uses
@@ -240,11 +260,11 @@ func stageMakeOracle() int {
       negK := new(big.Int).Sub(moN, k)
       kc1, err := nistec.NewP256Point().ScalarMult(c1, moScalar(negK))
       if err != nil {
-         moFatal("nibble %02x: -k*C1: %v", nib, err)
+         return moFail("nibble %02x: -k*C1: %v", nib, err)
       }
       rec := nistec.NewP256Point().Add(c2, kc1)
       if !bytes.Equal(rec.Bytes(), m.Bytes()) {
-         moFatal("nibble %02x: round-trip did not recover the sentinel point", nib)
+         return moFail("nibble %02x: round-trip did not recover the sentinel point", nib)
       }
 
       note := ""
@@ -258,7 +278,7 @@ func stageMakeOracle() int {
    }
 
    if len(pubs) != 15 {
-      moFatal("only %d distinct public keys, expected 15", len(pubs))
+      return moFail("only %d distinct public keys, expected 15", len(pubs))
    }
 
    fmt.Printf("\ngenerated %d/15 key+licence pairs in %s\n", len(pubs), out)

@@ -33,8 +33,9 @@
 // Ctrl-Break prints a goroutine dump by itself.
 //
 // NOTE: this file owns scanWorkers and the -2 scan. dllPath is in main.go's
-// manifest; descTotal and the descriptor layout are in warbird.go; keyLen,
-// warbirdOp, argsLen and probeEnv are the Warbird ABI and are also there.
+// manifest; descTotal, scanDescs and splitDescs are in warbird.go; the child
+// this driver spawns - and probeEnv, the variable that selects it - are in
+// child.go.
 //
 // -3 decrypts sigPrvPath -> sigPlainPath, writing output only after every
 // available check passes.
@@ -223,7 +224,7 @@ func cmdFindSub() error {
    w("self   " + self)
 
    // Probe every descriptor, scanWorkers at a time. Each probe is its own
-   // process (see warbird.go), so the children share nothing and the parent
+   // process (see child.go), so the children share nothing and the parent
    // only collects stdout. Results are stored by descriptor index, so the log
    // and the ACCEPT lines below stay in descriptor order no matter which child
    // finishes first.
@@ -500,11 +501,9 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    seen := make(map[key]bool)
    var out []imgDesc
 
-   for _, d := range scanDescs(fb, secs) {
-      if !d.heap() || d.ln == 0 {
-         continue
-      }
-      if !spanMapped(secs, d.rva, d.ln) {
+   _, heaps := splitDescs(fb, secs)
+   for _, d := range heaps {
+      if d.ln == 0 || !spanMapped(secs, d.rva, d.ln) {
          continue
       }
       k := key{d.descVA, d.rva, d.ln}
