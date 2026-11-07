@@ -1,7 +1,7 @@
 // decrypt.go begin
 //go:build windows
 
-// cmdDecrypt implements prkf -3.
+// decrypt.go is prkf -3: decrypt the signing key.
 //
 // Decrypts a PlayReady signing key (testdata/extracted.sig.prv ->
 // testdata/extracted.sig.plain).
@@ -21,12 +21,13 @@
 //
 //   - op=3 and the WarbirdCallArgs layout are a kernel ABI. The DLL and the
 //     running kernel must agree on them, so neither can change unilaterally.
+//     The block, the call and the module load are all in warbird.go, shared
+//     with prkf -2.
 //   - The routine's own argument struct is packed (it reads its output
 //     pointer unaligned at +0x14), and packed layout is fixed by source and
 //     invariant under recompilation.
 //   - size == 0x20 is the P-256 private scalar length, and the routine tests
 //     it itself with `cmp dword ptr [rcx+10h], 20h`.
-//   - 0x34 is the size of the kernel's call-args struct.
 //
 // prsubs.json is read from testdata/, so run prkf -2 first; both steps agree
 // on the directory because both go through outFile.
@@ -53,9 +54,11 @@
 //   output == input   -> descriptor for the wrong routine
 //   d*G != sig.pub    -> descriptor, argument layout or input is wrong
 //
-// NOTE: dllPath, keyLen and outOff are declared once for the whole package,
-// in findsub.go: the three steps are one program now, so they share one
-// namespace and one set of values.
+// NOTE: dllPath is declared in findsub.go; keyLen, argsLen, statusOK, wbArgs,
+// newWbArgs, loadWarbird and callWarbird are in warbird.go. This file declares
+// no package-wide value of its own except the three paths below, and it
+// imports neither unsafe nor syscall: the one pointer conversion and the one
+// module load are both inside warbird.go.
 package main
 
 import (
@@ -63,22 +66,11 @@ import (
    "crypto/ecdh"
    "crypto/rand"
    "crypto/sha256"
-   "encoding/binary"
    "encoding/hex"
    "encoding/json"
    "errors"
    "fmt"
    "os"
-   "runtime"
-   "syscall"
-   "unsafe"
-)
-
-const (
-   // warbirdOp is op=3 (WbHeapExecuteCall); argsLen is the size of the
-   // kernel's call-args struct.
-   warbirdOp = 3
-   argsLen   = 0x34
 )
 
 // File names this step reads and writes. They are vars, not consts, only
@@ -103,7 +95,7 @@ func cmdDecrypt() error {
    if err != nil {
       return err
    }
-   fmt.Printf("%s (%d bytes)\n", srcName, keyLen)
+   fmt.Printf("%s (%d bytes)\n", srcName, len(got))
    fmt.Printf("plaintext %s\n", hex.EncodeToString(got))
 
    // ---- validation: d*G must equal the published public key ----------
@@ -111,10 +103,17 @@ func cmdDecrypt() error {
    if err != nil {
       return err
    }
-   want, err := parsePubkey(raw)
-   if err != nil {
-      return fmt.Errorf("%s: %v", pubName, err)
+   // Normalize to the uncompressed 65-byte SEC 1 form. NewPublicKey accepts
+   // the uncompressed and compressed encodings and rejects anything off the
+   // curve or at infinity, so the on-curve check is not repeated here.
+   if len(raw) == 64 { // raw x||y: add the uncompressed prefix
+      raw = append([]byte{0x04}, raw...)
    }
+   k, err := ecdh.P256().NewPublicKey(raw)
+   if err != nil {
+      return fmt.Errorf("%s: P-256 point: %v", pubName, err)
+   }
+   want := k.Bytes()
 
    // An out-of-range d makes NewPrivateKey fail, leaving gotPub nil, which
    // falls through to the same verdict as a mismatched point.
@@ -150,17 +149,9 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
       return nil, err
    }
 
-   dll, err := syscall.LoadDLL(dllPath)
-   if err != nil {
-      return nil, fmt.Errorf("loading %s failed, err %v", dllPath, err)
-   }
-   base := uintptr(dll.Handle)
-
-   ntdll, err := syscall.LoadDLL("ntdll.dll")
-   if err != nil {
-      return nil, err
-   }
-   ntQuerySystemInformation, err := ntdll.FindProc("NtQuerySystemInformation")
+   // The module has to be mapped in this process before the call: rec.DescVA
+   // is an RVA relative to its image base, not a file offset.
+   base, ntq, err := loadWarbird()
    if err != nil {
       return nil, err
    }
@@ -182,37 +173,13 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
    keyBuf := append(make([]byte, 0, keyLen), enc...) // the routine gets its own copy
    status := make([]byte, 0x10)                      // zero-filled
    out := append(make([]byte, 0, keyLen), fill...)
-   args := make([]byte, argsLen)
 
-   // Kernel WarbirdCallArgs for op=3 (WbHeapExecuteCall). The arguments the
-   // routine itself sees begin at +0x10, which is why its documented +0x14
-   // output field lands at +0x24 here:
-   //
-   //   +0x00  op = 3
-   //   +0x08  descriptor address
-   //   +0x10  -> status dword   (routine's +0x00)
-   //   +0x18  -> 32-byte key    (routine's +0x08)
-   //   +0x20  u32 key size      (routine's +0x10)
-   //   +0x24  -> output buffer  (routine's +0x14)
-   binary.LittleEndian.PutUint64(args[0x00:], warbirdOp)
-   binary.LittleEndian.PutUint64(args[0x08:], uint64(base)+rec.DescVA)
-   binary.LittleEndian.PutUint64(args[0x10:], uint64(uintptr(unsafe.Pointer(&status[0]))))
-   binary.LittleEndian.PutUint64(args[0x18:], uint64(uintptr(unsafe.Pointer(&keyBuf[0]))))
-   binary.LittleEndian.PutUint32(args[0x20:], keyLen)
-   binary.LittleEndian.PutUint64(args[outOff:], uint64(uintptr(unsafe.Pointer(&out[0]))))
-
-   // SystemExtendedProcessInformation (0xB9) is the Warbird call gate.
-   // NTSTATUS comes back in r1; the upper half of the register is garbage.
-   st, _, _ := ntQuerySystemInformation.Call(
-      0xB9,
-      uintptr(unsafe.Pointer(&args[0])),
-      argsLen,
-      0,
-   )
-   runtime.KeepAlive(args)
-   runtime.KeepAlive(status)
-   runtime.KeepAlive(keyBuf)
-   runtime.KeepAlive(out)
+   // The block, the call and the lifetime handling are in warbird.go, so this
+   // step and prkf -2 cannot disagree about the ABI. out must stay live until
+   // the result is read - its address is stored as a uintptr - and it is, by
+   // the comparison below.
+   args := newWbArgs(uint64(base)+rec.DescVA, status, keyBuf, out, keyLen)
+   st, _, _ := callWarbird(ntq, args)
 
    if st32 := uint32(st); st32 != 0 {
       msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st32)
@@ -222,7 +189,7 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
       return nil, errors.New(msg)
    }
 
-   if !bytes.Equal(status[:4], []byte{0, 0, 0, 0}) {
+   if !statusOK(status) {
       return nil, fmt.Errorf("routine returned %s - the argument layout no "+
          "longer matches this build; re-run prkf -2",
          hex.EncodeToString(status[:4]))
@@ -241,34 +208,6 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
 func isFile(p string) bool {
    fi, err := os.Stat(p)
    return err == nil && fi.Mode().IsRegular()
-}
-
-// ---- P-256 validation ----------------------------------------------------
-
-// parsePubkey normalizes a P-256 public key to the uncompressed 65-byte SEC 1
-// form. ecdh.P256().NewPublicKey accepts the uncompressed and compressed
-// encodings and rejects anything off the curve or at infinity, so the on-curve
-// check is not repeated here.
-func parsePubkey(blob []byte) ([]byte, error) {
-   n := len(blob)
-   if n == 64 { // raw x||y: add the uncompressed prefix
-      blob = append([]byte{0x04}, blob...)
-   }
-   k, err := ecdh.P256().NewPublicKey(blob)
-   if err != nil {
-      return nil, fmt.Errorf("%d-byte P-256 point: %v", n, err)
-   }
-   return k.Bytes(), nil
-}
-
-func short(s string) string {
-   if len(s) > 16 {
-      return s[:16]
-   }
-   if s == "" {
-      return "?"
-   }
-   return s
 }
 
 // ---- prsubs.json ---------------------------------------------------------
@@ -302,9 +241,9 @@ func loadPrsubs() (*prsubsRecord, error) {
 
    if rec.SHA256 != sha {
       return nil, fmt.Errorf("%s was built for a different DLL\n"+
-         "  cache : %s...\n"+
-         "  actual: %s...\n"+
-         "  re-run prkf -2", cache, short(rec.SHA256), short(sha))
+         "  cache : %s\n"+
+         "  actual: %s\n"+
+         "  re-run prkf -2", cache, rec.SHA256, sha)
    }
    if rec.DescVA == 0 {
       return nil, fmt.Errorf("%s has no desc_va - re-run prkf -2", cache)
