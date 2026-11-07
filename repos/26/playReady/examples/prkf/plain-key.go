@@ -42,7 +42,7 @@
 //
 // The descriptor format, the PE census, the span lookup, the block carving, the
 // page patch and the fault handler are shared with -5 and -6 and live in
-// warbird.go.
+// warbird.go; the spawn helper is in child.go.
 //
 // Pitfalls:
 //   - The stage routines' own blocks must be LEFT CIPHERTEXT. They are heap-exec,
@@ -62,15 +62,14 @@
 //
 // GLOBALS
 //   dpPattern is the only one: the size-check signature is read in three places
-//   here and nowhere else. The tuning numbers - timeout, tolerance, window,
-//   hop and block caps - are locals next to the code that uses them, and the
-//   trial child's ABI is in child.go.
+//   here and nowhere else. The tuning numbers - tolerance, window, hop and block
+//   caps - are locals next to the code that uses them, and the trial child's ABI
+//   is in child.go.
 
 package main
 
 import (
    "bytes"
-   "context"
    "crypto/ecdh"
    "crypto/sha256"
    "encoding/hex"
@@ -78,7 +77,6 @@ import (
    "fmt"
    "math/big"
    "os"
-   "os/exec"
    "slices"
    "strconv"
    "strings"
@@ -291,15 +289,10 @@ func dpDriver() (code int) {
       return fail("no stage candidates - the lea/call idiom differs on this build")
    }
 
-   exe, err := os.Executable()
-   if err != nil {
-      return fail("cannot locate own executable: %v", err)
-   }
-
    obfs := map[uint32]string{}
    say("phase 1: stage-1 candidates (PREP=carve)")
    for _, d := range candList {
-      r := dpRunChild(exe, "s1", fmt.Sprintf("0x%x", d), "carve")
+      r := dpRunChild("s1", fmt.Sprintf("0x%x", d), "carve")
       say("  s1 0x%06x code 0x%06x: %s", d, heapDesc[d].rva, show(r))
       if r.stderr != "" {
          say("      stderr: %s", r.stderr)
@@ -335,7 +328,7 @@ func dpDriver() (code int) {
          continue
       }
       for _, d2 := range candList {
-         r := dpRunChild(exe, "s2",
+         r := dpRunChild("s2",
             fmt.Sprintf("0x%x", d2), obf, "carve", "0")
          switch r.kind {
          case "MATCH":
@@ -390,7 +383,7 @@ func dpDriver() (code int) {
          row := make([]string, 4)
          var notes []string
          for v := range row {
-            r := dpRunChild(exe, "s2",
+            r := dpRunChild("s2",
                fmt.Sprintf("0x%x", d), obf, "carve", strconv.Itoa(v))
             row[v] = r.kind
             if r.stderr != "" {
@@ -421,7 +414,7 @@ func dpDriver() (code int) {
       say("  prep sensitivity for the best stage-2-looking candidate")
 
       for _, prep := range []string{"full", "carve", "none"} {
-         r := dpRunChild(exe, "s2", fmt.Sprintf("0x%x", firstReject), obf, prep, "0")
+         r := dpRunChild("s2", fmt.Sprintf("0x%x", firstReject), obf, prep, "0")
          say("    PREP=%-6s 0x%06x: %s", prep, firstReject, show(r))
          if r.stderr != "" {
             say("        stderr: %s", r.stderr)
@@ -633,30 +626,21 @@ type dpResult struct {
 }
 
 // dpRunChild spawns one trial as `exe -7 <mode> <args...>`. Positional, so no
-// flag is ever involved.
-func dpRunChild(exe, mode string, args ...string) dpResult {
-   ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-   defer cancel()
-
-   cmd := exec.CommandContext(ctx, exe, append([]string{"-7", mode}, args...)...)
-   var out, errb bytes.Buffer
-   cmd.Stdout = &out
-   cmd.Stderr = &errb
-   err := cmd.Run()
-
-   if ctx.Err() != nil {
+// flag is ever involved, and the executable is resolved by the shared helper
+// rather than being threaded through every call site.
+func dpRunChild(mode string, args ...string) dpResult {
+   p := runCollect(append([]string{"-7", mode}, args...), 300*time.Second)
+   if p.timedOut {
       return dpResult{kind: "TIMEOUT", rc: -1}
    }
 
-   r := dpResult{kind: "NONE"}
-   if ee, ok := err.(*exec.ExitError); ok {
-      r.rc = ee.ExitCode()
-   } else if err != nil {
+   r := dpResult{kind: "NONE", rc: p.rc}
+   if p.err != nil {
       r.rc = -1
    }
 
    pre := dpTag(mode) + " "
-   for _, x := range strings.Split(out.String(), "\n") {
+   for _, x := range strings.Split(string(p.stdout), "\n") {
       x = strings.TrimSuffix(x, "\r")
       if !strings.HasPrefix(x, pre) {
          continue
@@ -669,14 +653,14 @@ func dpRunChild(exe, mode string, args ...string) dpResult {
       case "FAULT":
          r.kind = "FAULT"
          r.line = x
-         r.stderr = dpLastLine(errb.String())
+         r.stderr = dpLastLine(string(p.stderr))
          return r
       case "OK", "REJECT", "MATCH", "NOMATCH", "ERR":
          r.kind = w[1]
          r.line = x
       }
    }
-   r.stderr = dpLastLine(errb.String())
+   r.stderr = dpLastLine(string(p.stderr))
    return r
 }
 

@@ -32,9 +32,9 @@
 // never names a growing duration, the parent is stuck rather than a child;
 // Ctrl-Break prints a goroutine dump by itself.
 //
-// NOTE: dllPath is in main.go's manifest; descTotal's 0xF0 test, scanDescs and
-// splitDescs are in warbird.go; the child this driver spawns, and the
-// PRKF_PROBE_DESC variable that selects it, are in child.go.
+// NOTE: dllPath is in main.go's manifest; the 0xF0 heap test, scanDescs and
+// splitDescs are in warbird.go; the child this driver spawns, the probeEnv
+// variable that selects it, and the spawn helpers, are in child.go.
 //
 // -3 decrypts sigPrvPath -> sigPlainPath, writing output only after every
 // available check passes.
@@ -211,7 +211,10 @@ func cmdFindSub() error {
    w(fmt.Sprintf("heap descriptors: %d", len(descs)))
    fmt.Printf("heap descriptors: %d\n", len(descs))
 
-   self, err := os.Executable()
+   // One resolution for the whole scan, logged once: runChild caches the same
+   // value internally, and a failure here is reported before any child is
+   // spawned rather than once per descriptor.
+   self, err := selfExe()
    if err != nil {
       return err
    }
@@ -298,7 +301,7 @@ func cmdFindSub() error {
 
             w(fmt.Sprintf("job %d start desc=%#x", i, desc))
 
-            res := runChild(self, i, desc, w)
+            res := runChild(i, desc, w)
 
             mu.Lock()
             delete(active, i)

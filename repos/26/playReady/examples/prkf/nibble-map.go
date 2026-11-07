@@ -66,14 +66,12 @@ package main
 
 import (
    "bytes"
-   "context"
    "crypto/sha256"
    "encoding/binary"
    "encoding/hex"
    "encoding/json"
    "fmt"
    "os"
-   "os/exec"
    "path/filepath"
    "strconv"
    "strings"
@@ -691,34 +689,29 @@ type dmSweep struct {
 // dmRun spawns one sweep child for (descRVA, setrva) over the given licences.
 // The consumer RVA is a parameter rather than a package variable, so the driver
 // cannot forget to publish it before the first spawn.
+//
+// A spawn failure is a load failure rather than an empty result: without that
+// distinction every set would report "incomplete" and the driver would blame the
+// blob encoding for a missing executable.
 func dmRun(descRVA, setrva uint32, lics []int) dmSweep {
-   // A failure here leaves exe empty, so the spawn fails, every sweep comes back
-   // with no OUT rows and the run dies blaming an incomplete sweep.
-   exe, err := os.Executable()
-   if err != nil {
-      return dmSweep{loadfail: "LOADFAIL os.Executable: " + err.Error()}
-   }
    ps := make([]string, len(lics))
    for i, x := range lics {
       ps[i] = fmt.Sprintf("%02x", x)
    }
-   ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-   defer cancel()
    // Positional worker arguments, not flags: the child re-derives every path
    // from the same manifest the parent used.
-   cmd := exec.CommandContext(ctx, exe, "-6", "sweep",
+   p := runCollect([]string{
+      "-6", "sweep",
       fmt.Sprintf("0x%x", setrva),
       fmt.Sprintf("0x%x", descRVA),
-      strings.Join(ps, ","))
-   var so bytes.Buffer
-   cmd.Stdout = &so
-   err = cmd.Run()
-
-   r := dmSweep{outs: map[int]map[int]string{}}
-   if ee, ok := err.(*exec.ExitError); ok {
-      r.rc = ee.ExitCode()
+      strings.Join(ps, ","),
+   }, 30*time.Minute)
+   if p.err != nil {
+      return dmSweep{loadfail: "LOADFAIL " + p.err.Error()}
    }
-   for _, ln := range strings.Split(so.String(), "\n") {
+
+   r := dmSweep{outs: map[int]map[int]string{}, rc: p.rc}
+   for _, ln := range strings.Split(string(p.stdout), "\n") {
       f := strings.Fields(ln)
       if len(f) < 2 {
          continue

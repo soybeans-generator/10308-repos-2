@@ -1,6 +1,3 @@
-pointless globals
-rule of 3
-
 reduce os/exec
 
 reduce runtime
@@ -10,8 +7,6 @@ reduce unsafe
 reduce syscall
 
 remove bloat
-
-remove regexp
 
 remove sort
 

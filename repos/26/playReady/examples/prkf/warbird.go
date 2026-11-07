@@ -74,18 +74,28 @@ import (
 // where they are used.
 const keyLen = 0x20
 
-// wbVirtualProtect and wbNtQuery are the only two LazyProcs kept at package
-// scope. Both are called from hot paths - wbPatch runs once per patched range,
-// and NtQuerySystemInformation is the Warbird gate every step calls - so a
-// LazyProc built at the call site would be re-resolved by Find on every call.
-// The other three entry points are each called once and are built where used.
+// wbKernel32 is one LazyDLL for every kernel32 entry point below. Building it
+// per use would be three separate loader lookups for one module: VirtualProtect
+// in wbPatch, the VEH installer, and the module-name lookup inside the handler.
 //
-// K32GetMappedFileNameW, not GetMappedFileNameW: the unprefixed name lives in
+// wbVirtualProtect and wbNtQuery are resolved names because both are called
+// from hot paths - wbPatch runs once per patched range, and
+// NtQuerySystemInformation is the Warbird gate every step calls - so a LazyProc
+// built at the call site would be re-resolved by Find on every call.
+//
+// wbMappedName and wbAddVEH are called once each and would be inline by the
+// rule of three, but they are declared here with the rest for one reason:
+// K32GetMappedFileNameW, not GetMappedFileNameW. The unprefixed name lives in
 // psapi.dll, and a LazyProc built for it on kernel32 panics on first Call -
 // which here is inside the VEH callback, turning a reported fault into a silent
-// process death.
+// process death. That hazard belongs on a declaration, not buried in the
+// callback body.
 var (
-   wbVirtualProtect = syscall.NewLazyDLL("kernel32.dll").NewProc("VirtualProtect")
+   wbKernel32 = syscall.NewLazyDLL("kernel32.dll")
+
+   wbVirtualProtect = wbKernel32.NewProc("VirtualProtect")
+   wbMappedName     = wbKernel32.NewProc("K32GetMappedFileNameW")
+   wbAddVEH         = wbKernel32.NewProc("AddVectoredExceptionHandler")
    wbNtQuery        = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
 )
 
@@ -230,8 +240,7 @@ func wbVEH(base uintptr, say func(string)) bool {
    cb := syscall.NewCallback(func(ep *excPointers) uintptr {
       mod := "-"
       var nm [512]uint16
-      if r, _, _ := syscall.NewLazyDLL("kernel32.dll").NewProc("K32GetMappedFileNameW").Call(
-         ^uintptr(0), ep.Record.Address,
+      if r, _, _ := wbMappedName.Call(^uintptr(0), ep.Record.Address,
          uintptr(unsafe.Pointer(&nm[0])), 512); r != 0 {
          if s := syscall.UTF16ToString(nm[:]); s != "" {
             mod = s[strings.LastIndexByte(s, '\\')+1:]
@@ -249,7 +258,7 @@ func wbVEH(base uintptr, say func(string)) bool {
       os.Exit(3)
       return 0
    })
-   h, _, _ := syscall.NewLazyDLL("kernel32.dll").NewProc("AddVectoredExceptionHandler").Call(1, cb)
+   h, _, _ := wbAddVEH.Call(1, cb)
    return h != 0
 }
 

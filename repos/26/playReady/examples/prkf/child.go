@@ -1,17 +1,18 @@
 // child.go begin
 //go:build windows
 
-// The two bodies this binary re-executes, and the trace plumbing they share.
+// The two bodies this binary re-executes, and the process plumbing they share.
 //
 //   -2's descriptor probe   probeTarget, runOne, worker, emit, probe
 //   -7's (s1, s2) trial     dpWorker
+//   spawn helpers           selfExe, runCollect, runChild, trace
 //
-// Both take one candidate, run it in a fresh process, and print one terminal
-// verdict line the parent turns into a result kind. -6's sweep child is a
-// different shape - it prints a table of rows for one set - and lives with its
+// Both children take one candidate, run it in a fresh process, and print one
+// terminal verdict line the parent turns into a result kind. -6's sweep child is
+// a different shape - it prints a table of rows for one set - and lives with its
 // driver in nibblemap.go.
 //
-// # WHY THE PROBE IS A SEPARATE PROCESS
+// # WHY EVERY CHILD IS A SEPARATE PROCESS
 //
 // A fault in a descriptor's code is a Windows SEH exception raised inside the
 // DLL, not a Go panic. The Go runtime only converts exceptions on Go-managed
@@ -22,12 +23,19 @@
 // per descriptor confines a fault to that child; the parent records NO_OUTPUT
 // with the exit status and last trace line and continues.
 //
-// NO DEADLINE. A timeout does not make a hang impossible, it makes it
-// invisible: the driver would print TIMEOUT and move on, and the descriptor
-// that actually hangs would be buried in a line that looks like every other
-// REJECT. A hanging child hangs the run and says so - its trace is streamed
-// into the log as it arrives, so the last line names the phase it never came
-// back from. Interrupt the run and read the log.
+// The same reasoning covers -6 and -7: both patch a routine into a loaded image
+// and call it, so both can fault the same way. That is why the process count
+// cannot be reduced - the boundary is the feature - but the spawn code lives
+// here once rather than three times.
+//
+// NO DEADLINE for the -2 probe. A timeout does not make a hang impossible, it
+// makes it invisible: the driver would print TIMEOUT and move on, and the
+// descriptor that actually hangs would be buried in a line that looks like
+// every other REJECT. A hanging child hangs the run and says so - its trace is
+// streamed into the log as it arrives, so the last line names the phase it
+// never came back from. Interrupt the run and read the log. -6 and -7 do take a
+// deadline, because their children are bounded work rather than open-ended
+// probing.
 //
 // # EXIT CODES
 //
@@ -36,14 +44,15 @@
 // 5 on bad input or a recovered panic, 6 when no fault handler could be
 // installed.
 //
-// NOTE: -2's child is selected by the PRKF_PROBE_DESC environment variable;
-// -6's and -7's children are selected positionally. The ABI (keyLen, wbArgs,
-// newWbArgs, callWarbird, loadWarbird, statusOK) is in warbird.go.
+// NOTE: -2's child is selected by probeEnv; -6's and -7's children are selected
+// positionally. The ABI (keyLen, wbArgs, newWbArgs, callWarbird, loadWarbird,
+// statusOK) is in warbird.go.
 package main
 
 import (
    "bufio"
    "bytes"
+   "context"
    "crypto/ecdh"
    "crypto/rand"
    "encoding/binary"
@@ -55,15 +64,30 @@ import (
    "runtime"
    "strconv"
    "strings"
+   "sync"
    "time"
    "unsafe"
 )
 
-// childT0 is the one package-level value here, and it cannot be inlined: its
-// whole job is to capture the process start once, so that every trace line can
-// carry a millisecond offset. Reading time.Now() at the trace site would print
-// 0ms for every line.
-var childT0 = time.Now()
+// probeEnv carries a descriptor VA into a probe child. runChild sets it,
+// probeTarget reads it, and the parse error names it, so the literal appears
+// three times and a typo in any one of them is a probe child that silently
+// never runs. The environment is used instead of a flag so the child mode never
+// appears in `prkf -h`.
+const probeEnv = "PRKF_PROBE_DESC"
+
+var (
+   // childT0 captures the process start once, so every trace line can carry a
+   // millisecond offset. Reading time.Now() at the trace site would print 0ms
+   // for every line.
+   childT0 = time.Now()
+
+   // selfPath and selfErr are selfExe's cache: three drivers spawn children of
+   // themselves and each needs the same answer.
+   selfOnce sync.Once
+   selfPath string
+   selfErr  error
+)
 
 // ------------------------------------------------------- the -7 trial child
 
@@ -267,18 +291,17 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code 
 // probeTarget reports whether this process was started as a probe child, and
 // for which descriptor. Called from main before the FlagSet exists.
 //
-// The variable is used instead of a flag so the child mode never appears in
-// `prkf -h`; it is written by runChild and by nothing else. A malformed value is
-// returned rather than exited on: main is the only place in the program that
-// terminates, and it already knows the exit code for a bad command line.
+// A malformed value is returned rather than exited on: main is the only place
+// in the program that terminates, and it already knows the exit code for a bad
+// command line.
 func probeTarget() (uint32, bool, error) {
-   s := os.Getenv("PRKF_PROBE_DESC")
+   s := os.Getenv(probeEnv)
    if s == "" {
       return 0, false, nil
    }
    v, err := strconv.ParseUint(s, 0, 32)
    if err != nil {
-      return 0, true, fmt.Errorf("PRKF_PROBE_DESC=%q: %w", s, err)
+      return 0, true, fmt.Errorf("%s=%q: %w", probeEnv, s, err)
    }
    return uint32(v), true, nil
 }
@@ -336,6 +359,14 @@ func runOne(descVA uint32) int {
    return w.emit(a, b, c, inputA, inputB)
 }
 
+// selfExe resolves this binary's own path once. A failure is a property of the
+// process rather than of any one step, so it is resolved on first use and
+// reused, and each caller decides what its own error message should say.
+func selfExe() (string, error) {
+   selfOnce.Do(func() { selfPath, selfErr = os.Executable() })
+   return selfPath, selfErr
+}
+
 // ------------------------------------------------------------ trace + spawn
 
 // trace writes one timestamped line to the child's stderr. Writes to stderr are
@@ -360,9 +391,17 @@ type childOut struct {
 // step's log. They are not buffered until the child exits: a child that hangs
 // never exits, and the hang is precisely the case where the last line written
 // is the only evidence there is.
-func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
-   cmd := exec.Command(self)
-   cmd.Env = append(os.Environ(), "PRKF_PROBE_DESC="+fmt.Sprintf("%#x", descVA))
+func runChild(idx int, descVA uint32, w func(string)) childOut {
+   exe, err := selfExe()
+   if err != nil {
+      return childOut{
+         line: fmt.Sprintf("RESULT %#x NO_OUTPUT exit=%v", descVA, err),
+         exit: err.Error(),
+      }
+   }
+
+   cmd := exec.Command(exe)
+   cmd.Env = append(os.Environ(), probeEnv+"="+fmt.Sprintf("%#x", descVA))
 
    var stdout bytes.Buffer
    cmd.Stdout = &stdout
@@ -433,6 +472,55 @@ type probeResult struct {
    status   []byte // the 4 status bytes the routine wrote
    out      []byte
    fill     []byte
+}
+
+// procOut is one collected child run: everything the -6 and -7 drivers need to
+// turn a child into a result, and nothing else.
+type procOut struct {
+   stdout   []byte
+   stderr   []byte
+   rc       int
+   timedOut bool
+   err      error // set only when the process could not be run at all
+}
+
+// runCollect spawns this binary with args under a deadline and returns its
+// output. A non-zero exit is reported as rc, not as an error: every child
+// signals failure that way on purpose, and the caller parses stdout for the
+// reason. err is non-nil only when the process could not be started.
+//
+// This is the -6 and -7 drivers' shared plumbing. -2's runChild is deliberately
+// not built on it: that child's stderr is streamed line by line into the scan
+// log while it runs, which a buffered helper cannot do, and a hang there is
+// diagnosed from the last streamed line rather than from an exit code.
+func runCollect(args []string, timeout time.Duration) procOut {
+   exe, err := selfExe()
+   if err != nil {
+      return procOut{rc: -1, err: err}
+   }
+   ctx, cancel := context.WithTimeout(context.Background(), timeout)
+   defer cancel()
+
+   cmd := exec.CommandContext(ctx, exe, args...)
+   var so, se bytes.Buffer
+   cmd.Stdout = &so
+   cmd.Stderr = &se
+   runErr := cmd.Run()
+
+   p := procOut{stdout: so.Bytes(), stderr: se.Bytes(), rc: -1}
+   if ctx.Err() != nil {
+      p.timedOut = true
+      return p
+   }
+   switch e := runErr.(type) {
+   case nil:
+      p.rc = 0
+   case *exec.ExitError:
+      p.rc = e.ExitCode()
+   default:
+      p.err = runErr
+   }
+   return p
 }
 
 type worker struct {

@@ -46,31 +46,25 @@
 //   - lic_NN.blob is NOT: it uses a random ephemeral scalar. Validity is proven
 //     instead by -6 reaching a live set and -7 reaching pubkey MATCH.
 //
-// ORACLE PRIVATE SCALARS (for manual checks)
+// ORACLE PRIVATE SCALARS   nibble NN -> d = NN repeated 64 hex digits, i.e.
 //
-//   nibble NN  ->  d = NN repeated 64 hex digits = 32 bytes of 0x11*NN
-//   For 0x0f that is 2^256-1, which exceeds the group order and is reduced mod
-//   N for the multiply; the derived scalar the routine computes is the
-//   unreduced value, and the two agree mod N, which is all ECIES needs.
+//   32 bytes of 0x11*NN. For 0x0f that is 2^256-1, which exceeds the group
+//   order; the routine computes the unreduced value and the two agree mod N.
 //
 // CURVE ARITHMETIC
 //
 //   filippo.io/nistec does the point work: ScalarBaseMult, ScalarMult, Add and
-//   SetBytes (which validates on-curve, so nothing calls IsOnCurve). It is the
-//   replacement the crypto/elliptic deprecation points at, and what crypto/ecdh
-//   itself uses. Only the sentinel's y-coordinate needs anything else:
-//   big.Int.ModSqrt, since P = 3 mod 4. crypto/elliptic is imported for
-//   Params() alone, which is not deprecated: it reads P and B for that ModSqrt.
+//   SetBytes (which validates on-curve, so nothing calls IsOnCurve) - the
+//   replacement crypto/elliptic's deprecation points at. Only the sentinel's
+//   y-coordinate needs anything else: big.Int.ModSqrt, since P = 3 mod 4.
 //
-// EXIT CODES
-//   Nothing here calls os.Exit. stageMakeOracle returns 1 for every fatal
-//   condition, so main owns the only termination in the program.
+// EXIT CODES / GLOBALS
 //
-// GLOBALS
-//   moN and moP are the only two, and both are read in more than three places.
-//   The curve's B coefficient and the constant 3 each appear once or twice and
-//   are locals in stageMakeOracle, next to the equation they belong to.
-
+//   Nothing here calls os.Exit: stageMakeOracle returns 1 for every fatal
+//   condition, so main owns the only termination in the program. moParams is
+//   the only global, because elliptic.P256().Params() is called three times -
+//   for N, for P, and for B in the sentinel's curve equation. The constant 3
+//   appears once and is a local, next to that equation.
 package main
 
 import (
@@ -86,8 +80,9 @@ import (
 )
 
 var (
-   moN = elliptic.P256().Params().N
-   moP = elliptic.P256().Params().P
+   moParams = elliptic.P256().Params()
+   moN      = moParams.N
+   moP      = moParams.P
 )
 
 // moFail reports a fatal condition on stderr and yields exit code 1. It returns
@@ -158,7 +153,7 @@ func stageMakeOracle() int {
    three := big.NewInt(3)
    rhs := new(big.Int).Exp(mx, three, moP)
    rhs.Sub(rhs, new(big.Int).Mul(three, mx))
-   rhs.Add(rhs, elliptic.P256().Params().B)
+   rhs.Add(rhs, moParams.B)
    rhs.Mod(rhs, moP)
    my := new(big.Int).ModSqrt(rhs, moP)
    if my == nil {
