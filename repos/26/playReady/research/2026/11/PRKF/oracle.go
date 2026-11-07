@@ -27,23 +27,25 @@
 //
 // PIPELINE
 //
-//   prkf -4   ->  testdata/oracle/key_NN.pub, testdata/oracle/lic_NN.blob
-//   prkf -5   ->  testdata/wbtool_img.bin
-//   prkf -6   ->  testdata/oracle_map.json
-//   prkf -7   ->  testdata/extracted.enc.plain
+//   prkf -4   ->  oracle/key_NN.pub, oracle/lic_NN.blob
+//   prkf -5   ->  wbtool_img.bin
+//   prkf -6   ->  oracle_map.json
+//   prkf -7   ->  extracted.enc.plain
+//
+//   Every path is a manifest entry in main.go: oracleDir for the output
+//   directory, outDir for the artefact root.
 //
 // USAGE
 //
 //   prkf -4
 //
 //   There are no flags of its own. -1 through -7 are the entire command line
-//   surface, and the driver in main.go owns it; every input and output path
-//   here is a constant in the step that uses it.
+//   surface, and the driver in main.go owns it.
 //
-// OUTPUTS   (all under testdata/, which is created on demand)
+// OUTPUTS   (all under oracleDir, which is created on demand)
 //
-//   testdata/oracle/key_NN.pub     64 bytes, X||Y (no 0x04 prefix)
-//   testdata/oracle/lic_NN.blob    128 bytes, C1.x||C1.y||C2.x||C2.y
+//   key_NN.pub     64 bytes, X||Y (no 0x04 prefix)
+//   lic_NN.blob    128 bytes, C1.x||C1.y||C2.x||C2.y
 //
 // PROPERTIES
 //
@@ -73,11 +75,6 @@ import (
    "strings"
 )
 
-// moData is the artefact root shared by all seven steps. It is the same
-// directory main.go calls outDir; the two are not unified because this step
-// and the three that follow it are self-contained, and outDir is the driver's.
-const moData = "testdata"
-
 // The licence plaintext: signature key = "HELLO MICROSOFT!", content key = zeros.
 // -6 recovers the magic sequence as the 32-byte output shared by every licence
 // XOR these bytes, so the licence blob has to land exactly on them.
@@ -103,9 +100,6 @@ var (
       y: moMustHex("4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"),
    }
 )
-
-// moOracleDir is where -4 writes its output.
-var moOracleDir = filepath.Join(moData, "oracle")
 
 // moConcat32 renders each value as 32 big-endian bytes and concatenates them.
 func moConcat32(vals ...*big.Int) []byte {
@@ -219,13 +213,13 @@ func moYFromX(x *big.Int) *big.Int {
 // --- stage entry point ------------------------------------------------------
 
 func stageMakeOracle() int {
-   out := moOracleDir
+   out := oracleDir
 
-   // Every artefact this pipeline produces lives under testdata/. Keeping the
+   // Every artefact this pipeline produces lives under outDir. Keeping the
    // oracle beside the image it feeds means a run can never pick up a stale
    // copy from the current directory by accident.
-   if err := os.MkdirAll(moData, 0o755); err != nil {
-      moFatal("create %s: %v", moData, err)
+   if err := os.MkdirAll(outDir, 0o755); err != nil {
+      moFatal("create %s: %v", outDir, err)
    }
 
    // --- sanity ---

@@ -14,8 +14,7 @@
 // It scans the DLL for Warbird heap-exec descriptors, then re-executes this
 // binary once per candidate, scanWorkers at a time, and reads the RESULT line
 // each child prints. The child, the call it makes, and the argument block all
-// live in warbird.go; this file owns the DLL, the descriptor layout, and the
-// parent side of the scan.
+// live in warbird.go; this file owns the parent side of the scan.
 //
 // This step does NOT use sample key files. Discovery rests entirely on
 // properties of the routine itself, read from its disassembly:
@@ -39,12 +38,9 @@
 // A result of ZERO accepted descriptors, or more than one, is an error to
 // investigate - there is no fallback path.
 //
-// Outputs, both in testdata/:
-//
-//   prsubs.json     build-specific values, keyed by the DLL sha256
-//   findprsub.txt   per-descriptor probe results and every child's trace
-//
-// The DLL is the one input that is not in testdata/ - see dllPath.
+// Outputs: prsubsPath (build-specific values, keyed by the DLL sha256) and
+// scanLogPath (per-descriptor probe results and every child's trace). Both are
+// declared in main.go's manifest.
 //
 // # DIAGNOSTICS
 //
@@ -68,26 +64,25 @@
 // prints a goroutine dump by itself, which is the same evidence without an
 // import of runtime here.
 //
-// NOTE: this file owns dllPath, descTotal and scanWorkers. keyLen, warbirdOp,
-// argsLen and probeEnv are the Warbird ABI and live in warbird.go, which also
-// holds the probe child; -3 builds the same argument block rather than
+// NOTE: this file owns scanWorkers and the -2 scan. dllPath is in main.go's
+// manifest; descTotal and the descriptor layout are in warbird.go; keyLen,
+// warbirdOp, argsLen and probeEnv are the Warbird ABI and are also there, along
+// with the probe child. -3 builds the same argument block rather than
 // redeclaring it.
 //
 // ================================== -3 =======================================
 //
-// Decrypts a PlayReady signing key (testdata/extracted.sig.prv ->
-// testdata/extracted.sig.plain).
+// Decrypts a PlayReady signing key (sigPrvPath -> sigPlainPath).
 //
-// The names are fixed: input, output and public key are the ones -1 produces,
-// inside testdata/. The output is written only after every available check
-// passes.
+// The names are fixed: input, output and public key are the ones -1 produces.
+// The output is written only after every available check passes.
 //
 // # VERSION SUPPORT
 //
 // Only ONE value differs between DLL builds: the RVA of the heap descriptor
-// holding the signing-key routine. It comes from testdata/prsubs.json, keyed
-// by the DLL sha256 and produced by -2, which does not use sample keys. This
-// step refuses to run if the cache does not match the DLL.
+// holding the signing-key routine. It comes from prsubsPath, keyed by the DLL
+// sha256 and produced by -2, which does not use sample keys. This step refuses
+// to run if the cache does not match the DLL.
 //
 // Everything else is hardcoded because it cannot drift with the DLL:
 //
@@ -101,8 +96,8 @@
 //   - size == 0x20 is the P-256 private scalar length, and the routine tests it
 //     itself with `cmp dword ptr [rcx+10h], 20h`.
 //
-// prsubs.json is read from testdata/, so run -2 first; both steps agree on the
-// directory because both go through dataFile.
+// Run -2 first; both steps agree on the directory because both go through
+// main.go's manifest.
 //
 // # VERIFICATION
 //
@@ -150,57 +145,31 @@ import (
    "time"
 )
 
-const (
-   // dllPath is the PlayReady module, read and mapped where Windows installed
-   // it. It is the only path in the program outside testdata/, and it stays
-   // outside on purpose: the descriptor is an RVA into the mapped image, so the
-   // bytes hashed here and the image the Warbird gate executes from have to be
-   // the same module, and a copy loaded out of testdata/ is a different
-   // mapping that the gate is not documented to accept. Everything the
-   // pipeline reads or writes goes through dataFile; this one file is read in
-   // place.
-   dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
-
-   // Size of one Warbird heap-exec descriptor, including its 32-byte digest.
-   // The descriptor's own size field holds this same value, which is what
-   // makes it usable as a signature.
-   descTotal = 0xF0
-
-   // How many probe subprocesses run at once. Each child loads the DLL and
-   // makes three calls, so this trades process-table pressure for wall clock;
-   // 8 keeps a typical machine busy without starving it.
-   scanWorkers = 8
-)
+// How many probe subprocesses run at once. Each child loads the DLL and makes
+// three calls, so this trades process-table pressure for wall clock; 8 keeps a
+// typical machine busy without starving it.
+const scanWorkers = 8
 
 // ------------------------------------------------------------ -3: decrypt
 
-// File names this step reads and writes. They are vars, not consts, only
-// because dataFile resolves outDir; outDir is itself a constant, so the values
-// are fixed for the life of the process.
-var (
-   srcName = dataFile("extracted.sig.prv")   // written by prkf -1
-   pubName = dataFile("extracted.sig.pub")   // written by prkf -1
-   dstName = dataFile("extracted.sig.plain") // 32-byte plaintext scalar
-)
-
 func cmdDecrypt() error {
-   if !isFile(srcName) {
-      return fmt.Errorf("missing input: %s\n  run prkf -1 first", srcName)
+   if !isFile(sigPrvPath) {
+      return fmt.Errorf("missing input: %s\n  run prkf -1 first", sigPrvPath)
    }
-   if !isFile(pubName) {
-      return fmt.Errorf("missing public key: %s\n  run prkf -1 first", pubName)
+   if !isFile(sigPubPath) {
+      return fmt.Errorf("missing public key: %s\n  run prkf -1 first", sigPubPath)
    }
 
    // ---- decrypt ------------------------------------------------------
-   got, err := decryptSigningKey(srcName)
+   got, err := decryptSigningKey(sigPrvPath)
    if err != nil {
       return err
    }
-   fmt.Printf("%s (%d bytes)\n", srcName, len(got))
+   fmt.Printf("%s (%d bytes)\n", sigPrvPath, len(got))
    fmt.Printf("plaintext %s\n", hex.EncodeToString(got))
 
    // ---- validation: d*G must equal the published public key ----------
-   raw, err := os.ReadFile(pubName)
+   raw, err := os.ReadFile(sigPubPath)
    if err != nil {
       return err
    }
@@ -212,7 +181,7 @@ func cmdDecrypt() error {
    }
    k, err := ecdh.P256().NewPublicKey(raw)
    if err != nil {
-      return fmt.Errorf("%s: P-256 point: %v", pubName, err)
+      return fmt.Errorf("%s: P-256 point: %v", sigPubPath, err)
    }
    want := k.Bytes()
 
@@ -225,17 +194,17 @@ func cmdDecrypt() error {
    if !bytes.Equal(gotPub, want) {
       return fmt.Errorf("d*G != %s - the plaintext is not the private key for\n"+
          "that public key; the descriptor, the argument layout or the\n"+
-         "input file is wrong; nothing was written", pubName)
+         "input file is wrong; nothing was written", sigPubPath)
    }
-   fmt.Printf("[ OK ] d*G == %s\n", pubName)
+   fmt.Printf("[ OK ] d*G == %s\n", sigPubPath)
    fmt.Printf("       Q = (%s,\n            %s)\n",
       hex.EncodeToString(want[1:33]), hex.EncodeToString(want[33:65]))
 
    // ---- write --------------------------------------------------------
-   if err := os.WriteFile(dstName, got, 0o666); err != nil {
+   if err := os.WriteFile(sigPlainPath, got, 0o666); err != nil {
       return err
    }
-   fmt.Printf("\nwrote %s (%d bytes)\n", dstName, len(got))
+   fmt.Printf("\nwrote %s (%d bytes)\n", sigPlainPath, len(got))
    return nil
 }
 
@@ -258,8 +227,7 @@ func cmdFindSub() error {
    }
    defer f.Close()
 
-   logPath := dataFile("findprsub.txt")
-   logf, err := os.Create(logPath)
+   logf, err := os.Create(scanLogPath)
    if err != nil {
       return err
    }
@@ -443,7 +411,7 @@ func cmdFindSub() error {
 
    if len(acc) == 0 {
       return errors.New("no descriptor satisfied the signing-key routine's properties\n" +
-         "  See the per-descriptor probe results in " + logPath + "\n" +
+         "  See the per-descriptor probe results in " + scanLogPath + "\n" +
          "  Either the hardcoded argument layout no longer matches this build,\n" +
          "  or this library does not contain the routine")
    }
@@ -465,15 +433,14 @@ func cmdFindSub() error {
    if err != nil {
       return err
    }
-   cachePath := dataFile("prsubs.json")
-   if err := os.WriteFile(cachePath, compact, 0o644); err != nil {
+   if err := os.WriteFile(prsubsPath, compact, 0o644); err != nil {
       return err
    }
 
    w("")
    w("cache: " + string(compact))
-   fmt.Println("written " + logPath)
-   fmt.Println("written " + cachePath)
+   fmt.Println("written " + scanLogPath)
+   fmt.Println("written " + prsubsPath)
    fmt.Printf("cache: %s\n", compact)
    return nil
 }
@@ -559,6 +526,10 @@ type descriptor struct {
 }
 
 // heapDescs collects digest-validated Warbird heap-exec descriptors.
+//
+// This is the -2 scan, not the shared census in warbird.go: it needs the code
+// span to lie inside a mapped section and it deduplicates by (desc_va, rva,
+// len), which the other steps do not.
 //
 // Descriptor layout, relative to its base:
 //
@@ -681,27 +652,26 @@ func loadPrsubs() (*subRecord, error) {
    sum := sha256.Sum256(dll)
    sha := hex.EncodeToString(sum[:])
 
-   cache := dataFile("prsubs.json")
-   if !isFile(cache) {
-      return nil, fmt.Errorf("no %s - run prkf -2 first", cache)
+   if !isFile(prsubsPath) {
+      return nil, fmt.Errorf("no %s - run prkf -2 first", prsubsPath)
    }
-   raw, err := os.ReadFile(cache)
+   raw, err := os.ReadFile(prsubsPath)
    if err != nil {
       return nil, err
    }
    var rec subRecord
    if err := json.Unmarshal(raw, &rec); err != nil {
-      return nil, fmt.Errorf("%s: %v", cache, err)
+      return nil, fmt.Errorf("%s: %v", prsubsPath, err)
    }
 
    if rec.SHA256 != sha {
       return nil, fmt.Errorf("%s was built for a different DLL\n"+
          "  cache : %s\n"+
          "  actual: %s\n"+
-         "  re-run prkf -2", cache, rec.SHA256, sha)
+         "  re-run prkf -2", prsubsPath, rec.SHA256, sha)
    }
    if rec.DescVA == 0 {
-      return nil, fmt.Errorf("%s has no desc_va - re-run prkf -2", cache)
+      return nil, fmt.Errorf("%s has no desc_va - re-run prkf -2", prsubsPath)
    }
    return &rec, nil
 }

@@ -3,31 +3,34 @@
 
 // prkf -1, in two halves that cannot be run separately.
 //
-//   cmdCert   carves the CHAI certificate chain out of testdata/msprcore.bla
+//   cmdCert   carves the CHAI certificate chain out of corePath
 //   cmdKeys   parses the PRKF key-material section and writes the components
 //
 // main.go's cmdExtract calls cmdCert and then cmdKeys, so a failure in either
 // half aborts the step: a run that produced a chain but no keys is not a state
 // any later step can use. The two halves read the same file and write disjoint
-// outputs, which is why they share one input path (corePath, in main.go) and
-// one file.
+// outputs, which is why they share one input path and one file.
+//
+// Every path used here is declared in main.go's manifest: corePath for the
+// input, certPath for the chain, and sigPubPath/sigPrvPath/encPubPath/encPrvPath
+// for the four key components.
 //
 // # THE CHAIN
 //
 // It scans for CHAI headers, keeps only chains that parse self-consistently
-// (the certificate entries must tile the chain exactly), prefers a chain
-// whose preceding u32 big-endian length prefix equals its total length, and
-// writes the carved bytes to testdata/extracted.cert.
+// (the certificate entries must tile the chain exactly), prefers a chain whose
+// preceding u32 big-endian length prefix equals its total length, and writes
+// the carved bytes to certPath.
 //
 // # THE KEYS
 //
 // It finds the 0x1009 key-material section, parses every 0x100f record inside
-// it, and writes four components into testdata/:
+// it, and writes four components:
 //
-//   testdata/extracted.sig.pub   signing public key
-//   testdata/extracted.sig.prv   signing private component (32 bytes, still obfuscated)
-//   testdata/extracted.enc.pub   encryption public key
-//   testdata/extracted.enc.prv   encryption private component (65 bytes)
+//   sigPubPath   signing public key
+//   sigPrvPath   signing private component (32 bytes, still obfuscated)
+//   encPubPath   encryption public key
+//   encPrvPath   encryption private component (65 bytes)
 //
 // The signing record is the one immediately preceding the unique 65-byte
 // encryption record; see the comment at that site for why no header field can
@@ -35,8 +38,8 @@
 //
 // The structural parse is the only check in either half. No sample key files
 // are consulted: internal consistency identifies the chain, and the record
-// layout plus the uniqueness of the 65-byte private component identify the
-// two keys.
+// layout plus the uniqueness of the 65-byte private component identify the two
+// keys.
 package main
 
 import (
@@ -49,9 +52,6 @@ import (
 )
 
 const (
-   certOut = "extracted.cert"
-   keysOut = "extracted" // output stem, inside outDir
-
    chaiHdr = 20 // magic(4) version(4) total_length(4) flags(4) cert_count(4)
    certHdr = 16 // magic(4) version(4) total_length(4) certificate_length(4)
 )
@@ -63,10 +63,10 @@ var (
 
 // ------------------------------------------------- first half: the CHAI chain
 
-// cmdCert carves the CHAI certificate chain out of testdata/msprcore.bla and
-// writes it to testdata/extracted.cert. Selection is structural: a candidate
-// must tile its own certificate entries exactly, and a chain whose preceding
-// length prefix matches its total length is preferred over one whose does not.
+// cmdCert carves the CHAI certificate chain out of corePath and writes it to
+// certPath. Selection is structural: a candidate must tile its own certificate
+// entries exactly, and a chain whose preceding length prefix matches its total
+// length is preferred over one whose does not.
 func cmdCert() error {
    if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
       return fmt.Errorf("missing input: %s\n  put the PlayReady sample there before running", corePath)
@@ -146,11 +146,10 @@ func cmdCert() error {
    }
 
    // ---- write ------------------------------------------------------
-   out := dataFile(certOut)
-   if err := os.WriteFile(out, blob, 0o644); err != nil {
+   if err := os.WriteFile(certPath, blob, 0o644); err != nil {
       return err
    }
-   fmt.Printf("\nwrote %s (%d bytes)\n", out, len(blob))
+   fmt.Printf("\nwrote %s (%d bytes)\n", certPath, len(blob))
    return nil
 }
 
@@ -160,8 +159,6 @@ func cmdCert() error {
 // components. It re-reads corePath rather than taking buf from cmdCert: the
 // two halves are independent, and neither holds state for the other.
 func cmdKeys() error {
-   outNames := []string{"sig.pub", "sig.prv", "enc.pub", "enc.prv"}
-
    b, err := os.ReadFile(corePath)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
       return fmt.Errorf("%s: not a PRKF", corePath)
@@ -237,21 +234,20 @@ func cmdKeys() error {
       return fmt.Errorf("signing and encryption records are not distinct")
    }
 
-   data := map[string][]byte{
-      "sig.pub": sig.pub,
-      "sig.prv": sig.priv,
-      "enc.pub": enc.pub,
-      "enc.prv": enc.priv,
-   }
-
    fmt.Println("\nwritten:")
-   for _, k := range outNames {
-      p := dataFile(keysOut + "." + k)
-      v := data[k]
-      if err := os.WriteFile(p, v, 0666); err != nil {
-         return fmt.Errorf("write %s: %v", p, err)
+   for _, o := range []struct {
+      path string
+      b    []byte
+   }{
+      {sigPubPath, sig.pub},
+      {sigPrvPath, sig.priv},
+      {encPubPath, enc.pub},
+      {encPrvPath, enc.priv},
+   } {
+      if err := os.WriteFile(o.path, o.b, 0666); err != nil {
+         return fmt.Errorf("write %s: %v", o.path, err)
       }
-      fmt.Printf("  %s  %2d B\n", p, len(v))
+      fmt.Printf("  %s  %2d B\n", o.path, len(o.b))
    }
 
    return nil

@@ -1,14 +1,40 @@
 // warbird.go begin
 //go:build windows
 
-// The Warbird call: the kernel's argument block, the routine's status
-// convention, the call itself, and the probe child that exercises one
-// descriptor.
+// The Warbird interface: the descriptor format, the PE census that finds
+// descriptors in a DLL on disk, the kernel call ABI both branches share, and
+// the probe child that -2 re-executes.
 //
-// prkf -2 and -3 both make this call, and both go through callWarbird, so
-// there is exactly one place where a Go pointer becomes a uintptr. That is not
-// cosmetic: Proc.Call and LazyProc.Call take ...uintptr, so the conversion
-// cannot be avoided, but it can be confined to one function whose contract is
+// # THE DESCRIPTOR FORMAT
+//
+// A Warbird descriptor is a 32-byte SHA-256 digest followed by a body, and the
+// digest covers [0x20, size) where size is the u32 at +0x20. That makes every
+// descriptor self-validating, which is what lets this program enumerate them
+// with no external symbol data at all.
+//
+//   +0x00  32-byte SHA-256 over [0x20, size)
+//   +0x20  u32 total size   (0xF0 => heap-exec, anything else => segment)
+//   +0x24  u32 v1 marker    (0xFFFFFF00)
+//   +0x28  u32 desc_va
+//   +0x2C  u32 relocs       (segment descriptors only)
+//   +0x30  u32 reloc count  (segment descriptors only)
+//   +0x34  u32 encr_va      (0xF0000000 | code_rva; heap-exec only)
+//   +0x38  u32 size         (0xF0000000 | code_len; heap-exec only)
+//   +0xF0  entries, 0xC each: flags, rva, size   (segment descriptors only)
+//
+// The top nibble of encr_va and of an entry's size is a flag; the rest is an
+// RVA. scanDescs returns every descriptor whose digest validates, in file
+// order; segSpans returns a segment descriptor's entry spans.
+//
+// # THE TWO CALLS
+//
+// op=1 (segment decrypt) is used by -5 alone, and its argument block lives in
+// image.go because it is the only caller. op=3 (WbHeapExecuteCall) is used by
+// -2's probe child and by -3, so its block is wbArgs below.
+//
+// Both go through one function that converts a Go pointer to a uintptr. That is
+// not cosmetic: Proc.Call and LazyProc.Call take ...uintptr, so the conversion
+// cannot be avoided, but it can be confined to one place whose contract is
 // stated and whose lifetime handling is correct.
 //
 // The load-and-resolve pair is shared for the same reason: both callers need
@@ -28,8 +54,8 @@
 // it reached the descriptor that matters.
 //
 // One child per descriptor confines a fault to that child. The parent sees a
-// child with no RESULT line, records NO_OUTPUT with the child's exit status
-// and its last trace line, and continues with the next descriptor.
+// child with no RESULT line, records NO_OUTPUT with the child's exit status and
+// its last trace line, and continues with the next descriptor.
 //
 // # NO DEADLINE
 //
@@ -37,9 +63,9 @@
 // hang impossible, it makes it invisible: the driver would print TIMEOUT and
 // move on, and the descriptor that actually hangs - the thing worth knowing -
 // would be buried in a log line that looks like every other REJECT. A child
-// that hangs now hangs the run, and says so: its trace is streamed into
-// testdata/findprsub.txt as it arrives, so the last line for that descriptor
-// names the phase it never came back from. Interrupt the run and read the log.
+// that hangs now hangs the run, and says so: its trace is streamed into the log
+// as it arrives, so the last line for that descriptor names the phase it never
+// came back from. Interrupt the run and read the log.
 //
 // # IMPORTANT: rejection is in the STATUS DWORD, not in NTSTATUS
 //
@@ -48,15 +74,15 @@
 // written as "NTSTATUS != 0" will never fire. statusOK is the one
 // implementation of that check.
 //
-// NOTE: dllPath is declared in signing.go, which owns the DLL the scan reads;
-// this file borrows it for the child. Everything else here is ABI or the
-// child's own trace.
+// NOTE: dllPath is declared in main.go's manifest. Everything here is either
+// the on-disk descriptor format, kernel ABI, or the child's own trace.
 package main
 
 import (
    "bufio"
    "bytes"
    "crypto/rand"
+   "crypto/sha256"
    "encoding/binary"
    "encoding/hex"
    "fmt"
@@ -64,6 +90,7 @@ import (
    "os"
    "os/exec"
    "runtime"
+   "sort"
    "strconv"
    "strings"
    "sync"
@@ -73,14 +100,19 @@ import (
 )
 
 const (
-   // warbirdOp is op=3 (WbHeapExecuteCall); argsLen is the size of the
-   // kernel's call-args struct. Both are kernel ABI, not build data: the DLL
-   // and the running kernel must agree on them, so neither can change
-   // unilaterally.
+   // descTotal is the total size of a heap-exec descriptor, digest included.
+   // The descriptor's own size field holds this same value, which is what makes
+   // 0xF0 a signature rather than a guess: every other value belongs to a
+   // segment descriptor.
+   descTotal = 0xF0
+
+   // warbirdOp is op=3 (WbHeapExecuteCall); argsLen is the size of the kernel's
+   // call-args struct. Both are kernel ABI, not build data: the DLL and the
+   // running kernel must agree on them, so neither can change unilaterally.
    warbirdOp = 3
    argsLen   = 0x34
 
-   // 32 bytes: the P-256 private scalar length, the size this routine accepts,
+   // 32 bytes: the P-256 private scalar length, the size -3's routine accepts,
    // and the size it tests for itself with `cmp dword ptr [rcx+10h], 20h`.
    keyLen = 0x20
 
@@ -100,12 +132,12 @@ var childT0 = time.Now()
 // The conversion is unavoidable: Call takes ...uintptr, and syscall offers no
 // pointer-typed variant.
 //
-// The KeepAlive is not decorative. Through an interface, the callee's
-// directive (go:uintptrescapes) is not visible to the compiler - it does not
-// know which implementation runs - so the referent of the converted pointer is
-// not kept alive on our behalf. Without this call, a is dead after the
-// conversion and its struct, and with it the status and key buffers, may be
-// collected while the kernel is using them.
+// The KeepAlive is not decorative. Through an interface, the callee's directive
+// (go:uintptrescapes) is not visible to the compiler - it does not know which
+// implementation runs - so the referent of the converted pointer is not kept
+// alive on our behalf. Without this call, a is dead after the conversion and
+// its struct, and with it the status and key buffers, may be collected while
+// the kernel is using them.
 func callWarbird(proc caller, a *wbArgs) (uintptr, uintptr, error) {
    // SystemExtendedProcessInformation (0xB9) is the Warbird call gate.
    // NTSTATUS comes back in r1; the upper half of the register is garbage.
@@ -114,7 +146,8 @@ func callWarbird(proc caller, a *wbArgs) (uintptr, uintptr, error) {
    return r1, r2, err
 }
 
-// --------------------------------------------------------------- the call
+func le16(b []byte, o int) uint16 { return binary.LittleEndian.Uint16(b[o:]) }
+func le32(b []byte, o int) uint32 { return binary.LittleEndian.Uint32(b[o:]) }
 
 // loadWarbird maps the PlayReady module into this process and resolves the
 // Warbird call gate, returning the image base and the resolved procedure.
@@ -154,6 +187,20 @@ func probeTarget() (uint32, bool) {
       os.Exit(2)
    }
    return uint32(v), true
+}
+
+// rawAt returns the file's own bytes for an RVA, or nil when the RVA is not
+// backed by a section's raw data. Callers compare it against the decrypted
+// image to decide whether a span needs patching at all.
+func rawAt(fb []byte, secs []imgSection, rva, n uint32) []byte {
+   for _, s := range secs {
+      if s.va <= rva && rva < s.va+s.rs {
+         if o := int(s.rp) + int(rva-s.va); o+int(n) <= len(fb) {
+            return fb[o : o+int(n)]
+         }
+      }
+   }
+   return nil
 }
 
 func runOne(descVA uint32) {
@@ -205,8 +252,8 @@ func statusOK(b []byte) bool {
    return len(b) >= 4 && b[0]|b[1]|b[2]|b[3] == 0
 }
 
-// trace writes one timestamped line to the child's stderr. Writes to stderr
-// are unbuffered syscalls, so the line is out of this process before the next
+// trace writes one timestamped line to the child's stderr. Writes to stderr are
+// unbuffered syscalls, so the line is out of this process before the next
 // statement runs - including when the next statement is the kernel call that
 // never returns. The parent streams these lines straight into the log, so the
 // last trace line for a descriptor names the phase that stalled.
@@ -216,13 +263,11 @@ func trace(format string, a ...any) {
 }
 
 // caller is the part of *syscall.Proc and *syscall.LazyProc this program uses.
-// Both have identical Call signatures, so one call site covers prkf -2's probe
-// and prkf -3's decrypt.
+// Both have identical Call signatures, so one call site covers -2's probe and
+// -3's decrypt.
 type caller interface {
    Call(a ...uintptr) (r1, r2 uintptr, lastErr error)
 }
-
-// ------------------------------------------------------ spawning the children
 
 type childOut struct {
    line    string        // the RESULT line, synthesized if the child died
@@ -300,6 +345,172 @@ func runChild(self string, idx int, descVA uint32, w func(string)) childOut {
    }
 }
 
+// imgDesc is one digest-validated descriptor. rva and ln are meaningful only
+// for heap-exec descriptors; off and size are meaningful for both, because the
+// segment call reads the descriptor's own relocation fields and -5 rewrites a
+// descriptor in place.
+type imgDesc struct {
+   va   uint32 // descriptor RVA
+   off  uint32 // file offset of the descriptor
+   size uint32 // total size, digest included
+   rva  uint32 // code RVA     (heap-exec only)
+   ln   uint32 // code length  (heap-exec only)
+}
+
+// scanDescs returns every digest-validated descriptor in the file, in the order
+// the sections and their bytes appear.
+//
+// A candidate is accepted when its size field is plausible and the SHA-256 over
+// [0x20, size) matches the digest that precedes it. Nothing else is checked:
+// the digest is the signature, so a descriptor that passes is a descriptor the
+// kernel will accept, and one that fails is not worth classifying.
+//
+// The 0x200000 cap is deliberate and must not be lowered. The two largest
+// descriptors on the recorded build are 0x829c and 0x3cac bytes; a 0x2000 cap
+// silently skips them, which loses the gap blocks 0x334290..0x3370ef and makes
+// -7 execute ciphertext.
+func scanDescs(fb []byte, secs []imgSection) []imgDesc {
+   var out []imgDesc
+   for _, s := range secs {
+      lo := int(s.rp)
+      hi := min(lo+int(s.rs), len(fb))
+      if hi <= lo {
+         continue
+      }
+      b := fb[lo:hi]
+
+      for off := 0; off < len(b)-0x40; off += 4 {
+         size := le32(b, off+0x20)
+         if size < 0x40 || size > 0x200000 || off+int(size) > len(b) {
+            continue
+         }
+         sum := sha256.Sum256(b[off+0x20 : off+int(size)])
+         if !bytes.Equal(sum[:], b[off:off+32]) {
+            continue
+         }
+
+         d := imgDesc{va: s.va + uint32(off), off: s.rp + uint32(off), size: size}
+         if d.heap() {
+            // top nibble of both fields is a flag; the rest is an RVA
+            d.rva = le32(b, off+0x34) & 0x0FFFFFFF
+            d.ln = le32(b, off+0x38) & 0x0FFFFFFF
+         }
+         out = append(out, d)
+      }
+   }
+   return out
+}
+
+// heap reports whether this is a heap-exec descriptor. 0xF0 is the only size
+// the kernel treats that way, and the size field is covered by the digest, so
+// the test cannot be spoofed by a corrupt byte.
+func (d imgDesc) heap() bool { return d.size == descTotal }
+
+// imgInterval is a half-open RVA range: one heap-exec block, or a merged run of
+// them.
+type imgInterval struct{ lo, hi uint32 }
+
+// mergeIntervals sorts and coalesces ranges, so carveRuns can binary-search
+// them.
+func mergeIntervals(ivs []imgInterval) []imgInterval {
+   sort.Slice(ivs, func(i, j int) bool { return ivs[i].lo < ivs[j].lo })
+
+   var out []imgInterval
+   for _, p := range ivs {
+      if n := len(out); n > 0 && p.lo <= out[n-1].hi {
+         out[n-1].hi = max(out[n-1].hi, p.hi)
+         continue
+      }
+      out = append(out, p)
+   }
+   return out
+}
+
+// imgRun is a half-open RVA range that is safe to patch.
+type imgRun struct{ start, length uint32 }
+
+// carveRuns returns [r, r+s) minus every interval, as the runs that remain.
+//
+// Both patching callers need this, and both need it for the same reason: the
+// kernel decrypts a heap-exec block itself on op=3, so copying already-decrypted
+// bytes over one causes a double decrypt and the routine executes garbage.
+func carveRuns(merged []imgInterval, r, s uint32) []imgRun {
+   var out []imgRun
+   cur, end := r, r+s
+   i := max(sort.Search(len(merged), func(i int) bool { return merged[i].lo > r })-1, 0)
+
+   for _, m := range merged[i:] {
+      if m.hi <= cur {
+         continue
+      }
+      if m.lo >= end {
+         break
+      }
+      if m.lo > cur {
+         out = append(out, imgRun{cur, min(m.lo, end) - cur})
+      }
+      if cur = max(cur, m.hi); cur >= end {
+         break
+      }
+   }
+   if cur < end {
+      out = append(out, imgRun{cur, end - cur})
+   }
+   return out
+}
+
+// ------------------------------------------------------------- descriptors
+
+// imgSection is one PE section header as mapped: virtual address, raw extent
+// and raw file offset.
+type imgSection struct {
+   va uint32
+   rs uint32 // SizeOfRawData
+   rp uint32 // PointerToRawData
+}
+
+// peSections reads SizeOfImage and the section table out of a PE file.
+func peSections(fb []byte) (sizeImg uint32, secs []imgSection) {
+   lf := int(le32(fb, 0x3C))    // e_lfanew
+   n := int(le16(fb, lf+6))     // NumberOfSections
+   opt := int(le16(fb, lf+20))  // SizeOfOptionalHeader
+   sizeImg = le32(fb, lf+24+56) // SizeOfImage
+
+   secs = make([]imgSection, n)
+   p := lf + 24 + opt
+   for i := range secs {
+      secs[i] = imgSection{le32(fb, p+12), le32(fb, p+16), le32(fb, p+20)}
+      p += 40
+   }
+   return sizeImg, secs
+}
+
+// imgSpan is one RVA range listed by a segment descriptor.
+type imgSpan struct{ rva, size uint32 }
+
+// segSpans returns the RVA ranges a segment descriptor lists. Each entry is
+// 0xC bytes from +0xF4: flags, rva, size. Entries that reach outside the image
+// are dropped rather than clamped.
+//
+// Callers that need one span per RVA must dedupe themselves. -5 must not: its
+// descriptors list overlapping spans, and deduping by RVA loses the later,
+// larger ones. -7 does, because it patches each range once.
+func segSpans(fb []byte, d imgDesc, sizeImg uint32) []imgSpan {
+   if int(d.off)+int(d.size) > len(fb) {
+      return nil
+   }
+   b := fb[d.off : d.off+d.size]
+
+   var out []imgSpan
+   for o := 0xF4; o+0xC <= len(b); o += 0xC {
+      rva, size := le32(b, o+4), le32(b, o+8)
+      if rva >= 0x1000 && size >= 8 && uint64(rva)+uint64(size) <= uint64(sizeImg) {
+         out = append(out, imgSpan{rva, size})
+      }
+   }
+   return out
+}
+
 type probeResult struct {
    ntstatus uint32
    status   []byte // the 4 status bytes the routine wrote
@@ -310,8 +521,8 @@ type probeResult struct {
 // ---------------------------------------------------------------- the ABI
 
 // wbArgs is the kernel WarbirdCallArgs block for op=3. The arguments the
-// routine itself sees begin at +0x10, which is why its documented +0x14
-// output field lands at +0x24 here:
+// routine itself sees begin at +0x10, which is why its documented +0x14 output
+// field lands at +0x24 here:
 //
 //   +0x00  op = 3
 //   +0x08  descriptor address

@@ -14,14 +14,13 @@
 // walking the code graph outward from the 0x41-byte key consumer; the public key
 // decides which (stage 1, stage 2) pairing is real.
 //
-// Inputs   testdata/{extracted.enc.prv, extracted.enc.pub, wbtool_img.bin,
-//          oracle_map.json}
-// Output   testdata/{extracted.enc.plain, derive_plain.txt}
+// Inputs   encPrvPath, encPubPath, imgPath, mapPath
+// Output   encPlainPath, plainLogPath
 //
 // USAGE
 //   prkf -7
 //
-//   No flags of its own. Every path above is a constant.
+//   No flags of its own. Every path above is a manifest entry in main.go.
 //
 //   Trials run in children of this same binary, using positional arguments
 //   rather than flags:
@@ -33,6 +32,9 @@
 // routine" and "never called" are distinguishable. The VEH fault line carries
 // the stage tag ("S1 FAULT" / "S2 FAULT") the driver filters on, so a fault is
 // never recorded as "no output".
+//
+// The descriptor format, the PE census, the span lookup and the block carving
+// are shared with -5 and -6 and live in warbird.go.
 //
 // Pitfalls:
 //   - The stage routines' own blocks must be LEFT CIPHERTEXT. They are heap-exec,
@@ -54,7 +56,6 @@ package main
 
 import (
    "bytes"
-   "cmp"
    "context"
    "crypto/ecdh"
    "crypto/sha256"
@@ -65,10 +66,8 @@ import (
    "math/big"
    "os"
    "os/exec"
-   "path/filepath"
    "runtime"
    "slices"
-   "sort"
    "strconv"
    "strings"
    "syscall"
@@ -77,8 +76,6 @@ import (
 )
 
 const (
-   dpDataDir = "testdata"
-   dpDLLPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
    dpRWX     = 0x40
    dpTimeout = 300 * time.Second
    dpTol     = 0x20
@@ -88,13 +85,6 @@ const (
 )
 
 var (
-   dpPrvPath = dpData("extracted.enc.prv")
-   dpPubPath = dpData("extracted.enc.pub")
-   dpOutPath = dpData("extracted.enc.plain")
-   dpLogPath = dpData("derive_plain.txt")
-   dpImgPath = dpData("wbtool_img.bin")
-   dpMapPath = dpData("oracle_map.json")
-
    dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
    dpZ4      [4]byte
    dpZ32     = make([]byte, 0x20)
@@ -121,52 +111,6 @@ var (
    dpFaultSay  func(string)
 )
 
-func dpCensus(fb []byte, secs []dpSection, sizeImg uint32) ([]dpSpan, []dpHeapExec) {
-   var seg []dpSpan
-   var heaps []dpHeapExec
-   seen := map[uint32]bool{}
-
-   for _, s := range secs {
-      lo := int(s.rp)
-      hi := min(int(s.rp)+int(s.rs), len(fb))
-      if hi <= lo {
-         continue
-      }
-      b := fb[lo:hi]
-      for off := 0; off < len(b)-0x40; off += 4 {
-         size := dpU32(b, off+0x20)
-         if size < 0x40 || size > 0x200000 || off+int(size) > len(b) {
-            continue
-         }
-         sum := sha256.Sum256(b[off+0x20 : off+int(size)])
-         if !bytes.Equal(sum[:], b[off:off+32]) {
-            continue
-         }
-         if size == 0xF0 {
-            heaps = append(heaps, dpHeapExec{
-               desc: s.va + uint32(off),
-               rva:  dpU32(b, off+0x34) & 0x0FFFFFFF,
-               size: dpU32(b, off+0x38) & 0x0FFFFFFF,
-            })
-            continue
-         }
-         for k, o := 0, off+0xF4; k < (int(size)-0xF4)/0xC; k, o = k+1, o+0xC {
-            rva, sz := dpU32(b, o+4), dpU32(b, o+8)
-            if rva < 0x1000 || sz < 8 || seen[rva] || uint64(rva)+uint64(sz) > uint64(sizeImg) {
-               continue
-            }
-            seen[rva] = true
-            seg = append(seg, dpSpan{rva, sz})
-         }
-      }
-   }
-   return seg, heaps
-}
-
-func dpData(n string) string {
-   return filepath.Join(dpDataDir, n)
-}
-
 func dpDriver() {
    var lines []string
    say := func(f string, a ...any) {
@@ -176,7 +120,7 @@ func dpDriver() {
    }
    die := func(f string, a ...any) {
       say("FATAL: "+f, a...)
-      _ = os.WriteFile(dpLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+      _ = os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
       os.Exit(1)
    }
    show := func(r dpResult) string {
@@ -186,7 +130,7 @@ func dpDriver() {
       return fmt.Sprintf("<%s> rc=%d", r.kind, r.rc)
    }
 
-   for _, f := range []string{dpMapPath, dpImgPath, dpPrvPath, dpPubPath} {
+   for _, f := range []string{mapPath, imgPath, encPrvPath, encPubPath} {
       if st, err := os.Stat(f); err != nil || st.IsDir() {
          die("missing %s", f)
       }
@@ -215,13 +159,13 @@ func dpDriver() {
    }
 
    sum := sha256.Sum256(in.fb)
-   say("dll    %s", dpDLLPath)
+   say("dll    %s", dllPath)
    say("sha256 %x", sum)
-   say("image  %s  (%d bytes, SizeOfImage 0x%x)", dpImgPath, len(in.img), in.sizeImg)
+   say("image  %s  (%d bytes, SizeOfImage 0x%x)", imgPath, len(in.img), in.sizeImg)
    say("prv    %s  (%d bytes, variant 0x%02x %%3=%d)",
-      dpPrvPath, len(in.prv), in.prv[0x40], in.prv[0x40]%3)
-   say("pub    %s", dpPubPath)
-   say("cluster 0x%06x  (from %s)", in.cluster, dpMapPath)
+      encPrvPath, len(in.prv), in.prv[0x40], in.prv[0x40]%3)
+   say("pub    %s", encPubPath)
+   say("cluster 0x%06x  (from %s)", in.cluster, mapPath)
    if in.magic != "" {
       say("magic  %s", in.magic)
    }
@@ -236,9 +180,9 @@ func dpDriver() {
    say("spans intersecting heap-exec blocks: %d of %d", ov, len(in.seg))
    say("")
 
-   heapDesc := make(map[uint32]dpHeapExec, len(in.heaps))
+   heapDesc := make(map[uint32]imgDesc, len(in.heaps))
    for _, h := range in.heaps {
-      heapDesc[h.desc] = h
+      heapDesc[h.va] = h
    }
    descKeys := make([]uint32, 0, len(heapDesc))
    for d := range heapDesc {
@@ -252,8 +196,8 @@ func dpDriver() {
    blockOf := func(rva int) (dv, code, n uint32, ok bool) {
       for _, d := range descKeys {
          h := heapDesc[d]
-         if int(h.rva) <= rva && rva < int(h.rva+h.size) {
-            return d, h.rva, h.size, true
+         if int(h.rva) <= rva && rva < int(h.rva+h.ln) {
+            return d, h.rva, h.ln, true
          }
       }
       return 0, 0, 0, false
@@ -309,12 +253,12 @@ func dpDriver() {
             case (in.img[o] == 0x48 || in.img[o] == 0x4C) && in.img[o+1] == 0x8D:
                switch in.img[o+2] {
                case 5, 0xD, 0x15, 0x1D, 0x25, 0x2D, 0x35, 0x3D:
-                  t = o + 7 + int(int32(dpU32(in.img, o+3)))
+                  t = o + 7 + int(int32(le32(in.img, o+3)))
                default:
                   continue
                }
             case in.img[o] == 0xE8 || in.img[o] == 0xE9:
-               t = o + 5 + int(int32(dpU32(in.img, o+1)))
+               t = o + 5 + int(int32(le32(in.img, o+1)))
             default:
                continue
             }
@@ -503,17 +447,17 @@ func dpDriver() {
       die("derived scalar out of range: %v", err)
    }
    if got := priv.PublicKey().Bytes()[1:]; !bytes.Equal(got, in.pub) {
-      die("scalar does not reproduce %s\n  got  %x\n  want %x", dpPubPath, got, in.pub)
+      die("scalar does not reproduce %s\n  got  %x\n  want %x", encPubPath, got, in.pub)
    }
 
    say("pubkey    MATCH")
-   if err := os.WriteFile(dpOutPath, plain, 0o644); err != nil {
-      die("write %s: %v", dpOutPath, err)
+   if err := os.WriteFile(encPlainPath, plain, 0o644); err != nil {
+      die("write %s: %v", encPlainPath, err)
    }
    psum := sha256.Sum256(plain)
-   say("written   %s  (%d bytes)  sha256 %x", dpOutPath, len(plain), psum)
+   say("written   %s  (%d bytes)  sha256 %x", encPlainPath, len(plain), psum)
 
-   _ = os.WriteFile(dpLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+   _ = os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
 func dpLastLine(s string) string {
@@ -527,13 +471,13 @@ func dpLoadMap(raw []byte) (map[int]int, uint32, string, error) {
       return nil, 0, "", err
    }
    if o.Map == nil {
-      return nil, 0, "", fmt.Errorf("%s is in the old flat format - re-run prkf -6", dpMapPath)
+      return nil, 0, "", fmt.Errorf("%s is in the old flat format - re-run prkf -6", mapPath)
    }
    m := make(map[int]int, len(o.Map))
    for k, v := range o.Map {
       ki, err := strconv.Atoi(k)
       if err != nil {
-         return nil, 0, "", fmt.Errorf("%s: bad map key %q", dpMapPath, k)
+         return nil, 0, "", fmt.Errorf("%s: bad map key %q", mapPath, k)
       }
       m[ki] = v
    }
@@ -578,30 +522,11 @@ func dpPtrAt(u uintptr) unsafe.Pointer {
    return p
 }
 
-func dpRawAt(fb []byte, secs []dpSection, rva, n uint32) []byte {
-   for _, s := range secs {
-      if s.va <= rva && rva < s.va+s.rs {
-         if off := int(s.rp) + int(rva-s.va); off+int(n) <= len(fb) {
-            return fb[off : off+int(n)]
-         }
-      }
-   }
-   return nil
-}
-
 func dpTag(mode string) string {
    if mode == "s1" {
       return "S1"
    }
    return "S2"
-}
-
-func dpU16(b []byte, o int) uint16 {
-   return binary.LittleEndian.Uint16(b[o:])
-}
-
-func dpU32(b []byte, o int) uint32 {
-   return binary.LittleEndian.Uint32(b[o:])
 }
 
 func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
@@ -622,7 +547,7 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
       os.Exit(5)
    }
 
-   ptr, err := syscall.UTF16PtrFromString(dpDLLPath)
+   ptr, err := syscall.UTF16PtrFromString(dllPath)
    if err != nil {
       say("ERR loadlibrary")
       os.Exit(4)
@@ -652,11 +577,11 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
          if uint64(s.rva)+uint64(s.size) > uint64(len(in.img)) {
             continue
          }
-         c := dpRawAt(in.fb, in.secs, s.rva, s.size)
+         c := rawAt(in.fb, in.secs, s.rva, s.size)
          if c == nil || bytes.Equal(in.img[s.rva:s.rva+s.size], c) {
             continue
          }
-         runs := []dpRun{{s.rva, s.size}}
+         runs := []imgRun{{s.rva, s.size}}
          if prep != "full" {
             runs = in.carve(s.rva, s.size)
             if len(runs) == 0 {
@@ -855,54 +780,14 @@ func stageDerivePlain(args []string) int {
    return 0
 }
 
-type dpCarveFn func(r, s uint32) []dpRun
-
-// dpMakeCarve returns [r, r+s) minus the heap-exec blocks as a list of runs.
-func dpMakeCarve(merged []dpInterval) dpCarveFn {
-   los := make([]uint32, len(merged))
-   for i, m := range merged {
-      los[i] = m.lo
-   }
-
-   return func(r, s uint32) []dpRun {
-      var out []dpRun
-      cur, end := r, r+s
-      i := max(sort.Search(len(los), func(i int) bool { return los[i] > r })-1, 0)
-
-      for _, m := range merged[i:] {
-         if m.hi <= cur {
-            continue
-         }
-         if m.lo >= end {
-            break
-         }
-         if m.lo > cur {
-            out = append(out, dpRun{cur, min(m.lo, end) - cur})
-         }
-         if cur = max(cur, m.hi); cur >= end {
-            break
-         }
-      }
-      if cur < end {
-         out = append(out, dpRun{cur, end - cur})
-      }
-      return out
-   }
-}
-
-type dpHeapExec struct {
-   desc uint32
-   rva  uint32
-   size uint32
-}
-
 type dpInputs struct {
    img     []byte
    fb      []byte
-   secs    []dpSection
-   seg     []dpSpan
-   heaps   []dpHeapExec
-   carve   dpCarveFn
+   secs    []imgSection
+   seg     []imgSpan
+   heaps   []imgDesc
+   merged  []imgInterval
+   carve   func(r, s uint32) []imgRun
    prv     []byte
    pub     []byte
    mapt    map[int]int
@@ -915,63 +800,63 @@ func dpLoadInputs() (*dpInputs, error) {
    in := &dpInputs{}
    var err error
 
-   if in.img, err = os.ReadFile(dpImgPath); err != nil {
+   if in.img, err = os.ReadFile(imgPath); err != nil {
       return nil, err
    }
-   raw, err := os.ReadFile(dpMapPath)
+   raw, err := os.ReadFile(mapPath)
    if err != nil {
       return nil, err
    }
    if in.mapt, in.cluster, in.magic, err = dpLoadMap(raw); err != nil {
       return nil, err
    }
-   if in.prv, err = os.ReadFile(dpPrvPath); err != nil {
+   if in.prv, err = os.ReadFile(encPrvPath); err != nil {
       return nil, err
    }
    if len(in.prv) != 0x41 {
-      return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", dpPrvPath, len(in.prv))
+      return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", encPrvPath, len(in.prv))
    }
-   pub, err := os.ReadFile(dpPubPath)
+   pub, err := os.ReadFile(encPubPath)
    if err != nil {
       return nil, err
    }
    if len(pub) < 64 {
-      return nil, fmt.Errorf("%s: need at least 64 bytes, got %d", dpPubPath, len(pub))
+      return nil, fmt.Errorf("%s: need at least 64 bytes, got %d", encPubPath, len(pub))
    }
    in.pub = pub[len(pub)-64:]
 
-   if in.fb, err = os.ReadFile(dpDLLPath); err != nil {
+   if in.fb, err = os.ReadFile(dllPath); err != nil {
       return nil, err
    }
-   in.sizeImg, in.secs = dpPE(in.fb)
-   in.seg, in.heaps = dpCensus(in.fb, in.secs, in.sizeImg)
-   in.carve = dpMakeCarve(dpMergeBlocks(in.heaps))
-   return in, nil
-}
+   in.sizeImg, in.secs = peSections(in.fb)
 
-type dpInterval struct {
-   lo uint32
-   hi uint32
-}
-
-func dpMergeBlocks(heaps []dpHeapExec) []dpInterval {
-   var ps []dpInterval
-   for _, h := range heaps {
-      if h.size != 0 {
-         ps = append(ps, dpInterval{h.rva, h.rva + h.size})
-      }
-   }
-   slices.SortFunc(ps, func(a, b dpInterval) int { return cmp.Compare(a.lo, b.lo) })
-
-   var out []dpInterval
-   for _, p := range ps {
-      if n := len(out); n > 0 && p.lo <= out[n-1].hi {
-         out[n-1].hi = max(out[n-1].hi, p.hi)
+   // -7 patches each range once, so unlike -5 it deduplicates by RVA. The
+   // order of first appearance is kept, which is the order the descriptors
+   // appear in the file.
+   seen := map[uint32]bool{}
+   for _, d := range scanDescs(in.fb, in.secs) {
+      if d.heap() {
+         in.heaps = append(in.heaps, d)
          continue
       }
-      out = append(out, p)
+      for _, sp := range segSpans(in.fb, d, in.sizeImg) {
+         if seen[sp.rva] {
+            continue
+         }
+         seen[sp.rva] = true
+         in.seg = append(in.seg, sp)
+      }
    }
-   return out
+
+   var ivs []imgInterval
+   for _, h := range in.heaps {
+      if h.ln != 0 {
+         ivs = append(ivs, imgInterval{h.rva, h.rva + h.ln})
+      }
+   }
+   in.merged = mergeIntervals(ivs)
+   in.carve = func(r, s uint32) []imgRun { return carveRuns(in.merged, r, s) }
+   return in, nil
 }
 
 type dpOracle struct {
@@ -1033,34 +918,6 @@ func dpRunChild(exe, mode string, args ...string) dpResult {
    }
    r.stderr = dpLastLine(errb.String())
    return r
-}
-
-type dpRun struct {
-   start  uint32
-   length uint32
-}
-
-type dpSection struct {
-   va uint32
-   rs uint32
-   rp uint32
-}
-
-func dpPE(fb []byte) (uint32, []dpSection) {
-   lf := int(dpU32(fb, 0x3C))
-   n, optsz := int(dpU16(fb, lf+6)), int(dpU16(fb, lf+20))
-   sizeImg := dpU32(fb, lf+24+56)
-   p, secs := lf+24+optsz, make([]dpSection, n)
-   for i := range secs {
-      secs[i] = dpSection{va: dpU32(fb, p+12), rs: dpU32(fb, p+16), rp: dpU32(fb, p+20)}
-      p += 40
-   }
-   return sizeImg, secs
-}
-
-type dpSpan struct {
-   rva  uint32
-   size uint32
 }
 
 // plainkey.go end

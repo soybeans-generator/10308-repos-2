@@ -1,8 +1,8 @@
 // main.go begin
 //go:build windows
 
-// prkf is the PlayReady key-extraction pipeline: seven steps across eight
-// files, one binary, one package, one folder. Each step is selected by a flag:
+// prkf is the PlayReady key-extraction pipeline: seven steps, eight files, one
+// binary, one package, one folder.
 //
 //   prkf -1   extract.go     carve the CHAI chain, extract the key components
 //   prkf -2   signing.go     locate the signing-key routine descriptor
@@ -12,29 +12,43 @@
 //   prkf -6   nibblemap.go   derive oracle_map.json
 //   prkf -7   plainkey.go    derive extracted.enc.plain
 //
-// warbird.go is the eighth file and holds no step: it is the kernel call ABI
-// that -2 and -3 share, plus the probe child that -2 re-executes.
+// warbird.go is the eighth file and holds no step: the Warbird descriptor
+// format, the kernel call ABI, and the probe child that -2 re-executes.
 //
-// This file is only the driver: parse the flag, reject arguments, make the
-// testdata directory, dispatch, and name the pipeline's inputs. It holds no
-// step logic.
+// # DATA FLOW
 //
-// -2 and -3 share a file because they are one branch: -2 writes prsubs.json
-// and -3 reads it, and the record is the whole interface between them.
+// Two branches leave -1 and never meet again:
 //
-// Run the steps in order, from the same working directory. -1 feeds both
-// branches: -2 writes prsubs.json for -3 to read, and -1 writes the
-// extracted.enc.{pub,prv} pair that -6 and -7 consume. -4 writes the oracle
-// directory; -5 writes wbtool_img.bin, which -6 and -7 both read; -6 writes
-// oracle_map.json, which -7 reads. Every path goes through dataFile or the
-// step's own data constants, so the sample is read from testdata/ and
-// everything the pipeline creates lands beside it. The working directory stays
-// clean, and `rm -rf testdata` throws the whole run away - including the
-// sample, which has to be put back before the next run.
+//   -1 -> -2 -> -3                  the signing key
+//   -1 -> -4, -5 -> -6 -> -7        the encryption key
 //
-// dllPath is the one path that is not under testdata/: the PlayReady module is
-// read, hashed and mapped where Windows installed it. -5 reads the same module
-// for the same reason.
+// Every artefact lives under outDir. Each name is declared once, at the end of
+// this file, so no step spells a path and no two steps can disagree about one.
+//
+//   in   testdata/msprcore.bla          the PlayReady sample, put here by hand
+//   -1   testdata/extracted.cert        carved CHAI chain
+//   -1   testdata/extracted.sig.pub     signing public key
+//   -1   testdata/extracted.sig.prv     signing private component, 32 B, obfuscated
+//   -1   testdata/extracted.enc.pub     encryption public key
+//   -1   testdata/extracted.enc.prv     encryption private component, 65 B
+//   -2   testdata/prsubs.json           signing routine descriptor, keyed by DLL sha256
+//   -2   testdata/findprsub.txt         per-descriptor probe log
+//   -3   testdata/extracted.sig.plain   signing private scalar, 32 B, plain
+//   -4   testdata/oracle/key_NN.pub     nibble oracle public keys, 15 files
+//   -4   testdata/oracle/lic_NN.blob    nibble oracle licence blobs, 15 files
+//   -5   testdata/wbtool_img.bin        decrypted image, RVA == file offset
+//   -5   testdata/decrypt_img.txt       per-block decrypt log
+//   -6   testdata/oracle_map.json       nibble permutation + magic sequence
+//   -6   testdata/derive_map.txt        sweep log
+//   -7   testdata/extracted.enc.plain   encryption private scalar, 32 B, plain
+//   -7   testdata/derive_plain.txt      trial log
+//
+// dllPath is the one path outside outDir. The PlayReady module is read, hashed
+// and mapped where Windows installed it, never copied: a descriptor is an RVA
+// into that image, so the bytes hashed and the image the kernel executes from
+// have to be the same module.
+//
+// # CHILD PROCESSES
 //
 // Three steps re-execute this binary rather than doing their work in-process:
 //
@@ -46,6 +60,10 @@
 // nothing else; the other two are positional arguments, so the command line
 // surface stays at exactly -1 through -7. See warbird.go for why the -2 probe
 // must be a separate process.
+//
+// Run the steps in order, from the same working directory. `rm -rf testdata`
+// throws the whole run away, including the sample, which has to be put back
+// before the next run.
 package main
 
 import (
@@ -55,21 +73,63 @@ import (
    "path/filepath"
 )
 
+// ------------------------------------------------------------------ manifest
+
+// dllPath is the PlayReady module, read and mapped where Windows installed it.
+// It is the only path in the program outside outDir, and it stays outside on
+// purpose: the descriptor is an RVA into the mapped image, so the bytes hashed
+// here and the image the Warbird gate executes from have to be the same module,
+// and a copy loaded out of testdata/ is a different mapping that the gate is
+// not documented to accept.
+const dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
+
 // outDir is the one directory the pipeline uses: the sample it reads and every
 // file it writes. Inputs are fixtures here, not in the working directory, so a
 // run touches nothing outside it and can be discarded as a unit.
 //
-// Nothing else in the pipeline should spell a directory: read and write
-// through dataFile.
+// Nothing else in the pipeline should spell a directory: read and write through
+// dataFile, or through one of the manifest paths below.
 const outDir = "testdata"
 
-// corePath is the pipeline's one input, read from testdata/ like every other
-// path. Both halves of prkf -1 read it, so it is named here, by the driver,
-// rather than by either half.
+// Every file the pipeline reads or writes, named once. The steps below this
+// file use these names and nothing else, so a rename is one line here rather
+// than a hunt through seven files.
 //
-// It is a var, not a const, only because dataFile resolves outDir; outDir is
-// itself a constant, so the value is fixed for the life of the process.
-var corePath = dataFile("msprcore.bla")
+// They are vars, not consts, only because dataFile resolves outDir; outDir is
+// itself a constant, so the values are fixed for the life of the process.
+var (
+   // The pipeline's one input, read by both halves of -1.
+   corePath = dataFile("msprcore.bla")
+
+   // -1 outputs.
+   certPath   = dataFile("extracted.cert")
+   sigPubPath = dataFile("extracted.sig.pub")
+   sigPrvPath = dataFile("extracted.sig.prv")
+   encPubPath = dataFile("extracted.enc.pub")
+   encPrvPath = dataFile("extracted.enc.prv")
+
+   // -2 -> -3.
+   prsubsPath  = dataFile("prsubs.json")
+   scanLogPath = dataFile("findprsub.txt")
+
+   // -3 output.
+   sigPlainPath = dataFile("extracted.sig.plain")
+
+   // -4 output directory: oracle/key_NN.pub and oracle/lic_NN.blob.
+   oracleDir = dataFile("oracle")
+
+   // -5 -> -6, -7.
+   imgPath    = dataFile("wbtool_img.bin")
+   imgLogPath = dataFile("decrypt_img.txt")
+
+   // -6 -> -7.
+   mapPath    = dataFile("oracle_map.json")
+   mapLogPath = dataFile("derive_map.txt")
+
+   // -7 output.
+   encPlainPath = dataFile("extracted.enc.plain")
+   plainLogPath = dataFile("derive_plain.txt")
+)
 
 // cmdExtract implements prkf -1: carve the chain, then extract the keys.
 //
@@ -101,8 +161,8 @@ func ensureOutDir() error {
 }
 
 func main() {
-   // A probe child spawned by -2 announces itself through the environment,
-   // so it needs no flag and no argument. Checked first, before the FlagSet
+   // A probe child spawned by -2 announces itself through the environment, so
+   // it needs no flag and no argument. Checked first, before the FlagSet
    // exists, so it never appears in the usage text.
    if va, ok := probeTarget(); ok {
       runOne(va) // never returns: emit() exits
@@ -110,20 +170,19 @@ func main() {
    }
 
    step1 := flag.Bool("1", false,
-      "carve the CHAI chain ("+dataFile("extracted.cert")+") and extract the key "+
-         "components ("+dataFile("extracted")+".{sig,enc}.{pub,prv})")
+      "carve the CHAI chain ("+certPath+") and the four key components")
    step2 := flag.Bool("2", false,
-      "locate the signing-key routine ("+dataFile("prsubs.json")+", "+dataFile("findprsub.txt")+")")
+      "locate the signing-key routine ("+prsubsPath+", "+scanLogPath+")")
    step3 := flag.Bool("3", false,
-      "decrypt the signing key ("+dataFile("extracted.sig.plain")+")")
+      "decrypt the signing key ("+sigPlainPath+")")
    step4 := flag.Bool("4", false,
-      "build the nibble oracle ("+dataFile("oracle")+"/key_NN.pub, "+dataFile("oracle")+"/lic_NN.blob)")
+      "build the nibble oracle ("+oracleDir+")")
    step5 := flag.Bool("5", false,
-      "decrypt the Warbird image ("+dataFile("wbtool_img.bin")+", "+dataFile("decrypt_img.txt")+")")
+      "decrypt the Warbird image ("+imgPath+", "+imgLogPath+")")
    step6 := flag.Bool("6", false,
-      "derive the nibble map ("+dataFile("oracle_map.json")+", "+dataFile("derive_map.txt")+")")
+      "derive the nibble map ("+mapPath+", "+mapLogPath+")")
    step7 := flag.Bool("7", false,
-      "derive the encryption key ("+dataFile("extracted.enc.plain")+", "+dataFile("derive_plain.txt")+")")
+      "derive the encryption key ("+encPlainPath+", "+plainLogPath+")")
 
    flag.Parse()
 
@@ -155,8 +214,6 @@ func main() {
       return false
    }
 
-   // Checked once here rather than in each step: -1 runs two functions, so a
-   // per-step check would be duplicated and would name the wrong step.
    if err := ensureOutDir(); err != nil {
       fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
       os.Exit(1)

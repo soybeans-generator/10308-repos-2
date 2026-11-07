@@ -25,20 +25,22 @@
 //   1  all discovered sets x licences 01/02/03  -> live set + magic
 //   2  live set x licences 01..0f               -> full permutation
 //
-// INPUTS   testdata/wbtool_img.bin, testdata/extracted.enc.prv,
-//          testdata/oracle/lic_NN.blob
-// OUTPUT   testdata/oracle_map.json  {"cluster": rva, "magic": hex, "map": {...}}
-//          testdata/derive_map.txt
+// INPUTS   imgPath, encPrvPath, oracleDir/lic_NN.blob
+// OUTPUT   mapPath  {"cluster": rva, "magic": hex, "map": {...}}
+//          mapLogPath
 //
 // USAGE
 //   prkf -6
 //
-//   No flags of its own. Every path above is a constant.
+//   No flags of its own. Every path above is a manifest entry in main.go.
 //
 //   The sweep runs in a child of this same binary, using positional arguments
 //   rather than flags:
 //     prkf -6 sweep <setRVA> <descRVA> <lics>
 //   That is the internal worker; the driver spawns it, nothing else should.
+//
+// The descriptor format, the PE census, the block carving and the span lookup
+// are all shared with -5 and -7 and live in warbird.go.
 // =============================================================================
 
 package main
@@ -54,7 +56,6 @@ import (
    "os"
    "os/exec"
    "path/filepath"
-   "sort"
    "strconv"
    "strings"
    "syscall"
@@ -63,24 +64,15 @@ import (
 )
 
 const (
-   dmData               = "testdata"
    dmCBLK, dmCN, dmCLEN = 16, 64, 0x400
    dmRWX, dmKBL         = 0x40, 0x48
-
-   // dmDLLPath is the PlayReady build every stage reads.
-   dmDLLPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 )
 
 var (
-   dmIMG       = dmPath("wbtool_img.bin")
-   dmPRVF      = dmPath("extracted.enc.prv")
-   dmOracleDir = dmPath("oracle")
-   dmOUTF      = dmPath("oracle_map.json")
-   dmLOG       = dmPath("derive_map.txt")
-   dmPAT       = []byte{0x83, 0x79, 0x14, 0x41} // cmp [rcx+0x14],0x41
-   dmSENT      = append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
-   dmW10       = dmHx("a77bece491a87ebcd8a2c62856b165b33ad2572cf88bdae3ddc79be816be3185")
-   dmW11       = dmHx("c3cd57691eff156c95d946d534121dfb81738adb5b4bb4223faad89cbb459bec")
+   dmPAT  = []byte{0x83, 0x79, 0x14, 0x41} // cmp [rcx+0x14],0x41
+   dmSENT = append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
+   dmW10  = dmHx("a77bece491a87ebcd8a2c62856b165b33ad2572cf88bdae3ddc79be816be3185")
+   dmW11  = dmHx("c3cd57691eff156c95d946d534121dfb81738adb5b4bb4223faad89cbb459bec")
 )
 
 // ================================ worker =====================================
@@ -109,52 +101,27 @@ var dmDesc uint32
 
 var dmLogLines []string
 
-func dmCensus(fb []byte, secs []dmSec, sizeImg uint32) ([]dmBlk, []dmBlk, [][2]uint32) {
-   var segs, heaps []dmBlk
-   for _, s := range secs {
-      b := dmCut(fb, s.rp, s.rs)
-      for off := 0; off+0x40 < len(b); off += 4 {
-         sz := dmU32(b, off+0x20)
-         if sz < 0x40 || sz > 0x200000 || off+int(sz) > len(b) {
-            continue
-         }
-         if h := sha256.Sum256(b[off+0x20 : off+int(sz)]); !bytes.Equal(h[:], b[off:off+32]) {
-            continue
-         }
-         d := dmBlk{s.va + uint32(off), s.rp + uint32(off),
-            dmU32(b, off+0x34) & 0x0FFFFFFF, dmU32(b, off+0x38) & 0x0FFFFFFF}
-         if sz == 0xF0 {
-            heaps = append(heaps, d)
-         } else {
-            d.size = sz
-            segs = append(segs, d)
-         }
+// dmCensus splits a scan into segment and heap-exec descriptors and collects
+// the segment spans, in descriptor order. The spans are not deduplicated: -6
+// patches every range a descriptor lists, and overlapping ranges are harmless
+// here because each is written from the same image.
+func dmCensus(fb []byte, secs []imgSection, sizeImg uint32) ([]imgDesc, []imgDesc, []imgSpan) {
+   var segs, heaps []imgDesc
+   var spans []imgSpan
+   for _, d := range scanDescs(fb, secs) {
+      if d.heap() {
+         heaps = append(heaps, d)
+         continue
       }
-   }
-   var spans [][2]uint32
-   for _, g := range segs { // per descriptor, NOT deduped by RVA
-      b := dmCut(fb, g.fo, g.size)
-      for k := 0; 0xF4+k*0xC <= len(b)-0xC; k++ {
-         rva, sz := dmU32(b, 0xF4+k*0xC+4), dmU32(b, 0xF4+k*0xC+8)
-         if rva >= 0x1000 && sz >= 8 && rva+sz <= sizeImg {
-            spans = append(spans, [2]uint32{rva, sz})
-         }
-      }
+      segs = append(segs, d)
+      spans = append(spans, segSpans(fb, d, sizeImg)...)
    }
    return segs, heaps, spans
 }
 
-// dmCut is Python's forgiving slice b[off:off+n], truncated at len(b).
-func dmCut(b []byte, off, n uint32) []byte {
-   if int(off) >= len(b) {
-      return b[:0]
-   }
-   return b[off:min(int(off)+int(n), len(b))]
-}
-
 func dmDie(f string, a ...any) {
    dmLogf("FATAL: "+f, a...)
-   os.WriteFile(dmLOG, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
+   os.WriteFile(mapLogPath, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
    os.Exit(1)
 }
 
@@ -208,30 +175,6 @@ func dmLogf(f string, a ...any) {
    fmt.Println(s)
 }
 
-// ------------------------------------------------------------------ PE census
-
-func dmPE(fb []byte) (uint32, []dmSec) {
-   lf := int(dmU32(fb, 0x3C))
-   n, osz := int(dmU16(fb, lf+6)), int(dmU16(fb, lf+20))
-   secs := make([]dmSec, n)
-   for i, p := 0, lf+24+osz; i < n; i, p = i+1, p+40 {
-      secs[i] = dmSec{dmU32(fb, p+12), dmU32(fb, p+16), dmU32(fb, p+20)}
-   }
-   return dmU32(fb, lf+24+56), secs
-}
-
-func dmPath(n string) string {
-   return filepath.Join(dmData, n)
-}
-
-func dmU16(b []byte, o int) uint16 {
-   return binary.LittleEndian.Uint16(b[o:])
-}
-
-func dmU32(b []byte, o int) uint32 {
-   return binary.LittleEndian.Uint32(b[o:])
-}
-
 func dmUniq(b []byte) bool {
    var seen [256]bool
    for _, c := range b {
@@ -268,13 +211,13 @@ func dmWorker(setArg, descArg, licsArg string) {
       lics = append(lics, arg(x, 16))
    }
 
-   fb, img, prv := must(dmDLLPath), must(dmIMG), must(dmPRVF)
+   fb, img, prv := must(dllPath), must(imgPath), must(encPrvPath)
    copy(dmKB[:], prv) // create_string_buffer(PRV, 0x48): zero-padded
 
-   sizeImg, secs := dmPE(fb)
+   sizeImg, secs := peSections(fb)
    _, heaps, spans := dmCensus(fb, secs, sizeImg)
 
-   wp, err := syscall.UTF16PtrFromString(dmDLLPath)
+   wp, err := syscall.UTF16PtrFromString(dllPath)
    if err != nil {
       dmLoadFail("%v", err)
    }
@@ -301,67 +244,26 @@ func dmWorker(setArg, descArg, licsArg string) {
    // --- prep: patch segment plaintext, but never over a heap-exec block.
    // The kernel decrypts those itself on op=3; pre-filling them causes a
    // double decrypt and the routine executes garbage.
-   sort.Slice(heaps, func(i, j int) bool { return heaps[i].rva < heaps[j].rva })
-   var merged [][2]uint32
+   var ivs []imgInterval
    for _, h := range heaps {
-      if h.size == 0 {
-         continue
-      }
-      lo, hi := h.rva, h.rva+h.size
-      if n := len(merged); n > 0 && lo <= merged[n-1][1] {
-         merged[n-1][1] = max(merged[n-1][1], hi)
-      } else {
-         merged = append(merged, [2]uint32{lo, hi})
+      if h.ln != 0 {
+         ivs = append(ivs, imgInterval{h.rva, h.rva + h.ln})
       }
    }
-
-   // carve subtracts heap-exec blocks from [r,r+s); returns remaining runs as
-   // (start,len). Every append is guarded, so no empty run can be produced.
-   carve := func(r, s uint32) [][2]uint32 {
-      e, cur := r+s, r
-      var out [][2]uint32
-      i := sort.Search(len(merged), func(j int) bool { return merged[j][0] > r })
-      for _, b := range merged[max(i-1, 0):] {
-         if b[1] <= cur {
-            continue
-         }
-         if b[0] >= e {
-            break
-         }
-         if b[0] > cur {
-            out = append(out, [2]uint32{cur, min(b[0], e) - cur})
-            cur = b[0]
-         }
-         cur = max(cur, b[1])
-         if cur >= e {
-            break
-         }
-      }
-      if cur < e {
-         out = append(out, [2]uint32{cur, e - cur})
-      }
-      return out
-   }
+   merged := mergeIntervals(ivs)
 
    patched, skipped := 0, 0
    for _, sp := range spans {
-      r, n := sp[0], sp[1]
+      r, n := sp.rva, sp.size
       if uint64(r)+uint64(n) > uint64(len(img)) {
          continue
       }
-      var c []byte // the DLL's own plaintext at this span, if readable
-      for _, s := range secs {
-         if s.va <= r && r < s.va+s.rs {
-            if o := s.rp + r - s.va; int(o)+int(n) <= len(fb) {
-               c = fb[o : o+n]
-            }
-         }
-      }
+      c := rawAt(fb, secs, r, n) // the DLL's own plaintext at this span
       if c == nil || bytes.Equal(img[r:r+n], c) {
          continue
       }
-      for _, run := range carve(r, n) {
-         if wr(run[0], img[run[0]:run[0]+run[1]]) {
+      for _, run := range carveRuns(merged, r, n) {
+         if wr(run.start, img[run.start:run.start+run.length]) {
             patched++
          } else {
             skipped++
@@ -409,7 +311,7 @@ func dmWorker(setArg, descArg, licsArg string) {
    }
 
    for _, nn := range lics {
-      blob, err := os.ReadFile(filepath.Join(dmOracleDir, fmt.Sprintf("lic_%02x.blob", nn)))
+      blob, err := os.ReadFile(filepath.Join(oracleDir, fmt.Sprintf("lic_%02x.blob", nn)))
       if err != nil {
          continue
       }
@@ -443,15 +345,15 @@ func stageDeriveMap(args []string) int {
       return 2
    }
 
-   os.MkdirAll(dmData, 0o755)
+   os.MkdirAll(outDir, 0o755)
 
-   for _, f := range []string{dmIMG, dmPRVF} {
+   for _, f := range []string{imgPath, encPrvPath} {
       if _, err := os.Stat(f); err != nil {
          dmDie("missing %s", f)
       }
    }
-   if _, err := os.Stat(dmOracleDir); err != nil {
-      dmDie("missing %s - run prkf -4 first", dmOracleDir)
+   if _, err := os.Stat(oracleDir); err != nil {
+      dmDie("missing %s - run prkf -4 first", oracleDir)
    }
    read := func(p string) []byte {
       b, err := os.ReadFile(p)
@@ -460,16 +362,16 @@ func stageDeriveMap(args []string) int {
       }
       return b
    }
-   fb, img := read(dmDLLPath), read(dmIMG)
+   fb, img := read(dllPath), read(imgPath)
 
-   sizeImg, secs := dmPE(fb)
+   sizeImg, secs := peSections(fb)
    segs, heaps, spans := dmCensus(fb, secs, sizeImg)
 
    sum := sha256.Sum256(fb)
-   dmLogf("dll      %s", dmDLLPath)
+   dmLogf("dll      %s", dllPath)
    dmLogf("sha256   %x", sum)
    dmLogf("size     %d   SizeOfImage 0x%x", len(fb), sizeImg)
-   dmLogf("image    %s  %d bytes", dmIMG, len(img))
+   dmLogf("image    %s  %d bytes", imgPath, len(img))
    dmLogf("segments %d  heap-exec %d  spans %d", len(segs), len(heaps), len(spans))
    dmLogf("")
 
@@ -488,9 +390,9 @@ func stageDeriveMap(args []string) int {
    if !ok {
       dmDie("consumer not unique (%d sites)", len(sites))
    }
-   dmLogf("consumer descriptor 0x%06x  code 0x%06x+0x%x", h.desc, h.rva, h.size)
+   dmLogf("consumer descriptor 0x%06x  code 0x%06x+0x%x", h.va, h.rva, h.ln)
    dmLogf("")
-   dmDesc = h.desc
+   dmDesc = h.va
 
    // ---- phase 1: live set + magic, using three licences
    P1 := []int{1, 2, 3}
@@ -657,25 +559,18 @@ func stageDeriveMap(args []string) int {
    if err != nil {
       dmDie("%v", err)
    }
-   if err := os.WriteFile(dmOUTF, blob, 0o644); err != nil {
+   if err := os.WriteFile(mapPath, blob, 0o644); err != nil {
       dmDie("%v", err)
    }
    dmLogf("")
-   dmLogf("written %s", dmOUTF)
-   os.WriteFile(dmLOG, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
+   dmLogf("written %s", mapPath)
+   os.WriteFile(mapLogPath, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
    return 0
-}
-
-type dmBlk struct {
-   desc uint32
-   fo   uint32
-   rva  uint32
-   size uint32
 }
 
 // dmFindConsumer returns the heap-exec descriptor owning the unique size-check
 // site, so the driver does not have to look it up a second time.
-func dmFindConsumer(img []byte, heaps []dmBlk) (dmBlk, []int, bool) {
+func dmFindConsumer(img []byte, heaps []imgDesc) (imgDesc, []int, bool) {
    var sites []int
    for i := 0; ; {
       j := bytes.Index(img[i:], dmPAT)
@@ -686,12 +581,12 @@ func dmFindConsumer(img []byte, heaps []dmBlk) (dmBlk, []int, bool) {
       i += j + 1
    }
    if len(sites) != 1 {
-      return dmBlk{}, sites, false
+      return imgDesc{}, sites, false
    }
-   var owner dmBlk
+   var owner imgDesc
    found := false
    for _, h := range heaps {
-      if h.size != 0 && h.rva <= uint32(sites[0]) && uint32(sites[0]) < h.rva+h.size {
+      if h.ln != 0 && h.rva <= uint32(sites[0]) && uint32(sites[0]) < h.rva+h.ln {
          owner, found = h, true
       }
    }
@@ -713,12 +608,6 @@ type dmExceptionRecord struct {
    Address uintptr
 }
 
-type dmSec struct {
-   va uint32
-   rs uint32
-   rp uint32
-}
-
 type dmSweep struct {
    outs     map[int]map[int]string
    meta     []string
@@ -736,7 +625,7 @@ func dmRun(setrva uint32, lics []int) dmSweep {
    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
    defer cancel()
    // Positional worker arguments, not flags: the child re-derives every path
-   // from the same constants the parent used.
+   // from the same manifest the parent used.
    cmd := exec.CommandContext(ctx, exe, "-6", "sweep",
       fmt.Sprintf("0x%x", setrva),
       fmt.Sprintf("0x%x", dmDesc),
