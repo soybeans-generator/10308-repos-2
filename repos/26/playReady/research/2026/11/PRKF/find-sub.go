@@ -36,6 +36,8 @@
 //   prsubs.json     build-specific values, keyed by the DLL sha256
 //   findprsub.txt   per-descriptor probe results and every child's trace
 //
+// The DLL is the one input that is not in testdata/ - see dllPath.
+//
 // # DIAGNOSTICS
 //
 // A scan that stalls has three possible shapes - one child spinning, several
@@ -82,6 +84,14 @@ import (
 )
 
 const (
+   // dllPath is the PlayReady module, read and mapped where Windows installed
+   // it. It is the only path in the program outside testdata/, and it stays
+   // outside on purpose: the descriptor is an RVA into the mapped image, so the
+   // bytes hashed here and the image the Warbird gate executes from have to be
+   // the same module, and a copy loaded out of testdata/ is a different
+   // mapping that the gate is not documented to accept. Everything the
+   // pipeline reads or writes goes through dataFile; this one file is read in
+   // place.
    dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 
    // Size of one Warbird heap-exec descriptor, including its 32-byte digest.
@@ -114,7 +124,7 @@ func cmdFindSub() error {
    }
    defer f.Close()
 
-   logPath := outFile("findprsub.txt")
+   logPath := dataFile("findprsub.txt")
    logf, err := os.Create(logPath)
    if err != nil {
       return err
@@ -321,7 +331,7 @@ func cmdFindSub() error {
    if err != nil {
       return err
    }
-   cachePath := outFile("prsubs.json")
+   cachePath := dataFile("prsubs.json")
    if err := os.WriteFile(cachePath, compact, 0o644); err != nil {
       return err
    }

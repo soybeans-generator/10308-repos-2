@@ -3,14 +3,14 @@
 
 // extract.go is prkf -1, in two halves that cannot be run separately.
 //
-//   cmdCert   carves the CHAI certificate chain out of msprcore.bla
+//   cmdCert   carves the CHAI certificate chain out of testdata/msprcore.bla
 //   cmdKeys   parses the PRKF key-material section and writes the components
 //
 // main.go's cmdExtract calls cmdCert and then cmdKeys, so a failure in either
 // half aborts the step: a run that produced a chain but no keys is not a state
 // any later step can use. The two halves read the same file and write disjoint
-// outputs, which is why they share one input constant (corePath, in main.go)
-// and one file.
+// outputs, which is why they share one input path (corePath, in main.go) and
+// one file.
 //
 // # THE CHAIN
 //
@@ -63,13 +63,13 @@ var (
 
 // ------------------------------------------------- first half: the CHAI chain
 
-// cmdCert carves the CHAI certificate chain out of msprcore.bla and writes it
-// to testdata/extracted.cert. Selection is structural: a candidate must tile
-// its own certificate entries exactly, and a chain whose preceding length
-// prefix matches its total length is preferred over one whose does not.
+// cmdCert carves the CHAI certificate chain out of testdata/msprcore.bla and
+// writes it to testdata/extracted.cert. Selection is structural: a candidate
+// must tile its own certificate entries exactly, and a chain whose preceding
+// length prefix matches its total length is preferred over one whose does not.
 func cmdCert() error {
    if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
-      return errors.New("missing input: " + corePath)
+      return fmt.Errorf("missing input: %s\n  put the PlayReady sample there before running", corePath)
    }
    buf, err := os.ReadFile(corePath)
    if err != nil {
@@ -146,7 +146,7 @@ func cmdCert() error {
    }
 
    // ---- write ------------------------------------------------------
-   out := outFile(certOut)
+   out := dataFile(certOut)
    if err := os.WriteFile(out, blob, 0o644); err != nil {
       return err
    }
@@ -246,7 +246,7 @@ func cmdKeys() error {
 
    fmt.Println("\nwritten:")
    for _, k := range outNames {
-      p := outFile(keysOut + "." + k)
+      p := dataFile(keysOut + "." + k)
       v := data[k]
       if err := os.WriteFile(p, v, 0666); err != nil {
          return fmt.Errorf("write %s: %v", p, err)

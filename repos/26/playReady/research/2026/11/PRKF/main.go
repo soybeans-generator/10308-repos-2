@@ -9,22 +9,28 @@
 //   prkf -3    decrypt.go   decrypt the signing key
 //
 // This file is only the driver: parse the flag, reject arguments, make the
-// output directory, dispatch, and name the pipeline's one input. It holds no
+// testdata directory, dispatch, and name the pipeline's one input. It holds no
 // step logic.
 //
 // warbird.go holds the kernel call ABI that -2 and -3 share, and the probe
-// child that -2 re-executes. The ABI constants (warbirdOp, argsLen, outOff,
-// keyLen, probeEnv, probeTimeout) live there; dllPath lives in findsub.go,
-// which owns the DLL the scan reads.
+// child that -2 re-executes. The ABI constants (warbirdOp, argsLen, keyLen,
+// probeEnv) live there; dllPath lives in findsub.go, which owns the DLL the
+// scan reads.
 //
 // Steps -1 and -2 of the old four-step pipeline are now one step. They read
 // the same input (msprcore.bla) and write disjoint outputs; nothing downstream
 // ever wanted the carved chain without the keys, so the split only forced an
 // ordering rule on the caller.
 //
-// Run the steps in order, in one directory: -2 writes prsubs.json, -3 reads
-// it, and -3 consumes what -1 wrote. Every file the pipeline creates lands in
-// testdata/, so a run is disposable and the working directory stays clean.
+// Run the steps in order, from the same working directory: -2 writes
+// prsubs.json, -3 reads it, and -3 consumes what -1 wrote. Every path goes
+// through dataFile, so the sample is read from testdata/ and everything the
+// pipeline creates lands beside it. The working directory stays clean, and
+// `rm -rf testdata` throws the whole run away - including the sample, which
+// has to be put back before the next run.
+//
+// dllPath is the one path that is not under testdata/: the PlayReady module is
+// read, hashed and mapped where Windows installed it.
 //
 // -2 also re-executes this binary, one child per candidate descriptor, to
 // probe it. The child is selected by an environment variable rather than a
@@ -39,23 +45,27 @@ import (
    "path/filepath"
 )
 
-// corePath is the pipeline's one input. Both halves of prkf -1 read it, so it
-// is named here, by the driver, rather than by either half.
-const corePath = "msprcore.bla"
-
-// outDir is where every file this program creates is written. Inputs are
-// still read from the working directory (msprcore.bla); only outputs are
-// redirected here.
+// outDir is the one directory the pipeline uses: the sample it reads and every
+// file it writes. Inputs are fixtures here, not in the working directory, so a
+// run touches nothing outside it and can be discarded as a unit.
 //
-// Nothing else in the pipeline should spell a directory: write through
-// outFile so the whole run can be thrown away with `rm -rf testdata`.
+// Nothing else in the pipeline should spell a directory: read and write
+// through dataFile.
 const outDir = "testdata"
+
+// corePath is the pipeline's one input, read from testdata/ like every other
+// path. Both halves of prkf -1 read it, so it is named here, by the driver,
+// rather than by either half.
+//
+// It is a var, not a const, only because dataFile resolves outDir; outDir is
+// itself a constant, so the value is fixed for the life of the process.
+var corePath = dataFile("msprcore.bla")
 
 // cmdExtract implements prkf -1: carve the chain, then extract the keys.
 //
 // The two halves read the same file and write disjoint outputs, so the order
 // is arbitrary. Carving runs first because it is the cheaper structural check
-// on msprcore.bla and its failure message is more specific than "not a PRKF".
+// on the sample and its failure message is more specific than "not a PRKF".
 //
 // A failure in either half aborts the step: a run that produced a chain but no
 // keys is not a state any later step can use.
@@ -83,12 +93,12 @@ func main() {
    }
 
    step1 := flag.Bool("1", false,
-      "carve the CHAI chain ("+outFile("extracted.cert")+") and extract the key "+
-         "components ("+outFile("extracted")+".{sig,enc}.{pub,prv})")
+      "carve the CHAI chain ("+dataFile("extracted.cert")+") and extract the key "+
+         "components ("+dataFile("extracted")+".{sig,enc}.{pub,prv})")
    step2 := flag.Bool("2", false,
-      "locate the signing-key routine ("+outFile("prsubs.json")+", "+outFile("findprsub.txt")+")")
+      "locate the signing-key routine ("+dataFile("prsubs.json")+", "+dataFile("findprsub.txt")+")")
    step3 := flag.Bool("3", false,
-      "decrypt the signing key ("+outFile("extracted.sig.plain")+")")
+      "decrypt the signing key ("+dataFile("extracted.sig.plain")+")")
 
    flag.Parse()
 
@@ -136,8 +146,10 @@ func main() {
    }
 }
 
-// outFile returns the path inside outDir for a pipeline-written file.
-func outFile(name string) string {
+// dataFile returns the path inside outDir for a pipeline file, whether the
+// pipeline reads it or writes it. Both directions go through here, so no step
+// has to know the directory's name and no file can escape it.
+func dataFile(name string) string {
    return filepath.Join(outDir, name)
 }
 

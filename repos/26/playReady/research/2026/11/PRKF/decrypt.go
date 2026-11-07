@@ -30,7 +30,7 @@
 //     it itself with `cmp dword ptr [rcx+10h], 20h`.
 //
 // prsubs.json is read from testdata/, so run prkf -2 first; both steps agree
-// on the directory because both go through outFile.
+// on the directory because both go through dataFile.
 //
 // # VERIFICATION
 //
@@ -74,12 +74,12 @@ import (
 )
 
 // File names this step reads and writes. They are vars, not consts, only
-// because outFile resolves outDir; outDir is itself a constant, so the values
+// because dataFile resolves outDir; outDir is itself a constant, so the values
 // are fixed for the life of the process.
 var (
-   srcName = outFile("extracted.sig.prv")   // written by prkf -1
-   pubName = outFile("extracted.sig.pub")   // written by prkf -1
-   dstName = outFile("extracted.sig.plain") // 32-byte plaintext scalar
+   srcName = dataFile("extracted.sig.prv")   // written by prkf -1
+   pubName = dataFile("extracted.sig.pub")   // written by prkf -1
+   dstName = dataFile("extracted.sig.plain") // 32-byte plaintext scalar
 )
 
 func cmdDecrypt() error {
@@ -226,7 +226,7 @@ func loadPrsubs() (*prsubsRecord, error) {
    sum := sha256.Sum256(dll)
    sha := hex.EncodeToString(sum[:])
 
-   cache := outFile("prsubs.json")
+   cache := dataFile("prsubs.json")
    if !isFile(cache) {
       return nil, fmt.Errorf("no %s - run prkf -2 first", cache)
    }
