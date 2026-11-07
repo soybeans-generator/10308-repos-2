@@ -29,6 +29,16 @@
 //          testdata/oracle/lic_NN.blob
 // OUTPUT   testdata/oracle_map.json  {"cluster": rva, "magic": hex, "map": {...}}
 //          testdata/derive_map.txt
+//
+// USAGE
+//   enc.plain -3
+//
+//   No flags. Every path above is a constant.
+//
+//   The sweep runs in a child of this same binary, using positional arguments
+//   rather than flags:
+//     enc.plain -3 sweep <setRVA> <descRVA> <lics>
+//   That is the internal worker; the driver spawns it, nothing else should.
 // =============================================================================
 
 package main
@@ -53,60 +63,66 @@ import (
 )
 
 const (
-   DATA                     = "testdata"
-   CBLK, CN, CLEN, RWX, KBL = 16, 64, 0x400, 0x40, 0x48
-   DLL                      = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
+   dmData               = "testdata"
+   dmCBLK, dmCN, dmCLEN = 16, 64, 0x400
+   dmRWX, dmKBL         = 0x40, 0x48
+
+   // dmDLLPath is the PlayReady build every stage reads.
+   dmDLLPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 )
 
 var (
-   IMG, PRVF         = data("wbtool_img.bin"), data("extracted.enc.prv")
-   ORACLE, OUTF, LOG = data("oracle"), data("oracle_map.json"), data("derive_map.txt")
-   PAT               = []byte{0x83, 0x79, 0x14, 0x41} // cmp [rcx+0x14],0x41
-   SENT              = append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
-   W10               = hx("a77bece491a87ebcd8a2c62856b165b33ad2572cf88bdae3ddc79be816be3185")
-   W11               = hx("c3cd57691eff156c95d946d534121dfb81738adb5b4bb4223faad89cbb459bec")
+   dmIMG       = dmPath("wbtool_img.bin")
+   dmPRVF      = dmPath("extracted.enc.prv")
+   dmOracleDir = dmPath("oracle")
+   dmOUTF      = dmPath("oracle_map.json")
+   dmLOG       = dmPath("derive_map.txt")
+   dmPAT       = []byte{0x83, 0x79, 0x14, 0x41} // cmp [rcx+0x14],0x41
+   dmSENT      = append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
+   dmW10       = dmHx("a77bece491a87ebcd8a2c62856b165b33ad2572cf88bdae3ddc79be816be3185")
+   dmW11       = dmHx("c3cd57691eff156c95d946d534121dfb81738adb5b4bb4223faad89cbb459bec")
 )
 
 // ================================ worker =====================================
 
 var (
-   LoadLibraryW   = syscall.NewLazyDLL("kernel32.dll").NewProc("LoadLibraryW")
-   VirtualProtect = syscall.NewLazyDLL("kernel32.dll").NewProc("VirtualProtect")
-   GetMapped      = syscall.NewLazyDLL("kernel32.dll").NewProc("K32GetMappedFileNameW")
-   AddVEH         = syscall.NewLazyDLL("kernel32.dll").NewProc("AddVectoredExceptionHandler")
-   NtQuery        = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
-   RtlMove        = syscall.NewLazyDLL("ntdll.dll").NewProc("RtlMoveMemory")
+   dmLoadLibraryW   = syscall.NewLazyDLL("kernel32.dll").NewProc("LoadLibraryW")
+   dmVirtualProtect = syscall.NewLazyDLL("kernel32.dll").NewProc("VirtualProtect")
+   dmGetMapped      = syscall.NewLazyDLL("kernel32.dll").NewProc("K32GetMappedFileNameW")
+   dmAddVEH         = syscall.NewLazyDLL("kernel32.dll").NewProc("AddVectoredExceptionHandler")
+   dmNtQuery        = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
+   dmRtlMove        = syscall.NewLazyDLL("ntdll.dll").NewProc("RtlMoveMemory")
 
    // Static, never-moved scratch handed to native code.
-   gST  [0x40]byte
-   gOUT [0x100]byte
-   gKB  [KBL]byte
-   gARG [0x40]byte
-   gNM  [512]uint16
-   gCB  []byte
-   veh  uintptr
+   dmST  [0x40]byte
+   dmOUT [0x100]byte
+   dmKB  [dmKBL]byte
+   dmARG [0x40]byte
+   dmNM  [512]uint16
+   dmCB  []byte
+   dmVEH uintptr
 )
 
-var gDesc uint32
+var dmDesc uint32
 
 // ================================ driver =====================================
 
-var logLines []string
+var dmLogLines []string
 
-func census(fb []byte, secs []sec, sizeImg uint32) ([]blk, []blk, [][2]uint32) {
-   var segs, heaps []blk
+func dmCensus(fb []byte, secs []dmSec, sizeImg uint32) ([]dmBlk, []dmBlk, [][2]uint32) {
+   var segs, heaps []dmBlk
    for _, s := range secs {
-      b := cut(fb, s.rp, s.rs)
+      b := dmCut(fb, s.rp, s.rs)
       for off := 0; off+0x40 < len(b); off += 4 {
-         sz := u32(b, off+0x20)
+         sz := dmU32(b, off+0x20)
          if sz < 0x40 || sz > 0x200000 || off+int(sz) > len(b) {
             continue
          }
          if h := sha256.Sum256(b[off+0x20 : off+int(sz)]); !bytes.Equal(h[:], b[off:off+32]) {
             continue
          }
-         d := blk{s.va + uint32(off), s.rp + uint32(off),
-            u32(b, off+0x34) & 0x0FFFFFFF, u32(b, off+0x38) & 0x0FFFFFFF}
+         d := dmBlk{s.va + uint32(off), s.rp + uint32(off),
+            dmU32(b, off+0x34) & 0x0FFFFFFF, dmU32(b, off+0x38) & 0x0FFFFFFF}
          if sz == 0xF0 {
             heaps = append(heaps, d)
          } else {
@@ -117,9 +133,9 @@ func census(fb []byte, secs []sec, sizeImg uint32) ([]blk, []blk, [][2]uint32) {
    }
    var spans [][2]uint32
    for _, g := range segs { // per descriptor, NOT deduped by RVA
-      b := cut(fb, g.fo, g.size)
+      b := dmCut(fb, g.fo, g.size)
       for k := 0; 0xF4+k*0xC <= len(b)-0xC; k++ {
-         rva, sz := u32(b, 0xF4+k*0xC+4), u32(b, 0xF4+k*0xC+8)
+         rva, sz := dmU32(b, 0xF4+k*0xC+4), dmU32(b, 0xF4+k*0xC+8)
          if rva >= 0x1000 && sz >= 8 && rva+sz <= sizeImg {
             spans = append(spans, [2]uint32{rva, sz})
          }
@@ -128,28 +144,26 @@ func census(fb []byte, secs []sec, sizeImg uint32) ([]blk, []blk, [][2]uint32) {
    return segs, heaps, spans
 }
 
-// cut is Python's forgiving slice b[off:off+n], truncated at len(b).
-func cut(b []byte, off, n uint32) []byte {
+// dmCut is Python's forgiving slice b[off:off+n], truncated at len(b).
+func dmCut(b []byte, off, n uint32) []byte {
    if int(off) >= len(b) {
       return b[:0]
    }
    return b[off:min(int(off)+int(n), len(b))]
 }
 
-func data(n string) string { return filepath.Join(DATA, n) }
-
-func die(f string, a ...any) {
-   logf("FATAL: "+f, a...)
-   os.WriteFile(LOG, []byte(strings.Join(logLines, "\n")+"\n"), 0o644)
+func dmDie(f string, a ...any) {
+   dmLogf("FATAL: "+f, a...)
+   os.WriteFile(dmLOG, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
    os.Exit(1)
 }
 
-// findSets is a literal port of re.finditer(rb"[\x00-\x0f]{1024,}") plus the
-// sliding bijection test. Runs of bytes <= 0x0f of length >= CLEN are visited
-// left to right; within each run o advances by CLEN on a hit and by 1 on a
+// dmFindSets is a literal port of re.finditer(rb"[\x00-\x0f]{1024,}") plus the
+// sliding bijection test. Runs of bytes <= 0x0f of length >= dmCLEN are visited
+// left to right; within each run o advances by dmCLEN on a hit and by 1 on a
 // miss. Offsets come out ascending, so no sort is needed. One byte comparison
 // per iteration, no rune decoding.
-func findSets(img []byte) []uint32 {
+func dmFindSets(img []byte) []uint32 {
    var out []uint32
    for i := 0; i < len(img); {
       if img[i] > 0x0f {
@@ -160,16 +174,16 @@ func findSets(img []byte) []uint32 {
       for i < len(img) && img[i] <= 0x0f {
          i++
       }
-      for o := lo; o+CLEN <= i; {
+      for o := lo; o+dmCLEN <= i; {
          j := 0
-         for ; j < CN; j++ {
-            if !uniq(img[o+j*CBLK : o+(j+1)*CBLK]) {
+         for ; j < dmCN; j++ {
+            if !dmUniq(img[o+j*dmCBLK : o+(j+1)*dmCBLK]) {
                break
             }
          }
-         if j == CN {
+         if j == dmCN {
             out = append(out, uint32(o))
-            o += CLEN
+            o += dmCLEN
          } else {
             o++
          }
@@ -178,261 +192,47 @@ func findSets(img []byte) []uint32 {
    return out
 }
 
-func hx(s string) []byte { b, _ := hex.DecodeString(s); return b }
+func dmHx(s string) []byte {
+   b, _ := hex.DecodeString(s)
+   return b
+}
 
-func loadfail(f string, a ...any) {
+func dmLoadFail(f string, a ...any) {
    fmt.Printf("LOADFAIL "+f+"\n", a...)
    os.Exit(4)
 }
 
-func logf(f string, a ...any) {
+func dmLogf(f string, a ...any) {
    s := fmt.Sprintf(f, a...)
-   logLines = append(logLines, s)
+   dmLogLines = append(dmLogLines, s)
    fmt.Println(s)
-}
-
-func main() {
-   os.MkdirAll(DATA, 0o755)
-   if len(os.Args) > 1 && os.Args[1] == "--sweep" {
-      worker()
-      return
-   }
-
-   for _, f := range []string{IMG, PRVF} {
-      if _, err := os.Stat(f); err != nil {
-         die("missing %s", f)
-      }
-   }
-   if _, err := os.Stat(ORACLE); err != nil {
-      die("missing %s - run make-oracle first", ORACLE)
-   }
-   read := func(p string) []byte {
-      b, err := os.ReadFile(p)
-      if err != nil {
-         die("%v", err)
-      }
-      return b
-   }
-   fb, img := read(DLL), read(IMG)
-
-   sizeImg, secs := pe(fb)
-   segs, heaps, spans := census(fb, secs, sizeImg)
-
-   sum := sha256.Sum256(fb)
-   logf("dll      %s", DLL)
-   logf("sha256   %x", sum)
-   logf("size     %d   SizeOfImage 0x%x", len(fb), sizeImg)
-   logf("image    %s  %d bytes", IMG, len(img))
-   logf("segments %d  heap-exec %d  spans %d", len(segs), len(heaps), len(spans))
-   logf("")
-
-   SETS := findSets(img)
-   logf("bijection sets: %d", len(SETS))
-   for i, rva := range SETS {
-      logf("  set%d  0x%06x  %x", i, rva, img[rva:min(rva+16, uint32(len(img)))])
-   }
-   logf("")
-   if len(SETS) == 0 {
-      die("no permutation sets found - is wbtool_img.bin decrypted?")
-   }
-
-   h, sites, ok := findConsumer(img, heaps)
-   logf("size-check sites: %#x", sites)
-   if !ok {
-      die("consumer not unique (%d sites)", len(sites))
-   }
-   logf("consumer descriptor 0x%06x  code 0x%06x+0x%x", h.desc, h.rva, h.size)
-   logf("")
-   gDesc = h.desc
-
-   // ---- phase 1: live set + magic, using three licences
-   P1 := []int{1, 2, 3}
-   logf("phase 1: %d sets x licences %v", len(SETS), P1)
-   logf("%-6s%-10s%-10s%-8s%s", "set", "rva", "distinct", "shared", "verdict")
-
-   var (
-      liveIdx   int
-      liveRVA   uint32
-      haveLive  bool
-      magic     string
-      liveTable sweep
-   )
-   for i, rva := range SETS {
-      r := run(rva, P1)
-      if r.loadfail != "" {
-         die("%s", r.loadfail)
-      }
-      if r.fault != "" {
-         logf("set%-3d0x%06x  %s", i, rva, r.fault)
-         continue
-      }
-      if len(r.outs) < len(P1) {
-         logf("set%-3d0x%06x  incomplete (rc %d)", i, rva, r.rc)
-         continue
-      }
-
-      distinct, cnt, minD := map[int]int{}, map[string]int{}, 1<<30
-      for _, nn := range P1 {
-         seen := map[string]bool{}
-         for _, v := range r.outs[nn] {
-            seen[v] = true
-         }
-         distinct[nn] = len(seen)
-         minD = min(minD, distinct[nn])
-         for v := range seen {
-            cnt[v]++
-         }
-      }
-      var shared []string
-      for v, c := range cnt {
-         if c == len(P1) {
-            shared = append(shared, v)
-         }
-      }
-      verdict := "not live"
-      if len(shared) == 1 && minD > 1 {
-         verdict = "LIVE"
-      }
-      logf("set%-3d0x%06x  %2d %2d %2d  %-8d%s",
-         i, rva, distinct[1], distinct[2], distinct[3], len(shared), verdict)
-      if verdict == "LIVE" {
-         if haveLive {
-            die("two live sets: 0x%06x and 0x%06x", liveRVA, rva)
-         }
-         haveLive, liveIdx, liveRVA, magic, liveTable = true, i, rva, shared[0], r
-      }
-   }
-   logf("")
-
-   if !haveLive {
-      logf("no set produced a shared plaintext across licences.")
-      logf("")
-      logf("That rules out both wrong-magic and wrong-live-set: if the sentinel were")
-      logf("ever produced, the shared value would appear. So the sentinel is never")
-      logf("reached at all, which points at the blob/ECC encoding rather than at the")
-      logf("tables. Check, in order:")
-      logf("  1. lic_NN.blob point order - C1||C2 vs C2||C1. The oracle writes")
-      logf("     C1=(rG) then C2=(M+rQ); a build that reads C2 first never lands on M.")
-      logf("  2. Whether the consumer really is the 0x41 licence consumer on this")
-      logf("     build. Compare the 'distinct' column: all-1 means the patch has no")
-      logf("     effect on the output, so that descriptor is not reading the table.")
-      logf("  3. Whether prv[0x40]%%3 selects a routine family whose table is not among")
-      logf("     the discovered sets - the VARIANT line above records the value.")
-      die("no live set")
-   }
-
-   mh := hx(magic)
-   MAGIC := make([]byte, min(len(mh), len(SENT)))
-   for i := range MAGIC {
-      MAGIC[i] = mh[i] ^ SENT[i]
-   }
-
-   logf("live set   set%d 0x%06x", liveIdx, liveRVA)
-   logf("magic      %x", MAGIC)
-   switch {
-   case bytes.Equal(MAGIC, W10):
-      logf("           == the Windows 10 sequence")
-   case bytes.Equal(MAGIC, W11):
-      logf("           == the Windows 11 sequence")
-   default:
-      logf("           == NEITHER published sequence: this build uses a third one,")
-      logf("              which is why a hardcoded W10 constant would never match.")
-   }
-   logf("")
-   for _, m := range liveTable.meta {
-      logf("  %s", m)
-   }
-
-   // ---- phase 2: full permutation on the live set
-   logf("")
-   logf("phase 2: full permutation on the live set")
-   r := run(liveRVA, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
-   if r.fault != "" {
-      die("%s", r.fault)
-   }
-   if len(r.outs) < 15 {
-      die("incomplete sweep (rc %d)", r.rc)
-   }
-   MAP := map[int]int{}
-   for nn := 1; nn < 16; nn++ {
-      var hits []int
-      for mm, v := range r.outs[nn] {
-         if v == magic {
-            hits = append(hits, mm)
-         }
-      }
-      if len(hits) != 1 {
-         die("nibble 0x%x: %d hits, expected 1", nn, len(hits))
-      }
-      mm := hits[0]
-      if p, used := MAP[mm]; used {
-         die("nibble 0x%x: mapped 0x%x already used by real 0x%x", nn, mm, p)
-      }
-      MAP[mm] = nn
-      logf("  real 0x%x <- mapped 0x%x", nn, mm)
-   }
-
-   var left []int
-   for m := 0; m < 16; m++ {
-      if _, ok := MAP[m]; !ok {
-         left = append(left, m)
-      }
-   }
-   if len(left) != 1 {
-      die("expected one leftover, got %#x", left)
-   }
-   MAP[left[0]] = 0
-   logf("  leftover mapped 0x%x -> real 0x0", left[0])
-   logf("")
-
-   // 16 distinct values drawn from 0..15 is a bijection: a duplicate is the
-   // only way to fail.
-   var seen [16]bool
-   for _, v := range MAP {
-      if seen[v] {
-         die("not a bijection: 0x%x twice", v)
-      }
-      seen[v] = true
-   }
-
-   logf("[MAP]  mapped -> real")
-   for m := 0; m < 16; m++ {
-      logf("  %x -> %x", m, MAP[m])
-   }
-
-   jm := map[string]int{}
-   for k, v := range MAP {
-      jm[strconv.Itoa(k)] = v
-   }
-   blob, err := json.MarshalIndent(map[string]any{
-      "cluster": liveRVA, "magic": hex.EncodeToString(MAGIC), "map": jm,
-   }, "", "  ")
-   if err != nil {
-      die("%v", err)
-   }
-   if err := os.WriteFile(OUTF, blob, 0o644); err != nil {
-      die("%v", err)
-   }
-   logf("")
-   logf("written %s", OUTF)
-   os.WriteFile(LOG, []byte(strings.Join(logLines, "\n")+"\n"), 0o644)
 }
 
 // ------------------------------------------------------------------ PE census
 
-func pe(fb []byte) (uint32, []sec) {
-   lf := int(u32(fb, 0x3C))
-   n, osz := int(u16(fb, lf+6)), int(u16(fb, lf+20))
-   secs := make([]sec, n)
+func dmPE(fb []byte) (uint32, []dmSec) {
+   lf := int(dmU32(fb, 0x3C))
+   n, osz := int(dmU16(fb, lf+6)), int(dmU16(fb, lf+20))
+   secs := make([]dmSec, n)
    for i, p := 0, lf+24+osz; i < n; i, p = i+1, p+40 {
-      secs[i] = sec{u32(fb, p+12), u32(fb, p+16), u32(fb, p+20)}
+      secs[i] = dmSec{dmU32(fb, p+12), dmU32(fb, p+16), dmU32(fb, p+20)}
    }
-   return u32(fb, lf+24+56), secs
+   return dmU32(fb, lf+24+56), secs
 }
-func u16(b []byte, o int) uint16 { return binary.LittleEndian.Uint16(b[o:]) }
-func u32(b []byte, o int) uint32 { return binary.LittleEndian.Uint32(b[o:]) }
 
-func uniq(b []byte) bool {
+func dmPath(n string) string {
+   return filepath.Join(dmData, n)
+}
+
+func dmU16(b []byte, o int) uint16 {
+   return binary.LittleEndian.Uint16(b[o:])
+}
+
+func dmU32(b []byte, o int) uint32 {
+   return binary.LittleEndian.Uint32(b[o:])
+}
+
+func dmUniq(b []byte) bool {
    var seen [256]bool
    for _, c := range b {
       if seen[c] {
@@ -443,45 +243,45 @@ func uniq(b []byte) bool {
    return true
 }
 
-func worker() {
-   if len(os.Args) < 5 {
-      fmt.Println("usage: <exe> --sweep SETRVA DESC LICS")
+func dmWorker(setArg, descArg, licsArg string) {
+   if setArg == "" || descArg == "" || licsArg == "" {
+      fmt.Fprintln(os.Stderr, "usage: enc.plain -3 sweep <setRVA> <descRVA> <lics>")
       os.Exit(2)
    }
    arg := func(s string, base int) int {
       v, err := strconv.ParseInt(s, base, 64)
       if err != nil {
-         loadfail("bad arg %q", s)
+         dmLoadFail("bad arg %q", s)
       }
       return int(v)
    }
    must := func(p string) []byte {
       b, err := os.ReadFile(p)
       if err != nil {
-         loadfail("%v", err)
+         dmLoadFail("%v", err)
       }
       return b
    }
-   srva, desc := arg(os.Args[2], 0), arg(os.Args[3], 0)
+   srva, desc := arg(setArg, 0), arg(descArg, 0)
    var lics []int
-   for _, x := range strings.Split(os.Args[4], ",") {
+   for _, x := range strings.Split(licsArg, ",") {
       lics = append(lics, arg(x, 16))
    }
 
-   fb, img, prv := must(DLL), must(IMG), must(PRVF)
-   copy(gKB[:], prv) // create_string_buffer(PRV, 0x48): zero-padded
+   fb, img, prv := must(dmDLLPath), must(dmIMG), must(dmPRVF)
+   copy(dmKB[:], prv) // create_string_buffer(PRV, 0x48): zero-padded
 
-   sizeImg, secs := pe(fb)
-   _, heaps, spans := census(fb, secs, sizeImg)
+   sizeImg, secs := dmPE(fb)
+   _, heaps, spans := dmCensus(fb, secs, sizeImg)
 
-   wp, err := syscall.UTF16PtrFromString(DLL)
+   wp, err := syscall.UTF16PtrFromString(dmDLLPath)
    if err != nil {
-      loadfail("%v", err)
+      dmLoadFail("%v", err)
    }
-   bp, _, lerr := LoadLibraryW.Call(uintptr(unsafe.Pointer(wp)))
+   bp, _, lerr := dmLoadLibraryW.Call(uintptr(unsafe.Pointer(wp)))
    base := uintptr(bp)
    if base == 0 {
-      loadfail("LoadLibraryW: %v", lerr)
+      dmLoadFail("LoadLibraryW: %v", lerr)
    }
 
    // base stays a uintptr; memory traffic goes through RtlMoveMemory, so no
@@ -490,11 +290,11 @@ func worker() {
       span := uintptr((len(buf) + 0xFFF) &^ 0xFFF)
       addr := base + uintptr(rva)
       var old, dummy uint32
-      if r, _, _ := VirtualProtect.Call(addr, span, RWX, uintptr(unsafe.Pointer(&old))); r == 0 {
+      if r, _, _ := dmVirtualProtect.Call(addr, span, dmRWX, uintptr(unsafe.Pointer(&old))); r == 0 {
          return false
       }
-      RtlMove.Call(addr, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-      VirtualProtect.Call(addr, span, uintptr(old), uintptr(unsafe.Pointer(&dummy)))
+      dmRtlMove.Call(addr, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+      dmVirtualProtect.Call(addr, span, uintptr(old), uintptr(unsafe.Pointer(&dummy)))
       return true
    }
 
@@ -569,13 +369,13 @@ func worker() {
       }
    }
    fmt.Printf("PATCHED %d skipped %d\n", patched, skipped)
-   fmt.Printf("VARIANT prv[0x40]=0x%02x %%3=%d\n", gKB[0x40], gKB[0x40]%3)
+   fmt.Printf("VARIANT prv[0x40]=0x%02x %%3=%d\n", dmKB[0x40], dmKB[0x40]%3)
 
-   veh = syscall.NewCallback(func(ep *exceptionPointers) uintptr {
+   dmVEH = syscall.NewCallback(func(ep *dmExceptionPointers) uintptr {
       mod := "-"
-      if r, _, _ := GetMapped.Call(^uintptr(0), ep.Record.Address,
-         uintptr(unsafe.Pointer(&gNM[0])), 512); r != 0 {
-         if s := syscall.UTF16ToString(gNM[:]); s != "" {
+      if r, _, _ := dmGetMapped.Call(^uintptr(0), ep.Record.Address,
+         uintptr(unsafe.Pointer(&dmNM[0])), 512); r != 0 {
+         if s := syscall.UTF16ToString(dmNM[:]); s != "" {
             mod = s[strings.LastIndex(s, `\`)+1:]
          }
       }
@@ -585,38 +385,38 @@ func worker() {
       os.Exit(3)
       return 0
    })
-   AddVEH.Call(1, veh)
+   dmAddVEH.Call(1, dmVEH)
 
-   orig := make([]byte, CLEN)
-   RtlMove.Call(uintptr(unsafe.Pointer(&orig[0])), base+uintptr(srva), CLEN)
+   orig := make([]byte, dmCLEN)
+   dmRtlMove.Call(uintptr(unsafe.Pointer(&orig[0])), base+uintptr(srva), dmCLEN)
 
    decrypt := func(blob []byte) (uint32, []byte, []byte) {
-      clear(gST[:])
-      clear(gOUT[:])
-      copy(gKB[:], prv)
-      gCB = append(gCB[:0], blob...)
-      a := gARG[:0x38]
+      clear(dmST[:])
+      clear(dmOUT[:])
+      copy(dmKB[:], prv)
+      dmCB = append(dmCB[:0], blob...)
+      a := dmARG[:0x38]
       binary.LittleEndian.PutUint64(a[0x00:], 3)
       binary.LittleEndian.PutUint64(a[0x08:], uint64(base)+uint64(desc))
-      binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&gST[0]))))
+      binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&dmST[0]))))
       binary.LittleEndian.PutUint32(a[0x18:], 0)
-      binary.LittleEndian.PutUint64(a[0x1C:], uint64(uintptr(unsafe.Pointer(&gKB[0]))))
+      binary.LittleEndian.PutUint64(a[0x1C:], uint64(uintptr(unsafe.Pointer(&dmKB[0]))))
       binary.LittleEndian.PutUint32(a[0x24:], 0x41)
-      binary.LittleEndian.PutUint64(a[0x28:], uint64(uintptr(unsafe.Pointer(&gCB[0]))))
-      binary.LittleEndian.PutUint64(a[0x30:], uint64(uintptr(unsafe.Pointer(&gOUT[0]))))
-      r, _, _ := NtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), 0x38, 0)
-      return uint32(r), append([]byte(nil), gST[:4]...), append([]byte(nil), gOUT[:0x20]...)
+      binary.LittleEndian.PutUint64(a[0x28:], uint64(uintptr(unsafe.Pointer(&dmCB[0]))))
+      binary.LittleEndian.PutUint64(a[0x30:], uint64(uintptr(unsafe.Pointer(&dmOUT[0]))))
+      r, _, _ := dmNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), 0x38, 0)
+      return uint32(r), append([]byte(nil), dmST[:4]...), append([]byte(nil), dmOUT[:0x20]...)
    }
 
    for _, nn := range lics {
-      blob, err := os.ReadFile(filepath.Join(ORACLE, fmt.Sprintf("lic_%02x.blob", nn)))
+      blob, err := os.ReadFile(filepath.Join(dmOracleDir, fmt.Sprintf("lic_%02x.blob", nn)))
       if err != nil {
          continue
       }
       rc, sd, res := decrypt(blob)
       fmt.Printf("CTRL %02x rc=0x%08x st=%x %x\n", nn, rc, sd, res)
       for mm := 0; mm < 16; mm++ {
-         wr(uint32(srva), bytes.Repeat([]byte{byte(mm)}, CLEN))
+         wr(uint32(srva), bytes.Repeat([]byte{byte(mm)}, dmCLEN))
          rc, sd, res := decrypt(blob)
          wr(uint32(srva), orig)
          fmt.Printf("OUT %02x %02x rc=0x%08x st=%x %x\n", nn, mm, rc, sd, res)
@@ -625,14 +425,260 @@ func worker() {
    os.Exit(0)
 }
 
-type blk struct{ desc, fo, rva, size uint32 }
+// --- stage entry point ------------------------------------------------------
 
-// findConsumer returns the heap-exec descriptor owning the unique size-check
+func stageDeriveMap(args []string) int {
+   // Internal worker mode. Positional, so the command line surface stays at
+   // exactly -1 -2 -3 -4.
+   if len(args) > 0 && args[0] == "sweep" {
+      if len(args) != 4 {
+         fmt.Fprintln(os.Stderr, "usage: enc.plain -3 sweep <setRVA> <descRVA> <lics>")
+         return 2
+      }
+      dmWorker(args[1], args[2], args[3])
+      return 0
+   }
+   if len(args) > 0 {
+      fmt.Fprintf(os.Stderr, "enc.plain -3: unexpected argument %q\n", args[0])
+      return 2
+   }
+
+   os.MkdirAll(dmData, 0o755)
+
+   for _, f := range []string{dmIMG, dmPRVF} {
+      if _, err := os.Stat(f); err != nil {
+         dmDie("missing %s", f)
+      }
+   }
+   if _, err := os.Stat(dmOracleDir); err != nil {
+      dmDie("missing %s - run enc.plain -1 first", dmOracleDir)
+   }
+   read := func(p string) []byte {
+      b, err := os.ReadFile(p)
+      if err != nil {
+         dmDie("%v", err)
+      }
+      return b
+   }
+   fb, img := read(dmDLLPath), read(dmIMG)
+
+   sizeImg, secs := dmPE(fb)
+   segs, heaps, spans := dmCensus(fb, secs, sizeImg)
+
+   sum := sha256.Sum256(fb)
+   dmLogf("dll      %s", dmDLLPath)
+   dmLogf("sha256   %x", sum)
+   dmLogf("size     %d   SizeOfImage 0x%x", len(fb), sizeImg)
+   dmLogf("image    %s  %d bytes", dmIMG, len(img))
+   dmLogf("segments %d  heap-exec %d  spans %d", len(segs), len(heaps), len(spans))
+   dmLogf("")
+
+   SETS := dmFindSets(img)
+   dmLogf("bijection sets: %d", len(SETS))
+   for i, rva := range SETS {
+      dmLogf("  set%d  0x%06x  %x", i, rva, img[rva:min(rva+16, uint32(len(img)))])
+   }
+   dmLogf("")
+   if len(SETS) == 0 {
+      dmDie("no permutation sets found - is wbtool_img.bin decrypted?")
+   }
+
+   h, sites, ok := dmFindConsumer(img, heaps)
+   dmLogf("size-check sites: %#x", sites)
+   if !ok {
+      dmDie("consumer not unique (%d sites)", len(sites))
+   }
+   dmLogf("consumer descriptor 0x%06x  code 0x%06x+0x%x", h.desc, h.rva, h.size)
+   dmLogf("")
+   dmDesc = h.desc
+
+   // ---- phase 1: live set + magic, using three licences
+   P1 := []int{1, 2, 3}
+   dmLogf("phase 1: %d sets x licences %v", len(SETS), P1)
+   dmLogf("%-6s%-10s%-10s%-8s%s", "set", "rva", "distinct", "shared", "verdict")
+
+   var (
+      liveIdx  int
+      liveRVA  uint32
+      haveLive bool
+      magic    string
+      liveTab  dmSweep
+   )
+   for i, rva := range SETS {
+      r := dmRun(rva, P1)
+      if r.loadfail != "" {
+         dmDie("%s", r.loadfail)
+      }
+      if r.fault != "" {
+         dmLogf("set%-3d0x%06x  %s", i, rva, r.fault)
+         continue
+      }
+      if len(r.outs) < len(P1) {
+         dmLogf("set%-3d0x%06x  incomplete (rc %d)", i, rva, r.rc)
+         continue
+      }
+
+      distinct, cnt, minD := map[int]int{}, map[string]int{}, 1<<30
+      for _, nn := range P1 {
+         seen := map[string]bool{}
+         for _, v := range r.outs[nn] {
+            seen[v] = true
+         }
+         distinct[nn] = len(seen)
+         minD = min(minD, distinct[nn])
+         for v := range seen {
+            cnt[v]++
+         }
+      }
+      var shared []string
+      for v, c := range cnt {
+         if c == len(P1) {
+            shared = append(shared, v)
+         }
+      }
+      verdict := "not live"
+      if len(shared) == 1 && minD > 1 {
+         verdict = "LIVE"
+      }
+      dmLogf("set%-3d0x%06x  %2d %2d %2d  %-8d%s",
+         i, rva, distinct[1], distinct[2], distinct[3], len(shared), verdict)
+      if verdict == "LIVE" {
+         if haveLive {
+            dmDie("two live sets: 0x%06x and 0x%06x", liveRVA, rva)
+         }
+         haveLive, liveIdx, liveRVA, magic, liveTab = true, i, rva, shared[0], r
+      }
+   }
+   dmLogf("")
+
+   if !haveLive {
+      dmLogf("no set produced a shared plaintext across licences.")
+      dmLogf("")
+      dmLogf("That rules out both wrong-magic and wrong-live-set: if the sentinel were")
+      dmLogf("ever produced, the shared value would appear. So the sentinel is never")
+      dmLogf("reached at all, which points at the blob/ECC encoding rather than at the")
+      dmLogf("tables. Check, in order:")
+      dmLogf("  1. lic_NN.blob point order - C1||C2 vs C2||C1. The oracle writes")
+      dmLogf("     C1=(rG) then C2=(M+rQ); a build that reads C2 first never lands on M.")
+      dmLogf("  2. Whether the consumer really is the 0x41 licence consumer on this")
+      dmLogf("     build. Compare the 'distinct' column: all-1 means the patch has no")
+      dmLogf("     effect on the output, so that descriptor is not reading the table.")
+      dmLogf("  3. Whether prv[0x40]%%3 selects a routine family whose table is not among")
+      dmLogf("     the discovered sets - the VARIANT line above records the value.")
+      dmDie("no live set")
+   }
+
+   mh := dmHx(magic)
+   MAGIC := make([]byte, min(len(mh), len(dmSENT)))
+   for i := range MAGIC {
+      MAGIC[i] = mh[i] ^ dmSENT[i]
+   }
+
+   dmLogf("live set   set%d 0x%06x", liveIdx, liveRVA)
+   dmLogf("magic      %x", MAGIC)
+   switch {
+   case bytes.Equal(MAGIC, dmW10):
+      dmLogf("           == the Windows 10 sequence")
+   case bytes.Equal(MAGIC, dmW11):
+      dmLogf("           == the Windows 11 sequence")
+   default:
+      dmLogf("           == NEITHER published sequence: this build uses a third one,")
+      dmLogf("              which is why a hardcoded W10 constant would never match.")
+   }
+   dmLogf("")
+   for _, m := range liveTab.meta {
+      dmLogf("  %s", m)
+   }
+
+   // ---- phase 2: full permutation on the live set
+   dmLogf("")
+   dmLogf("phase 2: full permutation on the live set")
+   r := dmRun(liveRVA, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
+   if r.fault != "" {
+      dmDie("%s", r.fault)
+   }
+   if len(r.outs) < 15 {
+      dmDie("incomplete sweep (rc %d)", r.rc)
+   }
+   MAP := map[int]int{}
+   for nn := 1; nn < 16; nn++ {
+      var hits []int
+      for mm, v := range r.outs[nn] {
+         if v == magic {
+            hits = append(hits, mm)
+         }
+      }
+      if len(hits) != 1 {
+         dmDie("nibble 0x%x: %d hits, expected 1", nn, len(hits))
+      }
+      mm := hits[0]
+      if p, used := MAP[mm]; used {
+         dmDie("nibble 0x%x: mapped 0x%x already used by real 0x%x", nn, mm, p)
+      }
+      MAP[mm] = nn
+      dmLogf("  real 0x%x <- mapped 0x%x", nn, mm)
+   }
+
+   var left []int
+   for m := 0; m < 16; m++ {
+      if _, ok := MAP[m]; !ok {
+         left = append(left, m)
+      }
+   }
+   if len(left) != 1 {
+      dmDie("expected one leftover, got %#x", left)
+   }
+   MAP[left[0]] = 0
+   dmLogf("  leftover mapped 0x%x -> real 0x0", left[0])
+   dmLogf("")
+
+   // 16 distinct values drawn from 0..15 is a bijection: a duplicate is the
+   // only way to fail.
+   var seen [16]bool
+   for _, v := range MAP {
+      if seen[v] {
+         dmDie("not a bijection: 0x%x twice", v)
+      }
+      seen[v] = true
+   }
+
+   dmLogf("[MAP]  mapped -> real")
+   for m := 0; m < 16; m++ {
+      dmLogf("  %x -> %x", m, MAP[m])
+   }
+
+   jm := map[string]int{}
+   for k, v := range MAP {
+      jm[strconv.Itoa(k)] = v
+   }
+   blob, err := json.MarshalIndent(map[string]any{
+      "cluster": liveRVA, "magic": hex.EncodeToString(MAGIC), "map": jm,
+   }, "", "  ")
+   if err != nil {
+      dmDie("%v", err)
+   }
+   if err := os.WriteFile(dmOUTF, blob, 0o644); err != nil {
+      dmDie("%v", err)
+   }
+   dmLogf("")
+   dmLogf("written %s", dmOUTF)
+   os.WriteFile(dmLOG, []byte(strings.Join(dmLogLines, "\n")+"\n"), 0o644)
+   return 0
+}
+
+type dmBlk struct {
+   desc uint32
+   fo   uint32
+   rva  uint32
+   size uint32
+}
+
+// dmFindConsumer returns the heap-exec descriptor owning the unique size-check
 // site, so the driver does not have to look it up a second time.
-func findConsumer(img []byte, heaps []blk) (blk, []int, bool) {
+func dmFindConsumer(img []byte, heaps []dmBlk) (dmBlk, []int, bool) {
    var sites []int
    for i := 0; ; {
-      j := bytes.Index(img[i:], PAT)
+      j := bytes.Index(img[i:], dmPAT)
       if j < 0 {
          break
       }
@@ -640,9 +686,9 @@ func findConsumer(img []byte, heaps []blk) (blk, []int, bool) {
       i += j + 1
    }
    if len(sites) != 1 {
-      return blk{}, sites, false
+      return dmBlk{}, sites, false
    }
-   var owner blk
+   var owner dmBlk
    found := false
    for _, h := range heaps {
       if h.size != 0 && h.rva <= uint32(sites[0]) && uint32(sites[0]) < h.rva+h.size {
@@ -652,23 +698,28 @@ func findConsumer(img []byte, heaps []blk) (blk, []int, bool) {
    return owner, sites, found
 }
 
-type exceptionPointers struct {
-   Record  *exceptionRecord
+type dmExceptionPointers struct {
+   Record  *dmExceptionRecord
    Context uintptr
 }
 
-// EXCEPTION_RECORD truncated after ExceptionAddress (+0x10): those are the only
-// two fields read, and nothing past them is dereferenced.
-type exceptionRecord struct {
+// dmExceptionRecord is EXCEPTION_RECORD truncated after ExceptionAddress
+// (+0x10): those are the only two fields read, and nothing past them is
+// dereferenced.
+type dmExceptionRecord struct {
    Code    uint32
    Flags   uint32
    Prev    uintptr
    Address uintptr
 }
 
-type sec struct{ va, rs, rp uint32 }
+type dmSec struct {
+   va uint32
+   rs uint32
+   rp uint32
+}
 
-type sweep struct {
+type dmSweep struct {
    outs     map[int]map[int]string
    meta     []string
    fault    string
@@ -676,7 +727,7 @@ type sweep struct {
    rc       int
 }
 
-func run(setrva uint32, lics []int) sweep {
+func dmRun(setrva uint32, lics []int) dmSweep {
    exe, _ := os.Executable()
    ps := make([]string, len(lics))
    for i, x := range lics {
@@ -684,13 +735,17 @@ func run(setrva uint32, lics []int) sweep {
    }
    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
    defer cancel()
-   cmd := exec.CommandContext(ctx, exe, "--sweep",
-      fmt.Sprintf("0x%x", setrva), fmt.Sprintf("0x%x", gDesc), strings.Join(ps, ","))
+   // Positional worker arguments, not flags: the child re-derives every path
+   // from the same constants the parent used.
+   cmd := exec.CommandContext(ctx, exe, "-3", "sweep",
+      fmt.Sprintf("0x%x", setrva),
+      fmt.Sprintf("0x%x", dmDesc),
+      strings.Join(ps, ","))
    var so bytes.Buffer
    cmd.Stdout = &so
    err := cmd.Run()
 
-   r := sweep{outs: map[int]map[int]string{}}
+   r := dmSweep{outs: map[int]map[int]string{}}
    if ee, ok := err.(*exec.ExitError); ok {
       r.rc = ee.ExitCode()
    }

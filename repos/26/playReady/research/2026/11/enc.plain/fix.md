@@ -1,21 +1,25 @@
 # fix
 
+do not ignore errors
+
 one line idiocy
 func data(n string) string { return filepath.Join(dataDir, n) }
 
 os.exit outside of main
 
-reduce os/exec
+pointless fmt
+logf("set%-3d0x%06x  %-26s%-8d%s", i, rva, fmt.Sprint(distinct), len(shared), verdict)
 
 pointless globals
 rule of 3
 
-pointless fmt
-logf("set%-3d0x%06x  %-26s%-8d%s", i, rva, fmt.Sprint(distinct), len(shared), verdict)
+reduce os/exec
 
-small main
+reduce runtime
 
-do not ignore errors
+reduce unsafe
+
+reduce syscall
 
 remove bloat
 
@@ -23,8 +27,8 @@ remove regexp
 
 remove sort
 
-reduce unsafe
+replace hand written ECC
 
-reduce syscall
+small main
 
-reduce runtime
+speed

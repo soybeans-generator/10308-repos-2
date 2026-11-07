@@ -19,6 +19,17 @@
 //          oracle_map.json}
 // Output   testdata/{extracted.enc.plain, derive_plain.txt}
 //
+// USAGE
+//   enc.plain -4
+//
+//   No flags. Every path above is a constant.
+//
+//   Trials run in children of this same binary, using positional arguments
+//   rather than flags:
+//     enc.plain -4 s1 <desc> [prep]
+//     enc.plain -4 s2 <desc> <obf> [prep] [variant]
+//   (internal; the driver spawns them, nothing else should)
+//
 // Every child prints rc and status for every call, rejects included, so "wrong
 // routine" and "never called" are distinguishable. The VEH fault line carries
 // the stage tag ("S1 FAULT" / "S2 FAULT") the driver filters on, so a fault is
@@ -67,53 +78,53 @@ import (
 )
 
 const (
-   dataDir = "testdata"
-   dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
-   rwx     = 0x40
-   timeout = 300 * time.Second
-   tol     = 0x20
-   winSz   = 0x400
-   maxHops = 5
-   maxBlk  = 400
+   dpDataDir = "testdata"
+   dpDLLPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
+   dpRWX     = 0x40
+   dpTimeout = 300 * time.Second
+   dpTol     = 0x20
+   dpWinSz   = 0x400
+   dpMaxHops = 5
+   dpMaxBlk  = 400
 )
 
 var (
-   prvPath = data("extracted.enc.prv")
-   pubPath = data("extracted.enc.pub")
-   outPath = data("extracted.enc.plain")
-   logPath = data("derive_plain.txt")
-   imgPath = data("wbtool_img.bin")
-   mapPath = data("oracle_map.json")
+   dpPrvPath = dpData("extracted.enc.prv")
+   dpPubPath = dpData("extracted.enc.pub")
+   dpOutPath = dpData("extracted.enc.plain")
+   dpLogPath = dpData("derive_plain.txt")
+   dpImgPath = dpData("wbtool_img.bin")
+   dpMapPath = dpData("oracle_map.json")
 
-   pattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
-   z4      [4]byte
-   z32     = make([]byte, 0x20)
+   dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
+   dpZ4      [4]byte
+   dpZ32     = make([]byte, 0x20)
 
-   kernel32 = syscall.NewLazyDLL("kernel32.dll")
-   ntdll    = syscall.NewLazyDLL("ntdll.dll")
+   dpKernel32 = syscall.NewLazyDLL("kernel32.dll")
+   dpNtdll    = syscall.NewLazyDLL("ntdll.dll")
 
-   procLoadLibraryW = kernel32.NewProc("LoadLibraryW")
-   procVirtualProt  = kernel32.NewProc("VirtualProtect")
-   procMappedName   = kernel32.NewProc("K32GetMappedFileNameW")
-   procAddVEH       = kernel32.NewProc("AddVectoredExceptionHandler")
-   procNtQuery      = ntdll.NewProc("NtQuerySystemInformation")
+   dpProcLoadLibraryW = dpKernel32.NewProc("LoadLibraryW")
+   dpProcVirtualProt  = dpKernel32.NewProc("VirtualProtect")
+   dpProcMappedName   = dpKernel32.NewProc("K32GetMappedFileNameW")
+   dpProcAddVEH       = dpKernel32.NewProc("AddVectoredExceptionHandler")
+   dpProcNtQuery      = dpNtdll.NewProc("NtQuerySystemInformation")
 )
 
 // One trial, one process.
 //
-//   --s1 <desc> [prep]
-//   --s2 <desc> <obfhex> [prep] [variant]
+//   -4 s1 <desc> [prep]
+//   -4 s2 <desc> <obf> [prep] [variant]
 //
 // variant 0 real inputs / 1 zero out-buffer / 2 all zero / 3 no second size
 
 var (
-   faultBase uintptr
-   faultSay  func(string)
+   dpFaultBase uintptr
+   dpFaultSay  func(string)
 )
 
-func census(fb []byte, secs []section, sizeImg uint32) ([]span, []heapExec) {
-   var seg []span
-   var heaps []heapExec
+func dpCensus(fb []byte, secs []dpSection, sizeImg uint32) ([]dpSpan, []dpHeapExec) {
+   var seg []dpSpan
+   var heaps []dpHeapExec
    seen := map[uint32]bool{}
 
    for _, s := range secs {
@@ -124,7 +135,7 @@ func census(fb []byte, secs []section, sizeImg uint32) ([]span, []heapExec) {
       }
       b := fb[lo:hi]
       for off := 0; off < len(b)-0x40; off += 4 {
-         size := u32(b, off+0x20)
+         size := dpU32(b, off+0x20)
          if size < 0x40 || size > 0x200000 || off+int(size) > len(b) {
             continue
          }
@@ -133,31 +144,31 @@ func census(fb []byte, secs []section, sizeImg uint32) ([]span, []heapExec) {
             continue
          }
          if size == 0xF0 {
-            heaps = append(heaps, heapExec{
+            heaps = append(heaps, dpHeapExec{
                desc: s.va + uint32(off),
-               rva:  u32(b, off+0x34) & 0x0FFFFFFF,
-               size: u32(b, off+0x38) & 0x0FFFFFFF,
+               rva:  dpU32(b, off+0x34) & 0x0FFFFFFF,
+               size: dpU32(b, off+0x38) & 0x0FFFFFFF,
             })
             continue
          }
          for k, o := 0, off+0xF4; k < (int(size)-0xF4)/0xC; k, o = k+1, o+0xC {
-            rva, sz := u32(b, o+4), u32(b, o+8)
+            rva, sz := dpU32(b, o+4), dpU32(b, o+8)
             if rva < 0x1000 || sz < 8 || seen[rva] || uint64(rva)+uint64(sz) > uint64(sizeImg) {
                continue
             }
             seen[rva] = true
-            seg = append(seg, span{rva, sz})
+            seg = append(seg, dpSpan{rva, sz})
          }
       }
    }
    return seg, heaps
 }
 
-func data(n string) string {
-   return filepath.Join(dataDir, n)
+func dpData(n string) string {
+   return filepath.Join(dpDataDir, n)
 }
 
-func driver() {
+func dpDriver() {
    var lines []string
    say := func(f string, a ...any) {
       s := fmt.Sprintf(f, a...)
@@ -166,23 +177,23 @@ func driver() {
    }
    die := func(f string, a ...any) {
       say("FATAL: "+f, a...)
-      _ = os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+      _ = os.WriteFile(dpLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
       os.Exit(1)
    }
-   show := func(r result) string {
+   show := func(r dpResult) string {
       if r.line != "" {
          return r.line
       }
       return fmt.Sprintf("<%s> rc=%d", r.kind, r.rc)
    }
 
-   for _, f := range []string{mapPath, imgPath, prvPath, pubPath} {
+   for _, f := range []string{dpMapPath, dpImgPath, dpPrvPath, dpPubPath} {
       if st, err := os.Stat(f); err != nil || st.IsDir() {
          die("missing %s", f)
       }
    }
 
-   in, err := loadInputs()
+   in, err := dpLoadInputs()
    if err != nil {
       die("%v", err)
    }
@@ -205,13 +216,13 @@ func driver() {
    }
 
    sum := sha256.Sum256(in.fb)
-   say("dll    %s", dllPath)
+   say("dll    %s", dpDLLPath)
    say("sha256 %x", sum)
-   say("image  %s  (%d bytes, SizeOfImage 0x%x)", imgPath, len(in.img), in.sizeImg)
+   say("image  %s  (%d bytes, SizeOfImage 0x%x)", dpImgPath, len(in.img), in.sizeImg)
    say("prv    %s  (%d bytes, variant 0x%02x %%3=%d)",
-      prvPath, len(in.prv), in.prv[0x40], in.prv[0x40]%3)
-   say("pub    %s", pubPath)
-   say("cluster 0x%06x  (from %s)", in.cluster, mapPath)
+      dpPrvPath, len(in.prv), in.prv[0x40], in.prv[0x40]%3)
+   say("pub    %s", dpPubPath)
+   say("cluster 0x%06x  (from %s)", in.cluster, dpMapPath)
    if in.magic != "" {
       say("magic  %s", in.magic)
    }
@@ -226,7 +237,7 @@ func driver() {
    say("spans intersecting heap-exec blocks: %d of %d", ov, len(in.seg))
    say("")
 
-   heapDesc := make(map[uint32]heapExec, len(in.heaps))
+   heapDesc := make(map[uint32]dpHeapExec, len(in.heaps))
    for _, h := range in.heaps {
       heapDesc[h.desc] = h
    }
@@ -253,7 +264,7 @@ func driver() {
       found := false
       for _, d := range descKeys {
          dist := max(int(d)-t, t-int(d))
-         if dist > tol {
+         if dist > dpTol {
             continue
          }
          if !found || dist < max(int(best)-t, t-int(best)) {
@@ -264,13 +275,13 @@ func driver() {
       return best, found
    }
 
-   sites := bytes.Count(in.img, pattern)
-   say("key-consumer size-check sites: %d at 0x%x", sites, bytes.Index(in.img, pattern))
+   sites := bytes.Count(in.img, dpPattern)
+   say("key-consumer size-check sites: %d at 0x%x", sites, bytes.Index(in.img, dpPattern))
    if sites != 1 {
       die("expected exactly one 'cmp dword ptr [rcx+0x14], 0x41' in the image")
    }
 
-   dv0, c0, n0, ok := blockOf(bytes.Index(in.img, pattern))
+   dv0, c0, n0, ok := blockOf(bytes.Index(in.img, dpPattern))
    if !ok {
       die("no heap-exec block owns the size check")
    }
@@ -282,7 +293,7 @@ func driver() {
    visited := map[[2]int]bool{}
    frontier := [][2]int{{int(c0), int(n0)}}
 
-   for depth := 0; len(frontier) > 0 && depth < maxHops && len(visited) < maxBlk; {
+   for depth := 0; len(frontier) > 0 && depth < dpMaxHops && len(visited) < dpMaxBlk; {
       depth++
       var nxt [][2]int
 
@@ -299,12 +310,12 @@ func driver() {
             case (in.img[o] == 0x48 || in.img[o] == 0x4C) && in.img[o+1] == 0x8D:
                switch in.img[o+2] {
                case 5, 0xD, 0x15, 0x1D, 0x25, 0x2D, 0x35, 0x3D:
-                  t = o + 7 + int(int32(u32(in.img, o+3)))
+                  t = o + 7 + int(int32(dpU32(in.img, o+3)))
                default:
                   continue
                }
             case in.img[o] == 0xE8 || in.img[o] == 0xE9:
-               t = o + 5 + int(int32(u32(in.img, o+1)))
+               t = o + 5 + int(int32(dpU32(in.img, o+1)))
             default:
                continue
             }
@@ -316,7 +327,7 @@ func driver() {
             if _, c, n, ok := blockOf(t); ok {
                nxt = append(nxt, [2]int{int(c), int(n)})
             } else if t >= 0x1000 && t < len(in.img)-0x40 {
-               nxt = append(nxt, [2]int{t, min(winSz, len(in.img)-t)})
+               nxt = append(nxt, [2]int{t, min(dpWinSz, len(in.img)-t)})
             }
          }
       }
@@ -346,7 +357,7 @@ func driver() {
    obfs := map[uint32]string{}
    say("phase 1: stage-1 candidates (PREP=carve)")
    for _, d := range candList {
-      r := runChild(exe, []string{"--s1", fmt.Sprintf("0x%x", d), "carve"})
+      r := dpRunChild(exe, "s1", fmt.Sprintf("0x%x", d), "carve")
       say("  s1 0x%06x code 0x%06x: %s", d, heapDesc[d].rva, show(r))
       if r.stderr != "" {
          say("      stderr: %s", r.stderr)
@@ -378,7 +389,8 @@ func driver() {
          continue
       }
       for _, d2 := range candList {
-         r := runChild(exe, []string{"--s2", fmt.Sprintf("0x%x", d2), obf, "carve", "0"})
+         r := dpRunChild(exe, "s2",
+            fmt.Sprintf("0x%x", d2), obf, "carve", "0")
          switch r.kind {
          case "MATCH":
             if found == nil {
@@ -432,9 +444,8 @@ func driver() {
          row := make([]string, 4)
          var notes []string
          for v := range row {
-            r := runChild(exe, []string{
-               "--s2", fmt.Sprintf("0x%x", d), obf, "carve", strconv.Itoa(v),
-            })
+            r := dpRunChild(exe, "s2",
+               fmt.Sprintf("0x%x", d), obf, "carve", strconv.Itoa(v))
             row[v] = r.kind
             if r.stderr != "" {
                notes = append(notes, fmt.Sprintf("v%d stderr %s", v, r.stderr))
@@ -464,9 +475,7 @@ func driver() {
       say("  prep sensitivity for the best stage-2-looking candidate")
 
       for _, prep := range []string{"full", "carve", "none"} {
-         r := runChild(exe, []string{
-            "--s2", fmt.Sprintf("0x%x", firstReject), obf, prep, "0",
-         })
+         r := dpRunChild(exe, "s2", fmt.Sprintf("0x%x", firstReject), obf, prep, "0")
          say("    PREP=%-6s 0x%06x: %s", prep, firstReject, show(r))
          if r.stderr != "" {
             say("        stderr: %s", r.stderr)
@@ -495,92 +504,52 @@ func driver() {
       die("derived scalar out of range: %v", err)
    }
    if got := priv.PublicKey().Bytes()[1:]; !bytes.Equal(got, in.pub) {
-      die("scalar does not reproduce %s\n  got  %x\n  want %x", pubPath, got, in.pub)
+      die("scalar does not reproduce %s\n  got  %x\n  want %x", dpPubPath, got, in.pub)
    }
 
    say("pubkey    MATCH")
-   if err := os.WriteFile(outPath, plain, 0o644); err != nil {
-      die("write %s: %v", outPath, err)
+   if err := os.WriteFile(dpOutPath, plain, 0o644); err != nil {
+      die("write %s: %v", dpOutPath, err)
    }
    psum := sha256.Sum256(plain)
-   say("written   %s  (%d bytes)  sha256 %x", outPath, len(plain), psum)
+   say("written   %s  (%d bytes)  sha256 %x", dpOutPath, len(plain), psum)
 
-   _ = os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+   _ = os.WriteFile(dpLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
-func lastLine(s string) string {
+func dpLastLine(s string) string {
    ls := strings.Split(strings.TrimRight(s, "\r\n"), "\n")
    return strings.TrimSpace(ls[len(ls)-1])
 }
 
-func loadMap(raw []byte) (map[int]int, uint32, string, error) {
-   var o oracle
+func dpLoadMap(raw []byte) (map[int]int, uint32, string, error) {
+   var o dpOracle
    if err := json.Unmarshal(raw, &o); err != nil {
       return nil, 0, "", err
    }
    if o.Map == nil {
-      return nil, 0, "", fmt.Errorf("%s is in the old flat format - re-run stage 3", mapPath)
+      return nil, 0, "", fmt.Errorf("%s is in the old flat format - re-run stage 3", dpMapPath)
    }
    m := make(map[int]int, len(o.Map))
    for k, v := range o.Map {
       ki, err := strconv.Atoi(k)
       if err != nil {
-         return nil, 0, "", fmt.Errorf("%s: bad map key %q", mapPath, k)
+         return nil, 0, "", fmt.Errorf("%s: bad map key %q", dpMapPath, k)
       }
       m[ki] = v
    }
    return m, uint32(o.Cluster), o.Magic, nil
 }
 
-func main() {
-   _ = os.MkdirAll(dataDir, 0o755)
-
-   a := os.Args[1:]
-   if len(a) == 0 || (a[0] != "--s1" && a[0] != "--s2") {
-      driver()
-      return
-   }
-   if len(a) < 2 {
-      fmt.Println("usage: --s1 <desc> [prep] | --s2 <desc> <obfhex> [prep] [variant]")
-      os.Exit(2)
-   }
-
-   d, err := strconv.ParseUint(a[1], 0, 32)
-   if err != nil {
-      fmt.Printf("%s ERR bad descriptor %q\n", tag(a[0]), a[1])
-      os.Exit(5)
-   }
-
-   prep, obf, variant := "carve", "", 0
-   if a[0] == "--s1" {
-      if len(a) > 2 {
-         prep = a[2]
-      }
-   } else {
-      if len(a) < 3 {
-         fmt.Println("usage: --s2 <desc> <obfhex> [prep] [variant]")
-         os.Exit(2)
-      }
-      obf = a[2]
-      if len(a) > 3 {
-         prep = a[3]
-      }
-      if len(a) > 4 {
-         variant, _ = strconv.Atoi(a[4])
-      }
-   }
-   worker(a[0], uint32(d), obf, prep, variant)
-}
-
-// onFault is the VEH handler. It never returns.
-func onFault(ep uintptr) uintptr {
-   er := *(*uintptr)(ptrAt(ep))        // EXCEPTION_POINTERS.ExceptionRecord
-   code := *(*uint32)(ptrAt(er))       // ExceptionCode
-   ad := *(*uintptr)(ptrAt(er + 0x10)) // ExceptionAddress
+// dpOnFault is the VEH handler. It never returns.
+func dpOnFault(ep uintptr) uintptr {
+   er := *(*uintptr)(dpPtrAt(ep))        // EXCEPTION_POINTERS.ExceptionRecord
+   code := *(*uint32)(dpPtrAt(er))       // ExceptionCode
+   ad := *(*uintptr)(dpPtrAt(er + 0x10)) // ExceptionAddress
 
    mod := "-"
    var nm [512]uint16
-   r, _, _ := procMappedName.Call(^uintptr(0), ad, uintptr(unsafe.Pointer(&nm[0])), 512)
+   r, _, _ := dpProcMappedName.Call(^uintptr(0), ad, uintptr(unsafe.Pointer(&nm[0])), 512)
    if r != 0 {
       if s := syscall.UTF16ToString(nm[:]); s != "" {
          mod = s[strings.LastIndexByte(s, '\\')+1:]
@@ -589,27 +558,28 @@ func onFault(ep uintptr) uintptr {
 
    raw := "-"
    if ad != 0 {
-      raw = hex.EncodeToString(unsafe.Slice((*byte)(ptrAt(ad)), 16))
+      raw = hex.EncodeToString(unsafe.Slice((*byte)(dpPtrAt(ad)), 16))
    }
 
-   faultSay(fmt.Sprintf(
+   dpFaultSay(fmt.Sprintf(
       "FAULT 0x%08x addr=0x%016x off=%+#x module=%s bytes=%s",
-      code, ad, int64(ad)-int64(faultBase), mod, raw,
+      code, ad, int64(ad)-int64(dpFaultBase), mod, raw,
    ))
    os.Exit(3)
    return 0
 }
 
-// ptrAt reinterprets an address the OS handed us as an integer. The direct form
-// unsafe.Pointer(u) is rejected by vet's unsafeptr check, which cannot see that
-// these integers are mapped addresses, so the write goes through a variable.
-func ptrAt(u uintptr) unsafe.Pointer {
+// dpPtrAt reinterprets an address the OS handed us as an integer. The direct
+// form unsafe.Pointer(u) is rejected by vet's unsafeptr check, which cannot see
+// that these integers are mapped addresses, so the write goes through a
+// variable.
+func dpPtrAt(u uintptr) unsafe.Pointer {
    var p unsafe.Pointer
    *(*uintptr)(unsafe.Pointer(&p)) = u
    return p
 }
 
-func rawAt(fb []byte, secs []section, rva, n uint32) []byte {
+func dpRawAt(fb []byte, secs []dpSection, rva, n uint32) []byte {
    for _, s := range secs {
       if s.va <= rva && rva < s.va+s.rs {
          if off := int(s.rp) + int(rva-s.va); off+int(n) <= len(fb) {
@@ -620,23 +590,23 @@ func rawAt(fb []byte, secs []section, rva, n uint32) []byte {
    return nil
 }
 
-func tag(mode string) string {
-   if mode == "--s1" {
+func dpTag(mode string) string {
+   if mode == "s1" {
       return "S1"
    }
    return "S2"
 }
 
-func u16(b []byte, o int) uint16 {
+func dpU16(b []byte, o int) uint16 {
    return binary.LittleEndian.Uint16(b[o:])
 }
 
-func u32(b []byte, o int) uint32 {
+func dpU32(b []byte, o int) uint32 {
    return binary.LittleEndian.Uint32(b[o:])
 }
 
-func worker(mode string, desc uint32, obfHex, prep string, variant int) {
-   t := tag(mode)
+func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) {
+   t := dpTag(mode)
    say := func(f string, a ...any) {
       fmt.Printf("%s "+f+"\n", append([]any{t}, a...)...)
    }
@@ -647,18 +617,18 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
       }
    }()
 
-   in, err := loadInputs()
+   in, err := dpLoadInputs()
    if err != nil {
       say("ERR %v", err)
       os.Exit(5)
    }
 
-   ptr, err := syscall.UTF16PtrFromString(dllPath)
+   ptr, err := syscall.UTF16PtrFromString(dpDLLPath)
    if err != nil {
       say("ERR loadlibrary")
       os.Exit(4)
    }
-   base, _, _ := procLoadLibraryW.Call(uintptr(unsafe.Pointer(ptr)))
+   base, _, _ := dpProcLoadLibraryW.Call(uintptr(unsafe.Pointer(ptr)))
    if base == 0 {
       say("ERR loadlibrary")
       os.Exit(4)
@@ -668,12 +638,12 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
       p := base + uintptr(rva)
       n := (uintptr(len(buf)) + 0xFFF) &^ 0xFFF
       var old, dummy uint32
-      r, _, _ := procVirtualProt.Call(p, n, rwx, uintptr(unsafe.Pointer(&old)))
+      r, _, _ := dpProcVirtualProt.Call(p, n, dpRWX, uintptr(unsafe.Pointer(&old)))
       if r == 0 {
          return false
       }
-      copy(unsafe.Slice((*byte)(ptrAt(p)), len(buf)), buf)
-      procVirtualProt.Call(p, n, uintptr(old), uintptr(unsafe.Pointer(&dummy)))
+      copy(unsafe.Slice((*byte)(dpPtrAt(p)), len(buf)), buf)
+      dpProcVirtualProt.Call(p, n, uintptr(old), uintptr(unsafe.Pointer(&dummy)))
       return true
    }
 
@@ -683,11 +653,11 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
          if uint64(s.rva)+uint64(s.size) > uint64(len(in.img)) {
             continue
          }
-         c := rawAt(in.fb, in.secs, s.rva, s.size)
+         c := dpRawAt(in.fb, in.secs, s.rva, s.size)
          if c == nil || bytes.Equal(in.img[s.rva:s.rva+s.size], c) {
             continue
          }
-         runs := []run{{s.rva, s.size}}
+         runs := []dpRun{{s.rva, s.size}}
          if prep != "full" {
             runs = in.carve(s.rva, s.size)
             if len(runs) == 0 {
@@ -705,11 +675,11 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
    }
    say("PREP %s patched %d skipped %d", prep, patched, skipped)
 
-   faultBase = base
-   faultSay = func(s string) {
+   dpFaultBase = base
+   dpFaultSay = func(s string) {
       say("%s", s)
    }
-   procAddVEH.Call(1, syscall.NewCallback(onFault))
+   dpProcAddVEH.Call(1, syscall.NewCallback(dpOnFault))
 
    op3 := func(descRVA, ln uint32, status, key, out []byte, size2 *uint32) uint32 {
       var a [0x40]byte
@@ -722,7 +692,7 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
       if size2 != nil {
          binary.LittleEndian.PutUint32(a[0x2C:], *size2)
       }
-      r, _, _ := procNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
+      r, _, _ := dpProcNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
       runtime.KeepAlive(a)
       runtime.KeepAlive(status)
       runtime.KeepAlive(key)
@@ -730,7 +700,7 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
       return uint32(r)
    }
 
-   if mode == "--s1" {
+   if mode == "s1" {
       st := make([]byte, 0x40)
       kb := make([]byte, 0x40)
       ob := make([]byte, 0x40)
@@ -738,7 +708,7 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
 
       rc := op3(desc, 0x2C, st, kb, ob, nil)
       sd := st[:4]
-      if rc != 0 || !bytes.Equal(sd, z4[:]) || bytes.Equal(ob[:0x20], z32) {
+      if rc != 0 || !bytes.Equal(sd, dpZ4[:]) || bytes.Equal(ob[:0x20], dpZ32) {
          say("REJECT rc=0x%08x st=%s out=%s",
             rc, hex.EncodeToString(sd), hex.EncodeToString(ob[:0x20]))
       } else {
@@ -780,7 +750,7 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
       s2 = &v
    }
 
-   if rc := op3(desc, ln, st2, ib, ob2, s2); rc != 0 || !bytes.Equal(st2[:4], z4[:]) {
+   if rc := op3(desc, ln, st2, ib, ob2, s2); rc != 0 || !bytes.Equal(st2[:4], dpZ4[:]) {
       say("REJECT var=%d rc=0x%08x st=%s", variant, rc, hex.EncodeToString(st2[:4]))
       os.Exit(0)
    }
@@ -837,17 +807,66 @@ func worker(mode string, desc uint32, obfHex, prep string, variant int) {
    os.Exit(0)
 }
 
-type carveFn func(r, s uint32) []run
+// --- stage entry point ------------------------------------------------------
 
-// makeCarve returns [r, r+s) minus the heap-exec blocks as a list of runs.
-func makeCarve(merged []interval) carveFn {
+func stageDerivePlain(args []string) int {
+   // Internal trial modes. Positional, so the command line surface stays at
+   // exactly -1 -2 -3 -4.
+   if len(args) > 0 && (args[0] == "s1" || args[0] == "s2") {
+      mode, a := args[0], args[1:]
+      if len(a) < 1 {
+         fmt.Fprintln(os.Stderr,
+            "usage: enc.plain -4 s1 <desc> [prep] | enc.plain -4 s2 <desc> <obf> [prep] [variant]")
+         return 2
+      }
+      d, err := strconv.ParseUint(a[0], 0, 32)
+      if err != nil {
+         fmt.Printf("%s ERR bad descriptor %q\n", dpTag(mode), a[0])
+         return 5
+      }
+
+      prep, obf, variant := "carve", "", 0
+      if mode == "s1" {
+         if len(a) > 1 {
+            prep = a[1]
+         }
+      } else {
+         if len(a) < 2 {
+            fmt.Fprintln(os.Stderr,
+               "usage: enc.plain -4 s2 <desc> <obf> [prep] [variant]")
+            return 2
+         }
+         obf = a[1]
+         if len(a) > 2 {
+            prep = a[2]
+         }
+         if len(a) > 3 {
+            variant, _ = strconv.Atoi(a[3])
+         }
+      }
+      dpWorker(mode, uint32(d), obf, prep, variant)
+      return 0
+   }
+   if len(args) > 0 {
+      fmt.Fprintf(os.Stderr, "enc.plain -4: unexpected argument %q\n", args[0])
+      return 2
+   }
+
+   dpDriver()
+   return 0
+}
+
+type dpCarveFn func(r, s uint32) []dpRun
+
+// dpMakeCarve returns [r, r+s) minus the heap-exec blocks as a list of runs.
+func dpMakeCarve(merged []dpInterval) dpCarveFn {
    los := make([]uint32, len(merged))
    for i, m := range merged {
       los[i] = m.lo
    }
 
-   return func(r, s uint32) []run {
-      var out []run
+   return func(r, s uint32) []dpRun {
+      var out []dpRun
       cur, end := r, r+s
       i := max(sort.Search(len(los), func(i int) bool { return los[i] > r })-1, 0)
 
@@ -859,28 +878,32 @@ func makeCarve(merged []interval) carveFn {
             break
          }
          if m.lo > cur {
-            out = append(out, run{cur, min(m.lo, end) - cur})
+            out = append(out, dpRun{cur, min(m.lo, end) - cur})
          }
          if cur = max(cur, m.hi); cur >= end {
             break
          }
       }
       if cur < end {
-         out = append(out, run{cur, end - cur})
+         out = append(out, dpRun{cur, end - cur})
       }
       return out
    }
 }
 
-type heapExec struct{ desc, rva, size uint32 }
+type dpHeapExec struct {
+   desc uint32
+   rva  uint32
+   size uint32
+}
 
-type inputs struct {
+type dpInputs struct {
    img     []byte
    fb      []byte
-   secs    []section
-   seg     []span
-   heaps   []heapExec
-   carve   carveFn
+   secs    []dpSection
+   seg     []dpSpan
+   heaps   []dpHeapExec
+   carve   dpCarveFn
    prv     []byte
    pub     []byte
    mapt    map[int]int
@@ -889,56 +912,59 @@ type inputs struct {
    magic   string
 }
 
-func loadInputs() (*inputs, error) {
-   in := &inputs{}
+func dpLoadInputs() (*dpInputs, error) {
+   in := &dpInputs{}
    var err error
 
-   if in.img, err = os.ReadFile(imgPath); err != nil {
+   if in.img, err = os.ReadFile(dpImgPath); err != nil {
       return nil, err
    }
-   raw, err := os.ReadFile(mapPath)
+   raw, err := os.ReadFile(dpMapPath)
    if err != nil {
       return nil, err
    }
-   if in.mapt, in.cluster, in.magic, err = loadMap(raw); err != nil {
+   if in.mapt, in.cluster, in.magic, err = dpLoadMap(raw); err != nil {
       return nil, err
    }
-   if in.prv, err = os.ReadFile(prvPath); err != nil {
+   if in.prv, err = os.ReadFile(dpPrvPath); err != nil {
       return nil, err
    }
    if len(in.prv) != 0x41 {
-      return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", prvPath, len(in.prv))
+      return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", dpPrvPath, len(in.prv))
    }
-   pub, err := os.ReadFile(pubPath)
+   pub, err := os.ReadFile(dpPubPath)
    if err != nil {
       return nil, err
    }
    if len(pub) < 64 {
-      return nil, fmt.Errorf("%s: need at least 64 bytes, got %d", pubPath, len(pub))
+      return nil, fmt.Errorf("%s: need at least 64 bytes, got %d", dpPubPath, len(pub))
    }
    in.pub = pub[len(pub)-64:]
 
-   if in.fb, err = os.ReadFile(dllPath); err != nil {
+   if in.fb, err = os.ReadFile(dpDLLPath); err != nil {
       return nil, err
    }
-   in.sizeImg, in.secs = pe(in.fb)
-   in.seg, in.heaps = census(in.fb, in.secs, in.sizeImg)
-   in.carve = makeCarve(mergeBlocks(in.heaps))
+   in.sizeImg, in.secs = dpPE(in.fb)
+   in.seg, in.heaps = dpCensus(in.fb, in.secs, in.sizeImg)
+   in.carve = dpMakeCarve(dpMergeBlocks(in.heaps))
    return in, nil
 }
 
-type interval struct{ lo, hi uint32 }
+type dpInterval struct {
+   lo uint32
+   hi uint32
+}
 
-func mergeBlocks(heaps []heapExec) []interval {
-   var ps []interval
+func dpMergeBlocks(heaps []dpHeapExec) []dpInterval {
+   var ps []dpInterval
    for _, h := range heaps {
       if h.size != 0 {
-         ps = append(ps, interval{h.rva, h.rva + h.size})
+         ps = append(ps, dpInterval{h.rva, h.rva + h.size})
       }
    }
-   slices.SortFunc(ps, func(a, b interval) int { return cmp.Compare(a.lo, b.lo) })
+   slices.SortFunc(ps, func(a, b dpInterval) int { return cmp.Compare(a.lo, b.lo) })
 
-   var out []interval
+   var out []dpInterval
    for _, p := range ps {
       if n := len(out); n > 0 && p.lo <= out[n-1].hi {
          out[n-1].hi = max(out[n-1].hi, p.hi)
@@ -949,41 +975,43 @@ func mergeBlocks(heaps []heapExec) []interval {
    return out
 }
 
-type oracle struct {
+type dpOracle struct {
    Map     map[string]int `json:"map"`
    Cluster int            `json:"cluster"`
    Magic   string         `json:"magic"`
 }
 
-type result struct {
+type dpResult struct {
    kind   string
    line   string
    stderr string
    rc     int
 }
 
-func runChild(exe string, args []string) result {
-   ctx, cancel := context.WithTimeout(context.Background(), timeout)
+// dpRunChild spawns one trial as `exe -4 <mode> <args...>`. Positional, so no
+// flag is ever involved.
+func dpRunChild(exe, mode string, args ...string) dpResult {
+   ctx, cancel := context.WithTimeout(context.Background(), dpTimeout)
    defer cancel()
 
-   cmd := exec.CommandContext(ctx, exe, args...)
+   cmd := exec.CommandContext(ctx, exe, append([]string{"-4", mode}, args...)...)
    var out, errb bytes.Buffer
    cmd.Stdout = &out
    cmd.Stderr = &errb
    err := cmd.Run()
 
    if ctx.Err() != nil {
-      return result{kind: "TIMEOUT", rc: -1}
+      return dpResult{kind: "TIMEOUT", rc: -1}
    }
 
-   r := result{kind: "NONE"}
+   r := dpResult{kind: "NONE"}
    if ee, ok := err.(*exec.ExitError); ok {
       r.rc = ee.ExitCode()
    } else if err != nil {
       r.rc = -1
    }
 
-   pre := tag(args[0]) + " "
+   pre := dpTag(mode) + " "
    for _, x := range strings.Split(out.String(), "\n") {
       x = strings.TrimSuffix(x, "\r")
       if !strings.HasPrefix(x, pre) {
@@ -997,33 +1025,43 @@ func runChild(exe string, args []string) result {
       case "FAULT":
          r.kind = "FAULT"
          r.line = x
-         r.stderr = lastLine(errb.String())
+         r.stderr = dpLastLine(errb.String())
          return r
       case "OK", "REJECT", "MATCH", "NOMATCH", "ERR":
          r.kind = w[1]
          r.line = x
       }
    }
-   r.stderr = lastLine(errb.String())
+   r.stderr = dpLastLine(errb.String())
    return r
 }
 
-type run struct{ start, length uint32 }
+type dpRun struct {
+   start  uint32
+   length uint32
+}
 
-type section struct{ va, rs, rp uint32 }
+type dpSection struct {
+   va uint32
+   rs uint32
+   rp uint32
+}
 
-func pe(fb []byte) (uint32, []section) {
-   lf := int(u32(fb, 0x3C))
-   n, optsz := int(u16(fb, lf+6)), int(u16(fb, lf+20))
-   sizeImg := u32(fb, lf+24+56)
-   p, secs := lf+24+optsz, make([]section, n)
+func dpPE(fb []byte) (uint32, []dpSection) {
+   lf := int(dpU32(fb, 0x3C))
+   n, optsz := int(dpU16(fb, lf+6)), int(dpU16(fb, lf+20))
+   sizeImg := dpU32(fb, lf+24+56)
+   p, secs := lf+24+optsz, make([]dpSection, n)
    for i := range secs {
-      secs[i] = section{va: u32(fb, p+12), rs: u32(fb, p+16), rp: u32(fb, p+20)}
+      secs[i] = dpSection{va: dpU32(fb, p+12), rs: dpU32(fb, p+16), rp: dpU32(fb, p+20)}
       p += 40
    }
    return sizeImg, secs
 }
 
-type span struct{ rva, size uint32 }
+type dpSpan struct {
+   rva  uint32
+   size uint32
+}
 
 // end of 4-derive-plain.go
