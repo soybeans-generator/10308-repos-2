@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/canal"
+   "41.neocities.org/rosso/provider/canal"
    "fmt"
    "log"
    "net/http"

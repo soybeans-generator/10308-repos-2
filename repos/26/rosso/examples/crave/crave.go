@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/crave"
+   "41.neocities.org/rosso/provider/crave"
    "fmt"
    "log"
    "os"

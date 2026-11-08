@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/paramount"
+   "41.neocities.org/rosso/provider/paramount"
    "log"
    "net/url"
    "os"

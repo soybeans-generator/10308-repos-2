@@ -2,7 +2,7 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/rakuten"
+   "41.neocities.org/rosso/provider/rakuten"
    "fmt"
    "log"
    "os"
