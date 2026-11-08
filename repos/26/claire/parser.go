@@ -54,7 +54,7 @@ type PackageDoc struct {
    Types          []TypeDoc
    Variables      []VarDoc
    Constants      []VarDoc
-   SubPackages    []string
+   SubPackages    []PackageLink
 }
 
 // ParsePackageDoc parses the Go package in the given directory and returns an initialized PackageDoc.
