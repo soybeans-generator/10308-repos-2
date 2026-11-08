@@ -1,314 +1,262 @@
+// Package protobuf is a schema-less Protocol Buffer decoder.
+//
+// Decode turns wire bytes into a flat list of field occurrences; Values returns
+// every occurrence of a given field number, First returns just the first.
+// Encode is the inverse of Decode. NewVarint, NewBytes and NewMessage build
+// values by hand; NewMessage takes child values, so messages nest to any depth.
+//
+// A Value is either a leaf or a container:
+//
+//   WireVarint, WireI64 -> Uint
+//   WireI32             -> Uint (zero-extended; use uint32(v.Uint))
+//   WireBytes           -> Bytes (decoded) or Children (constructed)
+//
+// Construction never fails; Encode validates the whole tree. The package
+// depends only on the standard library.
 package protobuf
 
 import (
-   "bytes"
    "encoding/binary"
-   "errors"
    "fmt"
 )
 
-var (
-   // errOutOfBounds is returned when attempting to read past the end of the buffer.
-   errOutOfBounds = errors.New("data is out of bounds")
+// maxFieldNumber is the largest legal protobuf field number, 2^29-1.
+const maxFieldNumber = 1<<29 - 1
 
-   // errMalformedVarint is returned when a varint is unterminated or overflows.
-   errMalformedVarint = errors.New("malformed varint")
-
-   // errBufferTooSmall is returned when a buffer does not contain enough bytes for a fixed-size value.
-   errBufferTooSmall = errors.New("buffer is too small")
-
-   // errInvalidWireType is returned when an unknown or unsupported wire type is encountered.
-   errInvalidWireType = errors.New("invalid wire type")
-
-   // errInvalidFieldNumber is returned when a tag has field number 0, which is invalid per the protobuf spec.
-   errInvalidFieldNumber = errors.New("invalid field number")
-)
-
-// decodeFixed32 decodes a 32-bit little-endian integer from the buffer.
-func decodeFixed32(buffer []byte) (uint32, int, error) {
-   if len(buffer) < 4 {
-      return 0, 0, errBufferTooSmall
-   }
-   return binary.LittleEndian.Uint32(buffer), 4, nil
+// appendTag writes a field tag.
+func appendTag(b []byte, field int, wireType WireType) []byte {
+   return appendVarint(b, uint64(field)<<3|uint64(wireType))
 }
 
-// decodeFixed64 decodes a 64-bit little-endian integer from the buffer.
-func decodeFixed64(buffer []byte) (uint64, int, error) {
-   if len(buffer) < 8 {
-      return 0, 0, errBufferTooSmall
+// appendVarint writes x in base-128 form.
+func appendVarint(b []byte, x uint64) []byte {
+   for x >= 0x80 {
+      b = append(b, byte(x)|0x80)
+      x >>= 7
    }
-   return binary.LittleEndian.Uint64(buffer), 8, nil
+   return append(b, byte(x))
 }
 
-// decodeLengthPrefixed decodes a length-prefixed field from the buffer.
-// It returns the length of the data, the number of bytes read for the length header, and an error if any.
-func decodeLengthPrefixed(buffer []byte) (uint64, int, error) {
-   length, bytesRead := binary.Uvarint(buffer)
-   if bytesRead <= 0 {
-      return 0, 0, errMalformedVarint
+// consumeVarint decodes a base-128 varint and reports its encoded length.
+func consumeVarint(b []byte) (uint64, int, error) {
+   var x uint64
+
+   for i := 0; i < len(b); i++ {
+      c := b[i]
+      if i == 9 && c > 1 {
+         return 0, 0, fmt.Errorf("varint overflows 64 bits")
+      }
+      x |= uint64(c&0x7f) << (7 * uint(i))
+      if c < 0x80 {
+         return x, i + 1, nil
+      }
    }
-   if uint64(len(buffer)-bytesRead) < length {
-      return 0, 0, errOutOfBounds
-   }
-   return length, bytesRead, nil
+
+   return 0, 0, fmt.Errorf("unexpected end of buffer")
 }
 
-// Field represents a single, decoded field in a protobuf message.
-//
-// The tag stays unexported: nothing outside this package inspects it, and
-// fields are only ever built through the constructors below or DecodeMessage.
-type Field struct {
-   tag     *tag
-   Numeric uint64
-   Bytes   []byte
-   Message Message
-}
+// Message is a payload: an ordered list of fields.
+type Message []*Value
 
-// Bytes creates a new length-delimited field holding raw bytes.
-func Bytes(fieldNum uint32, value []byte) *Field {
-   return &Field{
-      tag:   &tag{number: fieldNum, wireType: wireBytes},
-      Bytes: value,
-   }
-}
+// Decode parses wire-format bytes. Field order and duplicates are preserved.
+func Decode(b []byte) (Message, error) {
+   orig := b
+   m := make(Message, 0, 8)
 
-// Embed creates a new embedded message field from the provided sub-fields.
-func Embed(fieldNum uint32, value ...*Field) *Field {
-   return &Field{
-      tag:     &tag{number: fieldNum, wireType: wireBytes},
-      Message: Message(value),
-   }
-}
+   for len(b) > 0 {
+      offset := len(orig) - len(b)
 
-// Varint creates a new Varint field and returns a pointer to it.
-func Varint(fieldNum uint32, value uint64) *Field {
-   return &Field{
-      tag:     &tag{number: fieldNum, wireType: wireVarint},
-      Numeric: value,
-   }
-}
-
-// Message is a named type for a slice of field pointers, representing a
-// decoded protobuf message.
-type Message []*Field
-
-// DecodeMessage populates a message by decoding the protobuf wire format data.
-func DecodeMessage(data []byte) (Message, error) {
-   var (
-      fields Message
-      offset int
-   )
-   for offset < len(data) {
-      t, bytesRead, err := decodeTag(data[offset:])
+      v, n, err := consume(b)
       if err != nil {
-         return nil, fmt.Errorf("failed to decode tag at offset %d: %w", offset, err)
+         return nil, fmt.Errorf("protobuf: offset %d: %w", offset, err)
       }
-      offset += bytesRead
-
-      field := Field{tag: t}
-      var dataLength int
-
-      switch t.wireType {
-      case wireVarint:
-         val, bytesRead := binary.Uvarint(data[offset:])
-         if bytesRead <= 0 {
-            return nil, fmt.Errorf("failed to decode varint for field %d at offset %d: %w", t.number, offset, errMalformedVarint)
-         }
-         field.Numeric = val
-         dataLength = bytesRead
-
-      case wireFixed32:
-         val, bytesRead, err := decodeFixed32(data[offset:])
-         if err != nil {
-            return nil, fmt.Errorf("failed to decode fixed32 for field %d: %w", t.number, err)
-         }
-         field.Numeric = uint64(val)
-         dataLength = bytesRead
-
-      case wireFixed64:
-         val, bytesRead, err := decodeFixed64(data[offset:])
-         if err != nil {
-            return nil, fmt.Errorf("failed to decode fixed64 for field %d: %w", t.number, err)
-         }
-         field.Numeric = val
-         dataLength = bytesRead
-
-      case wireBytes:
-         length, bytesRead, err := decodeLengthPrefixed(data[offset:])
-         if err != nil {
-            return nil, fmt.Errorf("failed to decode length for field %d: %w", t.number, err)
-         }
-         offset += bytesRead
-         dataLength = int(length)
-
-         // Copy rather than aliasing data[offset:offset+dataLength]: a
-         // sub-slice would pin the entire parent buffer for as long as
-         // this one field is retained.
-         field.Bytes = make([]byte, dataLength)
-         copy(field.Bytes, data[offset:offset+dataLength])
-
-      default:
-         return nil, fmt.Errorf("%w %d for field %d at offset %d", errInvalidWireType, t.wireType, t.number, offset)
-      }
-
-      offset += dataLength
-      fields = append(fields, &field)
+      b = b[n:]
+      m = append(m, v)
    }
-
-   return fields, nil
+   return m, nil
 }
 
-// Encode serializes the message into the protobuf wire format.
-//
-// For wireBytes fields, Bytes takes precedence: if it is non-nil, it is
-// written verbatim. Message is only encoded when Bytes is nil (i.e.,
-// fields built via Embed). An empty-but-non-nil Bytes ([]byte{} or
-// []byte("")) encodes as a zero-length field, same as an empty Message.
+// Encode writes m in wire format, the inverse of Decode: decoding the result
+// yields an equivalent Message. Fields are emitted in slice order and children
+// are encoded recursively.
 func (m Message) Encode() ([]byte, error) {
-   var buffer bytes.Buffer
-   // Allocate a small buffer on the stack to prevent heap allocations inside the loop
-   var scratch [binary.MaxVarintLen64]byte
+   out := make([]byte, 0, 64)
 
-   for _, field := range m {
-      if field == nil || field.tag == nil {
-         return nil, fmt.Errorf("cannot encode field: nil field or nil tag")
+   for i, v := range m {
+      if v == nil {
+         return nil, fmt.Errorf("protobuf: index %d: nil value", i)
+      }
+      if v.Field < 1 || v.Field > maxFieldNumber {
+         return nil, fmt.Errorf("protobuf: index %d: invalid field number %d", i, v.Field)
       }
 
-      // Validate the field number before writing anything, mirroring
-      // decodeTag. Valid field numbers are 1 through 2^29-1 per the
-      // protobuf spec; emitting anything else would produce output that
-      // this package's own decoder rejects with errInvalidFieldNumber.
-      if num := field.tag.number; num == 0 || num > 536_870_911 {
-         return nil, fmt.Errorf("%w %d for encoding", errInvalidFieldNumber, num)
-      }
+      out = appendTag(out, v.Field, v.Type)
 
-      var valueBytes []byte
-
-      if field.tag.wireType == wireBytes {
-         if field.Bytes == nil {
-            // No raw bytes: treat the field as an embedded message.
-            // Note: Encode on a nil Message is safe and yields no bytes,
-            // so Embed(1) with no sub-fields encodes as a zero-length field.
-            encoded, err := field.Message.Encode()
+      switch v.Type {
+      case WireVarint:
+         out = appendVarint(out, v.Uint)
+      case WireI64:
+         out = binary.LittleEndian.AppendUint64(out, v.Uint)
+      case WireI32:
+         out = binary.LittleEndian.AppendUint32(out, uint32(v.Uint))
+      case WireBytes:
+         payload := v.Bytes
+         if v.Children != nil {
+            p, err := v.Children.Encode()
             if err != nil {
-               return nil, fmt.Errorf("failed to encode embedded message for field %d: %w", field.tag.number, err)
+               return nil, fmt.Errorf("protobuf: field %d: %w", v.Field, err)
             }
-            valueBytes = encoded
-         } else {
-            valueBytes = field.Bytes
+            payload = p
          }
-      }
-
-      // Create tag: (Field Number << 3) | Wire Type
-      tagValue := uint64(field.tag.number)<<3 | uint64(field.tag.wireType)
-      n := binary.PutUvarint(scratch[:], tagValue)
-      buffer.Write(scratch[:n])
-
-      switch field.tag.wireType {
-      case wireVarint:
-         n := binary.PutUvarint(scratch[:], field.Numeric)
-         buffer.Write(scratch[:n])
-      case wireFixed32:
-         binary.LittleEndian.PutUint32(scratch[:4], uint32(field.Numeric))
-         buffer.Write(scratch[:4])
-      case wireFixed64:
-         binary.LittleEndian.PutUint64(scratch[:8], field.Numeric)
-         buffer.Write(scratch[:8])
-      case wireBytes:
-         n := binary.PutUvarint(scratch[:], uint64(len(valueBytes)))
-         buffer.Write(scratch[:n])
-         buffer.Write(valueBytes)
+         out = appendVarint(out, uint64(len(payload)))
+         out = append(out, payload...)
       default:
-         return nil, fmt.Errorf("%w %d for encoding field %d", errInvalidWireType, field.tag.wireType, field.tag.number)
+         return nil, fmt.Errorf("protobuf: field %d: unsupported wire type %d", v.Field, v.Type)
       }
    }
-   return buffer.Bytes(), nil
+
+   return out, nil
 }
 
-// Field finds and returns the first field matching the given field number.
-// The boolean return value is false if no matching field is found.
-func (m Message) Field(fieldNum uint32) (*Field, bool) {
-   iterator := m.Iterator(fieldNum)
-   if iterator.Next() {
-      return iterator.Field(), true
+// First returns the first occurrence of the given field number. The pointer is
+// nil and ok is false if the field does not occur.
+func (m Message) First(field int) (*Value, bool) {
+   for _, v := range m {
+      if v.Field == field {
+         return v, true
+      }
    }
    return nil, false
 }
 
-// Iterator creates a new iterator to loop over all fields with the given number.
-func (m Message) Iterator(fieldNum uint32) *iterator {
-   return &iterator{
-      message:  m,
-      fieldNum: fieldNum,
-      cursor:   -1,
-   }
-}
-
-// iterator provides a stateful, memory-efficient way to loop over
-// all occurrences of a specific field number within a message.
-type iterator struct {
-   message  Message // The message being iterated over
-   fieldNum uint32
-   cursor   int // The current index in the message slice
-}
-
-// Field returns a pointer to the current field the iterator is pointing to.
-func (it *iterator) Field() *Field {
-   if it.cursor >= 0 && it.cursor < len(it.message) {
-      return it.message[it.cursor]
-   }
-   return nil
-}
-
-// Next advances the iterator to the next matching field. It returns false
-// when there are no more matching fields.
-func (it *iterator) Next() bool {
-   for i := it.cursor + 1; i < len(it.message); i++ {
-      field := it.message[i]
-      if field == nil || field.tag == nil {
-         continue
-      }
-      if field.tag.number == it.fieldNum {
-         it.cursor = i
-         return true
+// Values returns every occurrence of the given field number, in wire order.
+func (m Message) Values(field int) []*Value {
+   var out []*Value
+   for _, v := range m {
+      if v.Field == field {
+         out = append(out, v)
       }
    }
-   return false
+   return out
 }
 
-// tag represents a field's tag (field number + wire type).
-type tag struct {
-   number   uint32
-   wireType wireType
+// Value is one field: a leaf payload or a container of child values.
+type Value struct {
+   Field    int      // field number
+   Type     WireType // wire type
+   Uint     uint64   // numeric payload; WireI32 uses the low 32 bits
+   Bytes    []byte   // payload of a decoded value; aliases the source buffer
+   Children Message  // payload of a constructed value; takes precedence over Bytes
 }
 
-// decodeTag decodes a varint from the input buffer and returns it as a pointer to a tag struct
-func decodeTag(buffer []byte) (*tag, int, error) {
-   tagValue, bytesRead := binary.Uvarint(buffer)
-   if bytesRead <= 0 {
-      return nil, 0, errMalformedVarint
+// NewBytes returns a length-delimited value for the given field. The slice is
+// not copied, so it must stay valid until the value is encoded.
+func NewBytes(field int, b []byte) *Value {
+   return &Value{Field: field, Type: WireBytes, Bytes: b}
+}
+
+// NewMessage returns a length-delimited value for the given field holding the
+// given children as an embedded message. Children are encoded by Encode, so
+// this cannot fail and calls nest freely.
+func NewMessage(field int, children ...*Value) *Value {
+   return &Value{Field: field, Type: WireBytes, Children: children}
+}
+
+// NewVarint returns a varint value for the given field.
+func NewVarint(field int, n uint64) *Value {
+   return &Value{Field: field, Type: WireVarint, Uint: n}
+}
+
+// consume decodes one field from the front of b and reports how many bytes it
+// occupied, tag included.
+func consume(b []byte) (*Value, int, error) {
+   field, wireType, tagLen, err := consumeTag(b)
+   if err != nil {
+      return nil, 0, err
    }
 
-   // Keep tagValue as uint64 until validated so the range check is exact.
-   // Valid field numbers are 1 through 2^29-1 (536870911) per the protobuf
-   // spec; anything larger would be silently truncated by the uint32 cast.
-   fieldNum := tagValue >> 3
-   if fieldNum == 0 || fieldNum > 536_870_911 {
-      return nil, 0, errInvalidFieldNumber
+   rest := b[tagLen:]
+   v := &Value{Field: field, Type: wireType}
+   total := tagLen
+
+   switch wireType {
+   case WireVarint:
+      x, n, err := consumeVarint(rest)
+      if err != nil {
+         return nil, 0, fmt.Errorf("field %d: %w", field, err)
+      }
+      v.Uint, total = x, total+n
+
+   case WireI64:
+      if len(rest) < 8 {
+         return nil, 0, fmt.Errorf("field %d: unexpected end of buffer", field)
+      }
+      v.Uint, total = binary.LittleEndian.Uint64(rest), total+8
+
+   case WireI32:
+      if len(rest) < 4 {
+         return nil, 0, fmt.Errorf("field %d: unexpected end of buffer", field)
+      }
+      v.Uint, total = uint64(binary.LittleEndian.Uint32(rest)), total+4
+
+   case WireBytes:
+      length, n, err := consumeVarint(rest)
+      if err != nil {
+         return nil, 0, fmt.Errorf("field %d: length: %w", field, err)
+      }
+      if length > uint64(len(rest)-n) {
+         return nil, 0, fmt.Errorf("field %d: length %d exceeds %d remaining bytes", field, length, len(rest)-n)
+      }
+      v.Bytes = rest[n : n+int(length)]
+      total += n + int(length)
    }
 
-   return &tag{
-      number:   uint32(fieldNum),
-      wireType: wireType(tagValue & 0x7),
-   }, bytesRead, nil
+   return v, total, nil
 }
 
-// wireType represents the type of data encoding on the wire.
-type wireType uint8
+// Message returns the value's payload as an embedded message: the children of a
+// constructed value, or the decoded payload of a length-delimited one.
+func (v *Value) Message() (Message, error) {
+   if v == nil {
+      return nil, fmt.Errorf("protobuf: nil value")
+   }
+   if v.Children != nil {
+      return v.Children, nil
+   }
+   if v.Type != WireBytes {
+      return nil, fmt.Errorf("protobuf: field %d: wire type %d is not an embedded message", v.Field, v.Type)
+   }
+   return Decode(v.Bytes)
+}
+
+// WireType is the encoding of a field's payload on the wire.
+type WireType uint8
 
 const (
-   wireVarint  wireType = 0
-   wireFixed64 wireType = 1
-   wireBytes   wireType = 2
-   wireFixed32 wireType = 5
+   WireVarint WireType = 0 // base-128 varint
+   WireI64    WireType = 1 // 8 bytes, little-endian
+   WireBytes  WireType = 2 // varint length, then that many bytes
+   WireI32    WireType = 5 // 4 bytes, little-endian
 )
+
+// consumeTag decodes a field tag.
+func consumeTag(b []byte) (int, WireType, int, error) {
+   x, n, err := consumeVarint(b)
+   if err != nil {
+      return 0, 0, 0, fmt.Errorf("tag: %w", err)
+   }
+
+   field := x >> 3
+   if field < 1 || field > maxFieldNumber {
+      return 0, 0, 0, fmt.Errorf("tag: invalid field number %d", field)
+   }
+
+   wireType := WireType(x & 7)
+   switch wireType {
+   case WireVarint, WireI64, WireBytes, WireI32:
+   default:
+      return 0, 0, 0, fmt.Errorf("tag: unsupported wire type %d", wireType)
+   }
+
+   return int(field), wireType, n, nil
+}
