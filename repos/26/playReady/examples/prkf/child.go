@@ -13,6 +13,13 @@
 // so a child reads the image and patches a few dozen coalesced runs instead of
 // hashing several gigabytes.
 //
+// # A CHILD IS IDENTIFIED BY ITS ENVIRONMENT, NOT BY ITS ARGUMENTS
+//
+// Every child body here is selected by one environment variable and is passed no
+// arguments at all. That is what lets main reject a stray argument uniformly: no
+// step has a positional mode, so an argument is always a mistake. It also keeps the
+// child modes out of `prkf -h`, since they never reach the FlagSet.
+//
 // # WHY A CHILD IS A SEPARATE PROCESS
 //
 // A fault in a descriptor's code is a Windows SEH exception raised inside the DLL,
@@ -39,8 +46,8 @@
 // # EXIT CODES
 //
 // Nothing here calls os.Exit. Children return their code: 0 after their rows, 2 for
-// a bad command line, 4 when the module cannot be loaded, 5 on bad input or a
-// recovered panic, 6 when no fault handler could be installed.
+// a bad payload, 4 when the module cannot be loaded, 5 on bad input or a recovered
+// panic, 6 when no fault handler could be installed.
 package main
 
 import (
@@ -58,6 +65,19 @@ import (
    "strings"
    "time"
    "unsafe"
+)
+
+// Child modes. A child is this binary re-executed with one of these set and NO
+// arguments at all: the environment carries the mode because it is internal
+// plumbing, so no child mode can appear in `prkf -h`, and because every step then
+// has an empty command line, which is what lets main reject a stray argument
+// uniformly instead of exempting two steps from the check.
+//
+// Fields are ';'-separated and list items ','-separated.
+const (
+   probeEnv = "PRKF_PROBE_DESCS" // descriptor VAs, comma-separated                  -1
+   sweepEnv = "PRKF_SWEEP"       // <descRVA>;<families>;<sets>                      -3
+   trialEnv = "PRKF_TRIAL"       // p1;<desc>,... | p2;<start>;<obf>,...;<desc>,...  -6
 )
 
 // ------------------------------------------------------- the -3 sweep child
@@ -78,6 +98,34 @@ var (
 // selfPath and selfErr are resolved once at init: three drivers spawn children of
 // themselves and each needs the same answer.
 var selfPath, selfErr = os.Executable()
+
+// childMode reports whether this process was started as one of the re-executed
+// children, and runs it if so. Called from main before the FlagSet exists: a child
+// passes no arguments, so there is nothing for the FlagSet to parse and no mode for
+// it to reject.
+//
+// An error means the payload was malformed, which is a spawn bug rather than a data
+// problem - the parent built this string - so main exits 2 on it.
+func childMode() (code int, ok bool, err error) {
+   if s := os.Getenv(probeEnv); s != "" {
+      descs, valid := dpDescList(strings.Split(s, ","))
+      if !valid {
+         return 0, true, fmt.Errorf("%s=%q: not a descriptor list", probeEnv, s)
+      }
+      return runProbes(descs), true, nil
+   }
+   if s := os.Getenv(sweepEnv); s != "" {
+      f := strings.Split(s, ";")
+      if len(f) != 3 {
+         return 0, true, fmt.Errorf("%s=%q: want <descRVA>;<families>;<sets>", sweepEnv, s)
+      }
+      return dmWorker(f[0], f[1], f[2]), true, nil
+   }
+   if s := os.Getenv(trialEnv); s != "" {
+      return dpTrialChild(s), true, nil
+   }
+   return 0, false, nil
+}
 
 // dmCall runs the consumer on one blob with the given 0x41-byte key and returns
 // (ntstatus, status dword, 0x20-byte output). It is the one place the consumer's
@@ -148,9 +196,11 @@ func dmPrv(family int) []byte {
 
 // dmWorker is the sweep child. One image patch, then every family: find the live
 // set with one licence, sweep it with fifteen.
+//
+// Its three arguments arrive as the three fields of sweepEnv; nothing else calls it.
 func dmWorker(descArg, famsArg, setsArg string) int {
    if descArg == "" || famsArg == "" || setsArg == "" {
-      fmt.Fprintln(os.Stderr, "usage: prkf -3 sweep <descRVA> <families> <sets>")
+      fmt.Fprintln(os.Stderr, "prkf: "+sweepEnv+": want <descRVA>;<families>;<sets>")
       return 2
    }
    desc, err := strconv.ParseUint(descArg, 0, 32)
@@ -467,7 +517,7 @@ func dpWorkerP2(start int, obfs []string, descs []uint32) (code int) {
 
 // probeBatch re-executes this binary as a probe child for a list of descriptors and
 // returns the RESULT line each one produced, keyed by descriptor VA. A descriptor
-// with no line faulted or was never reached, and the caller retries it alone.
+// with no line faulted or was never reached, and the caller recovers it.
 //
 // stderr is streamed into w as it arrives rather than buffered: a child that hangs
 // never exits, and the last trace line is the only evidence of where.
@@ -563,12 +613,8 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
    for i, x := range sets {
       rs[i] = fmt.Sprintf("0x%x", x)
    }
-   p := runCollect([]string{
-      "-3", "sweep",
-      fmt.Sprintf("0x%x", descRVA),
-      strings.Join(fs, ","),
-      strings.Join(rs, ","),
-   }, 30*time.Minute)
+   p := runCollect(sweepEnv+"=0x"+strconv.FormatUint(uint64(descRVA), 16)+";"+
+      strings.Join(fs, ",")+";"+strings.Join(rs, ","), 30*time.Minute)
 
    r := dmResult{fams: map[int]*dmFam{}, rc: p.rc}
    if p.err != nil {
@@ -772,18 +818,22 @@ type procOut struct {
    err    error
 }
 
-// runCollect spawns this binary with args under a deadline and returns its stdout.
+// runCollect spawns this binary as a child under a deadline and returns its stdout.
+// The child is identified by env alone and is passed no arguments, so one call site
+// starts a sweep and another a trial with no shape in common between them.
+//
 // A non-zero exit is reported as rc, not as an error: every child signals failure
 // that way on purpose, and the caller parses stdout for the reason. err is non-nil
 // only when the process could not be started.
-func runCollect(args []string, timeout time.Duration) procOut {
+func runCollect(env string, timeout time.Duration) procOut {
    if selfErr != nil {
       return procOut{rc: -1, err: selfErr}
    }
    ctx, cancel := context.WithTimeout(context.Background(), timeout)
    defer cancel()
 
-   cmd := exec.CommandContext(ctx, selfPath, args...)
+   cmd := exec.CommandContext(ctx, selfPath)
+   cmd.Env = append(os.Environ(), env)
    var so bytes.Buffer
    cmd.Stdout = &so
    runErr := cmd.Run()

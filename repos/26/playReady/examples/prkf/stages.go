@@ -15,7 +15,7 @@
 // not work: every candidate is accepted or rejected by d*G == extracted.enc.pub, the
 // only termination criterion, and there is no sample before -4. -6 always has one,
 // so the search lives here, cached per family, and the two trial modes are its
-// positional children rather than flags.
+// children rather than flags.
 //
 // key[0x40] % 3 selects one of three routine families, each with its own bijection
 // table AND its own stage routines, so a pairing found with one family's sample
@@ -46,10 +46,11 @@
 // first seven hops, which reaches 22 candidates; exhausting the call graph reaches
 // hundreds and buries them in noise. Hitting a cap is reported as TRUNCATED.
 //
-// USAGE  prkf -6 discovers, caches and applies. Children, positional:
+// USAGE  prkf -6 discovers, caches and applies. Its children are selected by
+// trialEnv and take no arguments (see childMode in child.go):
 //
-//   -6 p1 <desc>...                     every descriptor as stage 1, both halves
-//   -6 p2 <start> <obf,...> <desc,...>  every pair as stage 2, both halves
+//   p1;<desc>,...                      every descriptor as stage 1, both halves
+//   p2;<start>;<obf>,...;<desc>,...    every pair as stage 2, both halves
 package main
 
 import (
@@ -67,7 +68,9 @@ import (
 // both the walk here and -3's census of the consumer are built on.
 var dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
 
-// dpDescList parses a list of descriptor addresses, each in any base.
+// dpDescList parses a list of descriptor addresses, each in any base. The child
+// payloads are built from the same formatting, so this is also what validates them
+// on the way back in.
 func dpDescList(xs []string) ([]uint32, bool) {
    out := make([]uint32, 0, len(xs))
    for _, x := range xs {
@@ -82,36 +85,41 @@ func dpDescList(xs []string) ([]uint32, bool) {
 
 // --- stage entry point ------------------------------------------------------
 
-// dpTrialChild dispatches the two trial modes. They are positional arguments to -6
-// rather than flags of their own, and their stdout is parsed by the parent, so a bad
-// command line is exit code 2 with the usage on stderr.
-func dpTrialChild(args []string) int {
-   switch args[0] {
+// dpTrialChild dispatches the two trial modes. spec is the value of trialEnv,
+// ';'-separated, and its stdout is parsed by the parent, so a malformed spec is
+// exit code 2 with the shape on stderr.
+func dpTrialChild(spec string) int {
+   f := strings.Split(spec, ";")
+   switch f[0] {
    case "p1":
-      descs, ok := dpDescList(args[1:])
+      if len(f) != 2 {
+         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": want p1;<desc>,...")
+         return 2
+      }
+      descs, ok := dpDescList(strings.Split(f[1], ","))
       if !ok {
-         fmt.Fprintln(os.Stderr, "usage: prkf -6 p1 <desc>...")
+         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": bad descriptor list")
          return 2
       }
       return dpWorkerP1(descs)
    case "p2":
-      if len(args) < 4 {
-         fmt.Fprintln(os.Stderr, "usage: prkf -6 p2 <start> <obf,...> <desc,...>")
+      if len(f) != 4 {
+         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": want p2;<start>;<obf>,...;<desc>,...")
          return 2
       }
-      start, err := strconv.Atoi(args[1])
+      start, err := strconv.Atoi(f[1])
       if err != nil || start < 0 {
-         fmt.Fprintf(os.Stderr, "prkf -6: bad start %q\n", args[1])
+         fmt.Fprintf(os.Stderr, "prkf: "+trialEnv+": bad start %q\n", f[1])
          return 2
       }
-      descs, ok := dpDescList(strings.Split(args[3], ","))
+      descs, ok := dpDescList(strings.Split(f[3], ","))
       if !ok {
-         fmt.Fprintln(os.Stderr, "prkf -6: bad descriptor list")
+         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": bad descriptor list")
          return 2
       }
-      return dpWorkerP2(start, strings.Split(args[2], ","), descs)
+      return dpWorkerP2(start, strings.Split(f[2], ","), descs)
    }
-   fmt.Fprintf(os.Stderr, "prkf -6: unexpected argument %q\n", args[0])
+   fmt.Fprintf(os.Stderr, "prkf: "+trialEnv+": unknown mode %q\n", f[0])
    return 2
 }
 
@@ -469,11 +477,11 @@ func dpParse(p procOut, pre string) dpBatch {
 
 // dpRunP1 spawns one stage-1 probe child and parses its rows.
 func dpRunP1(descs []uint32) dpBatch {
-   args := []string{"-6", "p1"}
-   for _, d := range descs {
-      args = append(args, fmt.Sprintf("0x%x", d))
+   ds := make([]string, len(descs))
+   for i, d := range descs {
+      ds[i] = fmt.Sprintf("0x%x", d)
    }
-   return dpParse(runCollect(args, 300*time.Second), "S1 ")
+   return dpParse(runCollect(trialEnv+"=p1;"+strings.Join(ds, ","), 300*time.Second), "S1 ")
 }
 
 // dpRunP2 spawns one stage-2 probe child and parses its rows.
@@ -486,11 +494,11 @@ func dpRunP2(start int, obfs []dpObf, descs []uint32) dpBatch {
    for i, d := range descs {
       ds[i] = fmt.Sprintf("0x%x", d)
    }
-   args := []string{
-      "-6", "p2", strconv.Itoa(start),
+   spec := strings.Join([]string{
+      "p2", strconv.Itoa(start),
       strings.Join(os, ","), strings.Join(ds, ","),
-   }
-   return dpParse(runCollect(args, 300*time.Second), "MX ")
+   }, ";")
+   return dpParse(runCollect(trialEnv+"="+spec, 300*time.Second), "MX ")
 }
 
 // dpObf is one stage-1 output: the candidate, key half and buffer that produced it,

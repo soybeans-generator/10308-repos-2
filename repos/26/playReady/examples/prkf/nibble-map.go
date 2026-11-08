@@ -48,7 +48,9 @@
 //
 // INPUTS   profilePath (census), imgPath, oracleDir/lic_NN.blob
 // OUTPUT   profilePath's map section, keyed by family; mapLogPath
-// USAGE    prkf -3. Internal child: prkf -3 sweep <descRVA> <families> <sets>
+// USAGE    prkf -3. Its child is selected by sweepEnv and takes no arguments
+//
+//   (see childMode in child.go).
 package main
 
 import (
@@ -513,23 +515,6 @@ func moXY(nib int, what string, p *nistec.P256Point) ([]byte, error) {
       return nil, fmt.Errorf("nibble %02x: %s is the identity", nib, what)
    }
    return b[1:], nil
-}
-
-// --- stage entry point ------------------------------------------------------
-
-func stageDeriveMap(args []string) int {
-   if len(args) > 0 {
-      if args[0] != "sweep" {
-         fmt.Fprintf(os.Stderr, "prkf -3: unexpected argument %q\n", args[0])
-         return 2
-      }
-      if len(args) != 4 {
-         fmt.Fprintln(os.Stderr, "usage: prkf -3 sweep <descRVA> <families> <sets>")
-         return 2
-      }
-      return dmWorker(args[1], args[2], args[3])
-   }
-   return dmDeriveMap()
 }
 
 // dmFindConsumer returns the heap-exec descriptor owning the unique size-check site

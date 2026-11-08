@@ -332,15 +332,15 @@ func ensureOutDir() error {
 // ------------------------------------------------------------------- dispatch
 
 func main() {
-   // A probe child spawned by -1 announces itself through the environment, so it
-   // needs no flag and no argument. Checked first, before the FlagSet exists, so
-   // it never appears in the usage text.
-   if vas, ok, err := probeTarget(); ok {
+   // A child is this binary re-executed with its mode in the environment and no
+   // arguments at all. Checked before the FlagSet exists: there is nothing for the
+   // FlagSet to parse, and no child mode ever reaches the usage text.
+   if code, ok, err := childMode(); ok {
       if err != nil {
          fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
          os.Exit(2)
       }
-      os.Exit(runProbes(vas))
+      os.Exit(code)
    }
 
    step1 := flag.Bool("1", false, "DLL:  locate the signing-key routine")
@@ -367,16 +367,13 @@ func main() {
       os.Exit(2)
    }
 
-   // -1, -2, -4 and -5 take no arguments at all. -3 and -6 own their positional
-   // worker modes, so those two receive whatever follows the flag verbatim and
-   // validate it themselves; a blanket NArg check here would break their children.
-   noArgs := func(stage string) bool {
-      if flag.NArg() == 0 {
-         return true
-      }
-      fmt.Fprintf(os.Stderr, "prkf %s: unexpected argument %q: this step takes no arguments\n",
-         stage, flag.Arg(0))
-      return false
+   // Every step takes its input from the manifest and its parameters from the
+   // profile, so an argument is always a mistake. The positional modes -3 and -6
+   // used to accept are now child modes carried in the environment (see childMode),
+   // which is what makes one check enough for all six.
+   if flag.NArg() != 0 {
+      fmt.Fprintf(os.Stderr, "prkf: unexpected argument %q: no step takes arguments\n", flag.Arg(0))
+      os.Exit(2)
    }
 
    if err := ensureOutDir(); err != nil {
@@ -405,39 +402,17 @@ func main() {
 
    switch {
    case *step1:
-      if !noArgs("-1") {
-         os.Exit(2)
-      }
       runStep(func() int { return errCode(cmdFindSub()) })
    case *step2:
-      if !noArgs("-2") {
-         os.Exit(2)
-      }
       runStep(stageDecryptImg)
    case *step3:
-      // A positional argument means this process is a sweep child. Its stdout is
-      // parsed, so it exits on the raw code with no duration line.
-      if flag.NArg() > 0 {
-         os.Exit(stageDeriveMap(flag.Args()))
-      }
-      runStep(func() int { return stageDeriveMap(nil) })
+      runStep(dmDeriveMap)
    case *step4:
-      if !noArgs("-4") {
-         os.Exit(2)
-      }
       runStep(func() int { return errCode(cmdExtract()) })
    case *step5:
-      if !noArgs("-5") {
-         os.Exit(2)
-      }
       runStep(func() int { return errCode(cmdDecrypt()) })
-   default:
-      // -6 is the last flag, so it is the default. A positional argument means
-      // this process is one of its trial children; stdout is parsed there too.
-      if flag.NArg() > 0 {
-         os.Exit(stageDerivePlain(flag.Args()))
-      }
-      runStep(func() int { return stageDerivePlain(nil) })
+   case *step6:
+      runStep(dpDerive)
    }
 }
 

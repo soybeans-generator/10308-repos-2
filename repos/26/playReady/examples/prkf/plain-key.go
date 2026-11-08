@@ -42,7 +42,9 @@
 // reproduces the sample's key. dpSample carves the key components out of
 // msprcore.bla itself when -4 has not written them yet.
 //
-// USAGE  prkf -6. Children, positional: -6 p1 / -6 p2 (see stages.go).
+// USAGE  prkf -6. Its children are selected by trialEnv and take no arguments
+//
+//   (see stages.go and childMode in child.go).
 package main
 
 import (
@@ -315,17 +317,6 @@ func pubFor(d []byte) []byte {
 func pubMatches(d, raw []byte) bool {
    got, want := pubFor(d), pubBytes(raw)
    return got != nil && want != nil && bytes.Equal(got, want)
-}
-
-// --- stage entry point ------------------------------------------------------
-
-// stageDerivePlain is -6's entry point. A positional argument makes this process one
-// of the search's trial children; its stdout is parsed, so it exits on the raw code.
-func stageDerivePlain(args []string) int {
-   if len(args) > 0 {
-      return dpTrialChild(args)
-   }
-   return dpDerive()
 }
 
 // ---------------------------------------------------------------- the inputs

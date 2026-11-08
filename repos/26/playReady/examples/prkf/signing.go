@@ -16,38 +16,38 @@
 //  4. REJECTS a size other than 0x20
 //
 // Property 4 is the discriminating one - it collapses the large set of descriptors
-// that merely return success. Verification against a real key is -5's job, not
-// -1's. Zero accepted descriptors, or more than one, is an error to investigate:
-// there is no fallback path. Outputs: prsubsPath (build values, keyed by the DLL
-// sha256) and scanLogPath (probe results and child traces).
+// that merely return success. Verification against a real key is -5's job. Zero
+// accepted descriptors, or more than one, is an error to investigate: there is no
+// fallback path. Outputs: prsubsPath and scanLogPath (probe results and traces).
 //
 // # CHUNKING, AND WHY THERE IS NO CONCURRENCY
 //
 // A child pays LoadLibrary before its first call, so one child per descriptor spent
 // 981 module loads on 981 probes. Descriptors are therefore probed in chunks of 64,
-// sequentially - no goroutines, no worker pool. A chunk that dies takes its
-// remaining descriptors with it; those are detected by the absence of a RESULT line
-// and re-probed one at a time, so a fault costs one extra child.
+// sequentially - no goroutines, no worker pool. The child is selected by probeEnv
+// and takes no arguments (see childMode in child.go).
 //
-// Every child streams its stderr into the scan log as it arrives, so a chunk that
-// hangs leaves its last trace line as the final record. There is no deadline: a
-// timeout would make a hang invisible. Interrupt the run and read the log.
+// A chunk that dies takes its remaining descriptors with it. A child prints its rows
+// in order, so the first descriptor with no RESULT line is the one that faulted;
+// that one is recorded as NO_OUTPUT and the rest are retried as a run, so the
+// children spent on faults become the faults themselves rather than one child per
+// descriptor behind every fault.
 //
-// -5 decrypts sigPrvPath -> sigPlainPath, writing output only after every check
-// passes.
+// Every child streams its stderr into the log as it arrives, so a hung chunk leaves
+// its last trace line as the final record. There is no deadline - a timeout would
+// make a hang invisible. Interrupt the run and read the log.
 //
-// VERSION SUPPORT. Only ONE value differs between DLL builds: the RVA of the heap
-// descriptor holding the signing-key routine, from prsubsPath keyed by the DLL
-// sha256. This step refuses to run if the cache does not match the DLL. Everything
-// else is hardcoded because it cannot drift: op=3 and the WarbirdCallArgs layout
-// are kernel ABI; the routine's argument struct is packed and its layout is fixed
-// by source; size == 0x20 is the P-256 scalar length, which it tests itself.
+// # VERSION SUPPORT AND VERIFICATION
 //
-// VERIFICATION. The plaintext d must satisfy d*G == Q, where Q is the P-256 public
-// key -4 wrote next to the ciphertext. A wrong descriptor, output offset, argument
-// layout or input file cannot produce a scalar whose public point lands on Q. The
-// check itself is pubMatches, in plainkey.go, because -6 asserts the same thing
-// about the same kind of key.
+// Only ONE value differs between DLL builds: the RVA of the heap descriptor holding
+// the signing-key routine, from prsubsPath keyed by the DLL sha256. This step
+// refuses to run if the cache does not match. Everything else cannot drift: op=3
+// and the WarbirdCallArgs layout are kernel ABI; the routine's argument struct is
+// packed and its layout fixed by source; size == 0x20 it tests itself.
+//
+// The plaintext d must satisfy d*G == Q, where Q is the P-256 public key -4 wrote
+// next to the ciphertext: a wrong descriptor, output offset, argument layout or
+// input file cannot produce a scalar landing on Q. The check is pubMatches.
 //
 // NOTE: keyLen, statusOK, wbArgs, newWbArgs, loadWarbird and callWarbird are in
 // kernel.go; the descriptor census and the PE walk are in warbird.go.
@@ -71,10 +71,6 @@ import (
 // probeChunk is how many descriptors one probe child handles. Big enough that the
 // module load is amortised, small enough that a fault costs little.
 const probeChunk = 64
-
-// probeEnv carries the descriptor list into a probe child. The environment is used
-// instead of a flag so the child mode never appears in `prkf -h`.
-const probeEnv = "PRKF_PROBE_DESCS"
 
 // childT0 captures the process start, so every trace line can carry a millisecond
 // offset.
@@ -199,11 +195,25 @@ func cmdFindSub() error {
 
    // ---- probe every descriptor, in chunks ---------------------------------
    // One RESULT line per descriptor, keyed by descriptor VA. A descriptor with no
-   // line either faulted its chunk or was never reached, and is retried alone
-   // below.
+   // line either faulted its chunk or was never reached; the passes below recover
+   // both.
    results := make([]string, len(descs))
    chunks := (len(descs) + probeChunk - 1) / probeChunk
    w(fmt.Sprintf("probing %d descriptors in %d chunks of %d", len(descs), chunks, probeChunk))
+
+   // One pass for both numbers a progress line needs: how many descriptors have a
+   // row, and how many of those accepted.
+   tally := func() (done, accepted int) {
+      for _, r := range results {
+         if r != "" {
+            done++
+         }
+         if strings.Contains(r, " ACCEPT ") {
+            accepted++
+         }
+      }
+      return
+   }
 
    for lo := 0; lo < len(descs); lo += probeChunk {
       hi := min(lo+probeChunk, len(descs))
@@ -214,39 +224,62 @@ func cmdFindSub() error {
             results[i] = r
          }
       }
-      // One pass for both numbers the progress line needs: how many descriptors
-      // have a row, and how many of those accepted.
-      done, accepted := 0, 0
-      for _, r := range results {
-         if r != "" {
-            done++
-         }
-         if strings.Contains(r, " ACCEPT ") {
-            accepted++
-         }
-      }
+      done, accepted := tally()
       fmt.Printf("  %d/%d  accepted=%d\n", done, len(descs), accepted)
    }
 
-   // A chunk that died leaves a hole. Each hole is one descriptor, retried alone,
-   // so a fault costs exactly one extra child.
-   var missing []int
-   for i, r := range results {
-      if r == "" {
-         missing = append(missing, i)
+   // A child that dies takes every descriptor behind the fault with it, and it
+   // prints its rows in order, so the first descriptor with no row is the one that
+   // faulted. Retrying that one alone would only kill another child; retrying each
+   // of the descriptors behind it alone spends one child per descriptor on work a
+   // single chunk can do - on the recorded build that was 846 children for 846
+   // descriptors, of which only a fraction actually faulted.
+   //
+   // So a dead run is retried as a run: the faulting descriptor is recorded and
+   // skipped, and everything behind it goes into the next pass. Every child but the
+   // last therefore makes progress, and the children spent on faults are the faults
+   // themselves rather than every descriptor behind them.
+   //
+   // Recording NO_OUTPUT for the faulting descriptor is what guarantees the next
+   // pass is strictly smaller: a routine that dies on its first call is not the
+   // signing-key routine, so this is its verdict, not a gap. Each pass fills at
+   // least one index per run, so the loop terminates.
+   for pass := 0; ; pass++ {
+      var missing []int
+      for i, r := range results {
+         if r == "" {
+            missing = append(missing, i)
+         }
       }
-   }
-   if len(missing) > 0 {
-      w(fmt.Sprintf("retrying %d descriptors alone", len(missing)))
-      fmt.Printf("  %d descriptors produced no row - retrying alone\n", len(missing))
-   }
-   for _, i := range missing {
-      got := probeBatch(descs[i:i+1], w)
-      if r, ok := got[descs[i].descVA]; ok {
-         results[i] = r
-      } else {
-         results[i] = fmt.Sprintf("RESULT %#x NO_OUTPUT exit=no-row", descs[i].descVA)
+      if len(missing) == 0 {
+         break
       }
+      if pass == 0 {
+         w(fmt.Sprintf("retrying %d descriptors in chunks of %d", len(missing), probeChunk))
+         fmt.Printf("  %d descriptors produced no row - retrying in chunks\n", len(missing))
+      }
+
+      for lo := 0; lo < len(missing); lo += probeChunk {
+         run := missing[lo:min(lo+probeChunk, len(missing))]
+         batch := make([]imgDesc, len(run))
+         for j, i := range run {
+            batch[j] = descs[i]
+         }
+         got := probeBatch(batch, w)
+
+         for _, i := range run {
+            if r, ok := got[descs[i].descVA]; ok {
+               results[i] = r
+               continue
+            }
+            // Nothing behind this one was reached either.
+            results[i] = fmt.Sprintf("RESULT %#x NO_OUTPUT exit=no-row", descs[i].descVA)
+            break
+         }
+      }
+
+      done, accepted := tally()
+      fmt.Printf("  pass %d  %d/%d  accepted=%d\n", pass+1, done, len(descs), accepted)
    }
 
    var acc []imgDesc
@@ -373,28 +406,6 @@ func isFile(p string) bool {
 }
 
 // ------------------------------------------------------------ the -1 probe
-
-// probeTarget reports whether this process was started as a probe child, and for
-// which descriptors. Called from main before the FlagSet exists, so a malformed
-// value is returned rather than exited on: main is the only place that terminates.
-func probeTarget() ([]uint32, bool, error) {
-   s := os.Getenv(probeEnv)
-   if s == "" {
-      return nil, false, nil
-   }
-   var out []uint32
-   for _, x := range strings.Split(s, ",") {
-      v, err := strconv.ParseUint(x, 0, 32)
-      if err != nil {
-         return nil, true, fmt.Errorf("%s=%q: %w", probeEnv, s, err)
-      }
-      out = append(out, uint32(v))
-   }
-   if len(out) == 0 {
-      return nil, true, fmt.Errorf("%s is empty", probeEnv)
-   }
-   return out, true, nil
-}
 
 // runProbes is the probe child's whole body: one module load, then three calls per
 // descriptor.
