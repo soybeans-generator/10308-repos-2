@@ -2,7 +2,6 @@ import json
 
 from mitmproxy import http
 
-
 def request(flow):
     query = flow.request.query
     try:
