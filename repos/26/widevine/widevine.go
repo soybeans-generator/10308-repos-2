@@ -22,7 +22,6 @@ const (
    kWrappingKeySizeBits = 128
 )
 
-// protobuf.go marker preserve
 func DecodePrivateKey(pemData []byte) (*rsa.PrivateKey, error) {
    block, _ := pem.Decode(pemData)
    if block == nil {
@@ -50,9 +49,9 @@ func EncodeSignedMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte
       return nil, err
    }
    message := protobuf.Message{
-      protobuf.Varint(1, 1), // LICENSE_REQUEST
-      protobuf.Bytes(2, requestData),
-      protobuf.Bytes(3, signature),
+      protobuf.NewVarint(1, 1), // LICENSE_REQUEST
+      protobuf.NewBytes(2, requestData),
+      protobuf.NewBytes(3, signature),
    }
    return message.Encode()
 }
@@ -70,11 +69,11 @@ func GetKey(keys []*KeyContainer, id []byte) ([]byte, error) {
 }
 
 func decodeErrorFromMessage(message protobuf.Message) error {
-   errorCode, ok := message.Field(1)
-   if !ok || errorCode == nil {
+   errorCode, ok := message.First(1)
+   if !ok {
       return errors.New("widevine license error: unknown code")
    }
-   return fmt.Errorf("widevine license error: code %v", errorCode.Numeric)
+   return fmt.Errorf("widevine license error: code %v", errorCode.Uint)
 }
 
 func signMessage(requestData []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
@@ -95,24 +94,29 @@ type KeyContainer struct {
 }
 
 func DecodeLicenseResponse(responseData []byte, requestData []byte, privateKey *rsa.PrivateKey) ([]*KeyContainer, error) {
-   message, err := protobuf.DecodeMessage(responseData)
+   message, err := protobuf.Decode(responseData)
    if err != nil {
       return nil, fmt.Errorf("failed to parse SignedMessage: %w", err)
    }
 
-   typeField, ok := message.Field(1)
+   typeField, ok := message.First(1)
    if !ok {
       return nil, errors.New("missing message type")
    }
 
-   msgField, ok := message.Field(2)
-   if !ok || msgField.Message == nil {
+   msgField, ok := message.First(2)
+   if !ok {
       return nil, errors.New("missing message payload")
    }
 
-   switch typeField.Numeric {
+   payload, err := msgField.Message()
+   if err != nil {
+      return nil, fmt.Errorf("message payload: %w", err)
+   }
+
+   switch typeField.Uint {
    case 2: // LICENSE
-      sessionKeyField, ok := message.Field(4)
+      sessionKeyField, ok := message.First(4)
       if !ok {
          return nil, errors.New("missing session_key")
       }
@@ -120,11 +124,11 @@ func DecodeLicenseResponse(responseData []byte, requestData []byte, privateKey *
       if err != nil {
          return nil, err
       }
-      return decodeLicenseFromMessage(msgField.Message, requestData, decKey)
+      return decodeLicenseFromMessage(payload, requestData, decKey)
    case 3: // ERROR_RESPONSE
-      return nil, decodeErrorFromMessage(msgField.Message)
+      return nil, decodeErrorFromMessage(payload)
    }
-   return nil, fmt.Errorf("unsupported message type: %d", typeField.Numeric)
+   return nil, fmt.Errorf("unsupported message type: %d", typeField.Uint)
 }
 
 func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sessionKey []byte) ([]*KeyContainer, error) {
@@ -147,20 +151,20 @@ func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sess
    }
 
    var keys []*KeyContainer
-   it := message.Iterator(3)
-   for it.Next() {
-      if it.Field().Message == nil {
-         continue
+   for _, value := range message.Values(3) {
+      m, err := value.Message()
+      if err != nil {
+         return nil, fmt.Errorf("failed to parse key container: %w", err)
       }
+
       kc := &KeyContainer{}
-      m := it.Field().Message
-      if f, ok := m.Field(1); ok {
+      if f, ok := m.First(1); ok {
          kc.Id = f.Bytes
       }
-      if f, ok := m.Field(2); ok {
+      if f, ok := m.First(2); ok {
          kc.Iv = f.Bytes
       }
-      if f, ok := m.Field(3); ok {
+      if f, ok := m.First(3); ok {
          dec := cipher.NewCBCDecrypter(ckCipher, kc.Iv)
          plain := make([]byte, len(f.Bytes))
          dec.CryptBlocks(plain, f.Bytes)
@@ -183,19 +187,16 @@ type PsshData struct {
 
 // DecodePsshData parses the protobuf wire format into a PsshData struct.
 func DecodePsshData(data []byte) (*PsshData, error) {
-   message, err := protobuf.DecodeMessage(data)
+   message, err := protobuf.Decode(data)
    if err != nil {
       return nil, err
    }
 
    p := &PsshData{}
-   it := message.Iterator(2)
-   for it.Next() {
-      if field := it.Field(); field != nil {
-         p.KeyIds = append(p.KeyIds, field.Bytes)
-      }
+   for _, value := range message.Values(2) {
+      p.KeyIds = append(p.KeyIds, value.Bytes)
    }
-   if field, ok := message.Field(4); ok {
+   if field, ok := message.First(4); ok {
       p.ContentId = field.Bytes
    }
    return p, nil
@@ -206,11 +207,11 @@ func (p *PsshData) Encode() ([]byte, error) {
    var message protobuf.Message
    for _, keyId := range p.KeyIds {
       if len(keyId) > 0 {
-         message = append(message, protobuf.Bytes(2, keyId))
+         message = append(message, protobuf.NewBytes(2, keyId))
       }
    }
    if len(p.ContentId) > 0 {
-      message = append(message, protobuf.Bytes(4, p.ContentId))
+      message = append(message, protobuf.NewBytes(4, p.ContentId))
    }
    return message.Encode()
 }
@@ -221,14 +222,14 @@ func (p *PsshData) EncodeLicenseRequest(clientId []byte) ([]byte, error) {
    if err != nil {
       return nil, err
    }
-   psshDataField := protobuf.Bytes(1, psshBytes)
-   widevinePsshData := protobuf.Embed(1, psshDataField)
-   contentIdentification := protobuf.Embed(2, widevinePsshData)
-
    message := protobuf.Message{
-      protobuf.Bytes(1, clientId),
-      contentIdentification,
-      protobuf.Varint(3, 1), // NEW
+      protobuf.NewBytes(1, clientId),
+      protobuf.NewMessage(2,
+         protobuf.NewMessage(1,
+            protobuf.NewBytes(1, psshBytes),
+         ),
+      ),
+      protobuf.NewVarint(3, 1), // NEW
    }
    return message.Encode()
 }
