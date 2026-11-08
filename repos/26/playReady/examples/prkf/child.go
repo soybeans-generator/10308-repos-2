@@ -3,7 +3,7 @@
 
 // Every body this binary re-executes, and the process plumbing they share.
 //
-//   -4's trials      dpWorkerP1, dpWorkerP2
+//   -6's trials      dpWorkerP1, dpWorkerP2
 //   -3's sweep       dmWorker
 //   trial prep       pfImage, pfPrep, apply
 //   spawn helpers    runCollect, probeBatch, dmSweep
@@ -134,7 +134,7 @@ func dmOut(s string) (string, bool) {
 // the routine could special-case: the first 0x40 bytes are a fixed non-repeating
 // pattern, and byte 0x40 - the family selector - is the family.
 //
-// Only -3 uses it. -4 drives the real key, because the stage routines reject
+// Only -3 uses it. -6 drives the real key, because the stage routines reject
 // material that is not real; forcing the table here collapses whatever this key
 // derives, so its bytes cannot matter.
 func dmPrv(family int) []byte {
@@ -348,7 +348,7 @@ func dpPrepChild() (op3 func(uint32, uint32, []byte, []byte, []byte, *uint32) ui
    return dpOp3(base), prv, 0, nil
 }
 
-// ------------------------------------------------------- the -4 trial child
+// ------------------------------------------------------- the -6 trial child
 
 // dpPrv reads the sample's 0x41-byte key component. Every trial drives it: the
 // stage routines reject key material that is not real, which is why a synthetic key
@@ -356,7 +356,7 @@ func dpPrepChild() (op3 func(uint32, uint32, []byte, []byte, []byte, *uint32) ui
 func dpPrv() ([]byte, error) {
    prv, err := os.ReadFile(encPrvPath)
    if err != nil {
-      return nil, fmt.Errorf("missing %s - run prkf -5 first", encPrvPath)
+      return nil, fmt.Errorf("missing %s - run prkf -4 first", encPrvPath)
    }
    if len(prv) != 0x41 {
       return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", encPrvPath, len(prv))
@@ -534,10 +534,12 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
    return out
 }
 
-// dmFam is one family's rows from a sweep child.
+// dmFam is one family's rows from a sweep child. nLive is 1 when exactly one set
+// answered 16 distinct outputs; liveRVA is that set. The LIVE row's set index is
+// deliberately not kept: it names a position in the driver's own set list, which is
+// in derive_map.txt, so it is a label for a human rather than a value for code.
 type dmFam struct {
    nLive   int
-   liveIdx int
    liveRVA uint32
    outs    map[int]map[int]string // licence -> forced nibble -> hex
 }
@@ -576,7 +578,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
 
    fam := func(i int) *dmFam {
       if r.fams[i] == nil {
-         r.fams[i] = &dmFam{liveIdx: -1, outs: map[int]map[int]string{}}
+         r.fams[i] = &dmFam{outs: map[int]map[int]string{}}
       }
       return r.fams[i]
    }
@@ -599,14 +601,14 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
             return r
          }
          v, e1 := strconv.Atoi(f[1])
-         i, e2 := strconv.Atoi(f[2])
+         _, e2 := strconv.Atoi(f[2]) // set index: validated, not retained
          rva, e3 := strconv.ParseUint(f[3], 0, 32)
          if e1 != nil || e2 != nil || e3 != nil {
             r.loadfail = "LOADFAIL malformed LIVE row: " + ln
             return r
          }
          fm := fam(v)
-         fm.liveIdx, fm.liveRVA, fm.nLive = i, uint32(rva), 1
+         fm.liveRVA, fm.nLive = uint32(rva), 1
       case "NOLIVE":
          if len(f) < 3 {
             r.loadfail = "LOADFAIL malformed NOLIVE row: " + ln
@@ -761,16 +763,16 @@ func (p *pfImage) apply(base uintptr) (patched, skipped int) {
 
 // ------------------------------------------------------------ spawn helpers
 
-// procOut is one collected child run.
+// procOut is one collected child run. rc is -1 when the child produced no verdict:
+// it was killed by the deadline, or it could not be started at all, which is the
+// one case err reports.
 type procOut struct {
-   stdout   []byte
-   stderr   []byte
-   rc       int
-   timedOut bool
-   err      error // set only when the process could not be run at all
+   stdout []byte
+   rc     int
+   err    error
 }
 
-// runCollect spawns this binary with args under a deadline and returns its output.
+// runCollect spawns this binary with args under a deadline and returns its stdout.
 // A non-zero exit is reported as rc, not as an error: every child signals failure
 // that way on purpose, and the caller parses stdout for the reason. err is non-nil
 // only when the process could not be started.
@@ -782,15 +784,13 @@ func runCollect(args []string, timeout time.Duration) procOut {
    defer cancel()
 
    cmd := exec.CommandContext(ctx, selfPath, args...)
-   var so, se bytes.Buffer
+   var so bytes.Buffer
    cmd.Stdout = &so
-   cmd.Stderr = &se
    runErr := cmd.Run()
 
-   p := procOut{stdout: so.Bytes(), stderr: se.Bytes(), rc: -1}
+   p := procOut{stdout: so.Bytes(), rc: -1}
    if ctx.Err() != nil {
-      p.timedOut = true
-      return p
+      return p // deadline hit: no verdict, and not a start failure either
    }
    switch e := runErr.(type) {
    case nil:

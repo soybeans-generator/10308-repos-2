@@ -2,17 +2,13 @@
 //go:build windows
 
 // prkf -3: magic-independent stage 3 of the nibble chain, and the oracle it
-// measures with.
-// =============================================================================
-//
-// the decrypted image + the oracle licences -> one permutation per routine family
+// measures with: the decrypted image plus the oracle licences become one
+// permutation per routine family.
 //
 // THE LIVE-SET TEST NEEDS ONE LICENCE. Forcing the table to a constant m makes the
 // derived scalar 32 bytes of 0x11*MAP[m], so the consumer's output depends on m
 // only through MAP[m]. A set the routine reads therefore yields 16 DISTINCT outputs
-// for one licence, while a set it never reads yields 16 identical ones. Sixteen
-// distinct is the test, and it costs 16 calls per set rather than the 48 a
-// three-licence sweep cost.
+// for one licence, while a set it never reads yields 16 identical ones.
 //
 // THE PERMUTATION NEEDS FIFTEEN. On the live set, for every real nibble NN exactly
 // one forced m reaches the sentinel, and the sentinel output is the same 32 bytes
@@ -24,20 +20,18 @@
 // families are swept and each live one is cached: a later sample may select any of
 // them.
 //
-// ONE CHILD FOR ALL THREE FAMILIES. A child loads the module, reads the image and
-// patches the spans before its first probe; that fixed cost dwarfs the rest, so it
-// is paid once. The census comes from the profile, so this step never reads the DLL.
+// ONE CHILD FOR ALL THREE FAMILIES, because the module load, image read and span
+// patch that precede its first probe dwarf the rest. The census comes from the
+// profile, so this step never reads the DLL.
 //
-// OUTPUT IS HEX, ALWAYS. Every child row carries its 32-byte result with %x. The
-// driver splits rows on whitespace, so a raw-bytes %s would let a result containing
-// 0x20 corrupt the parse - and only for some values.
+// OUTPUT IS HEX, ALWAYS. A raw-bytes %s would let a result containing 0x20 corrupt
+// the driver's whitespace split - and only for some values.
 //
 // # THE ORACLE
 //
-// NOT A STEP. It used to be a flag of its own; it is now built here, on demand, when
-// testdata/oracle is absent. It reads neither base file, is derived from a fixed
-// sentinel and fixed scalars, and therefore never needs regenerating. `rm -rf
-// testdata/oracle` is the way to force a rebuild.
+// NOT A STEP. It is built here, on demand, when testdata/oracle is absent. It reads
+// neither base file, is derived from a fixed sentinel and fixed scalars, and
+// therefore never needs regenerating. `rm -rf testdata/oracle` forces a rebuild.
 //
 // For each key nibble N in 0x01..0x0f it writes key_NN.pub (the public key whose
 // private scalar has every nibble = N) and lic_NN.blob (an ECIES blob for that key
@@ -49,7 +43,7 @@
 // oracle key has to match it exactly, or no forced value ever reproduces the key.
 //
 // key_NN.pub is DETERMINISTIC; lic_NN.blob is not, because it uses a random
-// ephemeral scalar. Validity is proven by -3 reaching a live set and -7 reaching
+// ephemeral scalar. Validity is proven by -3 reaching a live set and -6 reaching
 // pubkey MATCH.
 //
 // INPUTS   profilePath (census), imgPath, oracleDir/lic_NN.blob
@@ -361,8 +355,8 @@ func dmDeriveMap() (code int) {
    logf("families with a permutation: %v", live)
    logf("")
 
-   // pfLoad, not pfNew: -3 fills in one section and must not disturb the stage
-   // pairings -4 may already have written.
+   // pfLoad, not pfNew: -3 fills in one section and must not disturb a stage
+   // pairing -6 may already have written.
    p := pfLoad(pi.sha)
    p.SizeOfImage = pi.size
    p.Map = pmaps
@@ -541,9 +535,8 @@ func stageDeriveMap(args []string) int {
 // dmFindConsumer returns the heap-exec descriptor owning the unique size-check site
 // and the site itself, so the driver does not look it up a second time.
 func dmFindConsumer(img []byte, heaps []imgDesc) (imgDesc, int, bool) {
-   pat := []byte{0x83, 0x79, 0x14, 0x41} // cmp [rcx+0x14],0x41
-   site := bytes.Index(img, pat)
-   if site < 0 || bytes.Count(img, pat) != 1 {
+   site := bytes.Index(img, dpPattern)
+   if site < 0 || bytes.Count(img, dpPattern) != 1 {
       return imgDesc{}, site, false
    }
    for _, h := range heaps {

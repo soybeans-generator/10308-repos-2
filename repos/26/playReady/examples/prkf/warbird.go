@@ -159,7 +159,10 @@ func stageDecryptImg() (code int) {
    // 0x20-byte SHA-256 digest followed by a body; the digest covers [0x20, size)
    // where size is the dword at +0x20. This validates every candidate structurally,
    // so no external tool is needed to enumerate them.
-   f, err := os.ReadFile(dllPath)
+   //
+   // pfDLL, not a bare ReadFile: it returns the bytes and the digest from one read,
+   // so the DLL hashed here is provably the one parsed below.
+   f, shaHex, err := pfDLL()
    if err != nil {
       return fail("cannot read %s: %v", dllPath, err)
    }
@@ -184,9 +187,6 @@ func stageDecryptImg() (code int) {
    slot := segs[0].va
    relocs := le32(f, int(segs[0].off)+0x2C)
    num := le32(f, int(segs[0].off)+0x30)
-
-   sum := sha256.Sum256(f)
-   shaHex := fmt.Sprintf("%x", sum)
 
    logf("dll     %s", dllPath)
    logf("sha256  %s", shaHex)
@@ -316,7 +316,7 @@ func stageDecryptImg() (code int) {
    // The census goes in here, not just SizeOfImage. scanDescs hashes several
    // gigabytes to find the descriptors, and every trial child needs the spans and
    // heap blocks it produces; recomputing them per child - and a fault costs a
-   // child - was the entire cost of -4.
+   // child - was the entire cost of -6.
    //
    // A heap entry is {va, descVA, codeRVA, codeLen}. All four are needed: `va` is
    // the descriptor's own address, which identifies a candidate and is what op=3 is
@@ -403,7 +403,7 @@ type imgDesc struct {
 //
 // The 0x200000 cap is deliberate and must not be lowered. The two largest
 // descriptors on the recorded build are 0x829c and 0x3cac bytes; a 0x2000 cap
-// silently skips them, which loses the gap blocks 0x334290..0x3370ef and makes -4
+// silently skips them, which loses the gap blocks 0x334290..0x3370ef and makes -6
 // execute ciphertext.
 func scanDescs(fb []byte, secs []imgSection) []imgDesc {
    var out []imgDesc
@@ -444,7 +444,7 @@ func scanDescs(fb []byte, secs []imgSection) []imgDesc {
 }
 
 // splitDescs partitions a census into segment and heap-exec descriptors, in file
-// order. -1, -2, -3, -4 and -7 all need exactly this split.
+// order. -1 and -2 both need exactly this split.
 func splitDescs(fb []byte, secs []imgSection) (segs, heaps []imgDesc) {
    for _, d := range scanDescs(fb, secs) {
       if d.heap() {

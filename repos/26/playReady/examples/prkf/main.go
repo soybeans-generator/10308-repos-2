@@ -1,34 +1,41 @@
 // main.go begin
 //go:build windows
 
-// prkf is the PlayReady key-extraction pipeline: seven steps, eight files, one
+// prkf is the PlayReady key-extraction pipeline: six steps, eight files, one
 // binary, one package, one folder.
 //
 //   prkf -1   signing.go     locate the signing-key routine descriptor   DLL
 //   prkf -2   warbird.go     decrypt the Warbird image                   DLL
 //   prkf -3   nibblemap.go   derive the nibble permutation               DLL
-//   prkf -4   stages.go      find the (stage 1, stage 2) pairing         DLL
-//   prkf -5   main.go        carve the CHAI chain, extract key components BLA
-//   prkf -6   signing.go     decrypt the signing key                     BLA
-//   prkf -7   plainkey.go    derive the encryption key                   BLA
+//   prkf -4   main.go        carve the CHAI chain, extract key components BLA
+//   prkf -5   signing.go     decrypt the signing key                     BLA
+//   prkf -6   plainkey.go    derive the encryption key                   BLA
 //
 // Four files hold no step of their own: warbird.go is the descriptor format, the
 // PE census and the span carving; kernel.go is the kernel ABI, the fault handler
 // and the build profile; child.go is every body this binary re-executes and the
-// plumbing they share; plainkey.go is the apply path -7 uses.
+// plumbing they share; plainkey.go is the apply path -6 uses.
 //
 // # RUN ORDER IS FLAG ORDER
 //
-// The BLA is required from -4 onward, because finding the pairing means running a
-// sample's real key through the stage routines; -4 carves the key components out
-// of msprcore.bla itself when -5 has not written them yet.
+// Two phases, and the numbers follow them:
 //
-// That dependency does not propagate. Each routine family has its own chain, so -4
-// records the pairing for its own sample's family and -7 discovers any family it
-// has no pairing for, with its own sample, then caches it.
+//   -1 -2 -3               the DLL: image, census, permutations
+//   -4 -5 -6               the sample: chain, signing key, encryption key
 //
-//   -5 -> -1 -> -6                  the signing key
-//   -5 -> -2 -> -3 -> -4 -> -7      the encryption key
+// -1, -2 and -3 read nothing but the DLL. -3 in particular builds its own oracle
+// from a fixed sentinel, so the whole DLL phase runs on a machine with no sample.
+//
+// The search for the (stage 1, stage 2) pairing is the one thing that cannot run
+// that early: a candidate is accepted only when the scalar its chain produces
+// satisfies d*G == the sample's public key, and nothing local can stand in for that
+// check - a tuple verified against itself is consistent by construction, and the
+// stage routines reject synthetic key material. So the search lives in -6, which
+// always has a sample, and its result is cached per family.
+//
+// That cache does not propagate across families. Each routine family has its own
+// chain, so -6 discovers any family it has no pairing for, with its own sample,
+// then caches it.
 //
 // Every artefact lives under outDir (testdata/); each name is declared once at the
 // end of this file. dllPath is the one path outside it.
@@ -55,9 +62,9 @@ import (
 
 // ------------------------------------------------- first half: the CHAI chain
 
-// certHdr is the fixed part of one certificate entry, read in four places in
-// parseChain, so it earns a package-level name. The CHAI header's own size is used
-// twice, both inside parseChain, and is a local there.
+// certHdr is the fixed part of one certificate entry, read twice in parseChain, so
+// it earns a package-level name. The CHAI header's own size is used twice too, both
+// inside parseChain, and is a local there.
 const certHdr = 16 // magic(4) version(4) total_length(4) certificate_length(4)
 
 // ------------------------------------------------------------------ manifest
@@ -79,13 +86,13 @@ const outDir = "testdata"
 // They are vars, not consts, only because dataFile resolves outDir; outDir is
 // itself a constant, so the values are fixed for the life of the process.
 var (
-   // The pipeline's one input, read by -5 and, when -5 has not run, by -4 and -7.
+   // The pipeline's one input, read by -4 and, when -4 has not run, by -6.
    corePath = dataFile("msprcore.bla")
 
    // --- DLL phase -------------------------------------------------------
    //
    // prsubs.json is keyed by the DLL sha256, so this half of the cache was
-   // always sound; it is not folded into the profile because -1 and -6 need
+   // always sound; it is not folded into the profile because -1 and -5 need
    // nothing else from it.
    prsubsPath  = dataFile("prsubs.json")
    scanLogPath = dataFile("findprsub.txt")
@@ -97,12 +104,11 @@ var (
    // SHA-256. See kernel.go for why it is keyed by the DLL, not the image.
    profilePath = dataFile("dllprof.json")
 
-   mapLogPath   = dataFile("derive_map.txt")
-   stageLogPath = dataFile("derive_stages.txt")
+   mapLogPath = dataFile("derive_map.txt")
 
    // --- BLA phase -------------------------------------------------------
    //
-   // -5 outputs. -4 and -7 carve the enc pair themselves when absent.
+   // -4 outputs. -6 carves the enc pair itself when absent.
    certPath   = dataFile("extracted.cert")
    sigPubPath = dataFile("extracted.sig.pub")
    sigPrvPath = dataFile("extracted.sig.prv")
@@ -200,9 +206,9 @@ func cmdCert() error {
    return nil
 }
 
-// cmdExtract implements prkf -5: carve the chain, then extract the keys.
+// cmdExtract implements prkf -4: carve the chain, then extract the keys.
 //
-// It is also what -4 and -7 call when the enc pair is absent, which is why it is
+// It is also what -6 calls when the enc pair is absent, which is why it is
 // idempotent: writing the same bytes twice is the price of letting the steps run
 // in flag order.
 func cmdExtract() error {
@@ -340,15 +346,14 @@ func main() {
    step1 := flag.Bool("1", false, "DLL:  locate the signing-key routine")
    step2 := flag.Bool("2", false, "DLL:  decrypt the Warbird image")
    step3 := flag.Bool("3", false, "DLL:  derive the nibble permutation")
-   step4 := flag.Bool("4", false, "DLL:  find the (stage 1, stage 2) pairing")
-   step5 := flag.Bool("5", false, "BLA:  carve the CHAI chain and the four key components")
-   step6 := flag.Bool("6", false, "BLA:  decrypt the signing key")
-   step7 := flag.Bool("7", false, "BLA:  derive the encryption key")
+   step4 := flag.Bool("4", false, "BLA:  carve the CHAI chain and the four key components")
+   step5 := flag.Bool("5", false, "BLA:  decrypt the signing key")
+   step6 := flag.Bool("6", false, "BLA:  derive the encryption key")
 
    flag.Parse()
 
    n := 0
-   for _, on := range []bool{*step1, *step2, *step3, *step4, *step5, *step6, *step7} {
+   for _, on := range []bool{*step1, *step2, *step3, *step4, *step5, *step6} {
       if on {
          n++
       }
@@ -358,14 +363,13 @@ func main() {
       flag.Usage()
       os.Exit(2)
    case n > 1:
-      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 through -7")
+      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 through -6")
       os.Exit(2)
    }
 
-   // -1, -2, -5 and -6 take no arguments at all. -3 and -4 own their positional
-   // worker modes and -7 owns -4's trial children, so those three receive
-   // whatever follows the flag verbatim and validate it themselves; a blanket
-   // NArg check here would break their children.
+   // -1, -2, -4 and -5 take no arguments at all. -3 and -6 own their positional
+   // worker modes, so those two receive whatever follows the flag verbatim and
+   // validate it themselves; a blanket NArg check here would break their children.
    noArgs := func(stage string) bool {
       if flag.NArg() == 0 {
          return true
@@ -418,23 +422,20 @@ func main() {
       }
       runStep(func() int { return stageDeriveMap(nil) })
    case *step4:
-      if flag.NArg() > 0 {
-         os.Exit(stageFindStages(flag.Args()))
+      if !noArgs("-4") {
+         os.Exit(2)
       }
-      runStep(func() int { return stageFindStages(nil) })
+      runStep(func() int { return errCode(cmdExtract()) })
    case *step5:
       if !noArgs("-5") {
          os.Exit(2)
       }
-      runStep(func() int { return errCode(cmdExtract()) })
-   case *step6:
-      if !noArgs("-6") {
-         os.Exit(2)
-      }
       runStep(func() int { return errCode(cmdDecrypt()) })
    default:
-      if !noArgs("-7") {
-         os.Exit(2)
+      // -6 is the last flag, so it is the default. A positional argument means
+      // this process is one of its trial children; stdout is parsed there too.
+      if flag.NArg() > 0 {
+         os.Exit(stageDerivePlain(flag.Args()))
       }
       runStep(func() int { return stageDerivePlain(nil) })
    }

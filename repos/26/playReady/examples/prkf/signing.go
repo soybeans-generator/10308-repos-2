@@ -1,8 +1,8 @@
 // signing.go begin
 //go:build windows
 
-// prkf -1 and -6: find the signing-key routine's descriptor, then decrypt the
-// signing key with it. One file, because -1 writes prsubs.json and -6 reads it,
+// prkf -1 and -5: find the signing-key routine's descriptor, then decrypt the
+// signing key with it. One file, because -1 writes prsubs.json and -5 reads it,
 // both call the same ABI in kernel.go, and both name the same DLL.
 //
 // -1 scans the DLL for Warbird heap-exec descriptors, then re-executes this binary
@@ -16,7 +16,7 @@
 //  4. REJECTS a size other than 0x20
 //
 // Property 4 is the discriminating one - it collapses the large set of descriptors
-// that merely return success. Verification against a real key is -6's job, not
+// that merely return success. Verification against a real key is -5's job, not
 // -1's. Zero accepted descriptors, or more than one, is an error to investigate:
 // there is no fallback path. Outputs: prsubsPath (build values, keyed by the DLL
 // sha256) and scanLogPath (probe results and child traces).
@@ -33,7 +33,7 @@
 // hangs leaves its last trace line as the final record. There is no deadline: a
 // timeout would make a hang invisible. Interrupt the run and read the log.
 //
-// -6 decrypts sigPrvPath -> sigPlainPath, writing output only after every check
+// -5 decrypts sigPrvPath -> sigPlainPath, writing output only after every check
 // passes.
 //
 // VERSION SUPPORT. Only ONE value differs between DLL builds: the RVA of the heap
@@ -44,10 +44,10 @@
 // by source; size == 0x20 is the P-256 scalar length, which it tests itself.
 //
 // VERIFICATION. The plaintext d must satisfy d*G == Q, where Q is the P-256 public
-// key -5 wrote next to the ciphertext. A wrong descriptor, output offset, argument
+// key -4 wrote next to the ciphertext. A wrong descriptor, output offset, argument
 // layout or input file cannot produce a scalar whose public point lands on Q. The
-// check itself is pubMatches, in plainkey.go, because -4 and -7 assert the same
-// thing about the same kind of key.
+// check itself is pubMatches, in plainkey.go, because -6 asserts the same thing
+// about the same kind of key.
 //
 // NOTE: keyLen, statusOK, wbArgs, newWbArgs, loadWarbird and callWarbird are in
 // kernel.go; the descriptor census and the PE walk are in warbird.go.
@@ -57,7 +57,6 @@ import (
    "bytes"
    "cmp"
    "crypto/rand"
-   "crypto/sha256"
    "encoding/hex"
    "encoding/json"
    "errors"
@@ -81,14 +80,14 @@ const probeEnv = "PRKF_PROBE_DESCS"
 // offset.
 var childT0 = time.Now()
 
-// ------------------------------------------------------------ -6: decrypt
+// ------------------------------------------------------------ -5: decrypt
 
 func cmdDecrypt() error {
    if !isFile(sigPrvPath) {
-      return fmt.Errorf("missing input: %s\n  run prkf -5 first", sigPrvPath)
+      return fmt.Errorf("missing input: %s\n  run prkf -4 first", sigPrvPath)
    }
    if !isFile(sigPubPath) {
-      return fmt.Errorf("missing public key: %s\n  run prkf -5 first", sigPubPath)
+      return fmt.Errorf("missing public key: %s\n  run prkf -4 first", sigPubPath)
    }
 
    // ---- decrypt ------------------------------------------------------
@@ -136,12 +135,10 @@ func cmdFindSub() error {
    // PE parse, descriptor scan, every probe, and the write.
    start := time.Now()
 
-   data, err := os.ReadFile(dllPath)
+   data, shaHex, err := pfDLL()
    if err != nil {
       return err
    }
-   sum := sha256.Sum256(data)
-   shaHex := hex.EncodeToString(sum[:])
 
    logf, err := os.Create(scanLogPath)
    if err != nil {
@@ -217,13 +214,18 @@ func cmdFindSub() error {
             results[i] = r
          }
       }
-      done := 0
+      // One pass for both numbers the progress line needs: how many descriptors
+      // have a row, and how many of those accepted.
+      done, accepted := 0, 0
       for _, r := range results {
          if r != "" {
             done++
          }
+         if strings.Contains(r, " ACCEPT ") {
+            accepted++
+         }
       }
-      fmt.Printf("  %d/%d  accepted=%d\n", done, len(descs), countAccepted(results))
+      fmt.Printf("  %d/%d  accepted=%d\n", done, len(descs), accepted)
    }
 
    // A chunk that died leaves a hole. Each hole is one descriptor, retried alone,
@@ -296,18 +298,6 @@ func cmdFindSub() error {
    fmt.Println("written " + prsubsPath)
    fmt.Printf("cache: %s\n", compact)
    return nil
-}
-
-// countAccepted counts the ACCEPT rows in a partial result slice, so the progress
-// line can report it without a second pass at the end.
-func countAccepted(results []string) int {
-   n := 0
-   for _, r := range results {
-      if strings.Contains(r, " ACCEPT ") {
-         n++
-      }
-   }
-   return n
 }
 
 // ---- the kernel call -----------------------------------------------------
@@ -453,10 +443,10 @@ func trace(format string, a ...any) {
 // descriptor whose code span is non-empty and lies inside a mapped section.
 //
 // This is a filter, not a second scan. The digest validation, the section walk and
-// the size cap are all scanDescs's, so -1 cannot drift from -2, -3 and -4 about
-// which bytes are a descriptor. The dedupe by (desc_va, code rva, len) stays
-// because overlapping section extents can present the same descriptor twice, and
-// probing it twice would waste a call and inflate the count.
+// the size cap are all scanDescs's, so -1 cannot drift from -2 and -3 about which
+// bytes are a descriptor. The dedupe by (desc_va, code rva, len) stays because
+// overlapping section extents can present the same descriptor twice, and probing it
+// twice would waste a call and inflate the count.
 func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    type key struct{ va, rva, ln uint32 }
    seen := make(map[key]bool)
@@ -504,8 +494,8 @@ type probeResult struct {
 // the descriptor it came from, so the file records what -1 picked without anyone
 // having to re-run it.
 //
-// -1 writes all four fields; -6 reads SHA256 and DescVA and ignores the other two,
-// which is why there is one type here and not two. -6's validation is the SHA256
+// -1 writes all four fields; -5 reads SHA256 and DescVA and ignores the other two,
+// which is why there is one type here and not two. -5's validation is the SHA256
 // comparison: a cache written against another DLL is refused, not reinterpreted.
 type subRecord struct {
    SHA256  string `json:"sha256"`
@@ -516,12 +506,10 @@ type subRecord struct {
 
 // loadPrsubs loads and validates the build-specific descriptor RVA.
 func loadPrsubs() (*subRecord, error) {
-   dll, err := os.ReadFile(dllPath)
+   _, sha, err := pfDLL()
    if err != nil {
       return nil, err
    }
-   sum := sha256.Sum256(dll)
-   sha := hex.EncodeToString(sum[:])
 
    if !isFile(prsubsPath) {
       return nil, fmt.Errorf("no %s - run prkf -1 first", prsubsPath)

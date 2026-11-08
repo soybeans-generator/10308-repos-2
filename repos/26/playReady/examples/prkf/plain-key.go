@@ -1,8 +1,8 @@
 // plainkey.go begin
 //go:build windows
 
-// prkf -7, and the apply half of -4: run a cached pairing and turn its output into
-// the sample's encryption key.
+// prkf -6: discover the (stage 1, stage 2) pairing for the sample's family if the
+// profile does not already hold one, replay it, and write the encryption key.
 //
 //   stage 1  key half  --stage-1 routine-->  OBF
 //   stage 2  OBF       --stage-2 routine-->  mut
@@ -10,6 +10,15 @@
 //   stage 4  mapped --16-entry permutation-->  plain
 //
 //   Proven by d*G == extracted.enc.pub. Nothing is written unless it holds.
+//
+// # THIS STEP OWNS THE SEARCH
+//
+// The search used to be a flag of its own, numbered before the carve step, and that
+// could not work: every candidate is accepted only when the scalar its chain
+// produces satisfies d*G == extracted.enc.pub, and nothing local can stand in for
+// that check, since a tuple verified against itself is consistent by construction.
+// There is no sample before -4, so the search lives here, cached per family, and the
+// DLL phase is -1, -2 and -3.
 //
 // # STAGES 3 AND 4 ARE ONE PASS
 //
@@ -24,30 +33,16 @@
 // version had - it re-extracted from the packed bytes and read `mp[0]>>4` instead of
 // `mp[0]`, so every scalar came out wrong and the search reported no pairing.
 //
-// # EACH FAMILY HAS ITS OWN CHAIN
+// key[0x40] % 3 selects one of three routine families, each with its own bijection
+// table AND its own stage routines, so a search records only the family it was run
+// for and a sample of a family this build has never seen pays for one search.
 //
-// key[0x40] % 3 selects one of three routine families: a different bijection table
-// AND different stage routines. A pairing found with one family's sample does not
-// apply to another, so -4 records only its own family and -7 discovers a family it
-// has no pairing for - the same search, its own sample, verified against
-// extracted.enc.pub - then caches it.
+// Applying a pairing is two children - stage 1 then stage 2 - using the recorded
+// key halves and buffers, which the search found to be the only combination that
+// reproduces the sample's key. dpSample carves the key components out of
+// msprcore.bla itself when -4 has not written them yet.
 //
-// # TWO CHILDREN, NOT ONE PER PAIR
-//
-// Applying a pairing is stage 1 then stage 2: two children, using the recorded key
-// halves and buffers rather than defaults. Those were discovered by the search and
-// are the only combination that reproduces the sample's key.
-//
-// # THE SAMPLE
-//
-// Both -4 and -7 need a sample's real key component: the stage routines reject
-// synthetic material, and the pairing is verified by d*G == extracted.enc.pub. -4
-// comes before -5 in flag order, so dpSample carves the key components out of
-// msprcore.bla itself when -5 has not written them yet. The BLA is required from -4
-// onward, not optional, and -5 later rewrites the same bytes.
-//
-// USAGE  prkf -4 discovers and caches; prkf -7 applies. Both entry points are in
-// this file and in stages.go.
+// USAGE  prkf -6. Children, positional: -6 p1 / -6 p2 (see stages.go).
 package main
 
 import (
@@ -89,7 +84,7 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
    }
    if len(obf) != 0x20 {
       return nil, fmt.Errorf("stage 1 (0x%06x, half %d) produced no output\n"+
-         "  the cached pairing is not this build's: re-run prkf -4", st.S1, st.K1)
+         "  the pairing does not apply to this build", st.S1, st.K1)
    }
    say("  obf       %x", obf)
 
@@ -159,19 +154,15 @@ func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, 
    return out, true
 }
 
-// dpCommit is the one place a derived scalar becomes a file. write=false is the
-// search's verification pass, which proves a pairing works and leaves
-// extracted.enc.plain to -7, the step that owns it.
-func dpCommit(plain, want []byte, say func(string, ...any), write bool) error {
+// dpCommit is the one place a derived scalar becomes a file. The check is repeated
+// here rather than trusted from the caller: this is the only write, so it is the
+// only place a wrong scalar could reach the disk.
+func dpCommit(plain, want []byte, say func(string, ...any)) error {
    if !pubMatches(plain, want) {
       return fmt.Errorf("scalar does not reproduce %s\n  got  %x\n  want %x",
          encPubPath, pubFor(plain), pubBytes(want))
    }
    say("pubkey    MATCH")
-   if !write {
-      say("plain     %x (not written: prkf -7 writes it)", plain)
-      return nil
-   }
    if err := os.WriteFile(encPlainPath, plain, 0o644); err != nil {
       return fmt.Errorf("write %s: %v", encPlainPath, err)
    }
@@ -180,14 +171,8 @@ func dpCommit(plain, want []byte, say func(string, ...any), write bool) error {
    return nil
 }
 
-// dpDerive is both halves. find=true is -4 (discover, verify, cache, write
-// nothing); find=false is -7 (apply the cache, write the plaintext).
-func dpDerive(find bool) (code int) {
-   logPath := plainLogPath
-   if find {
-      logPath = stageLogPath
-   }
-
+// dpDerive is -6: discover if needed, replay, write.
+func dpDerive() (code int) {
    var lines []string
    say := func(f string, a ...any) {
       s := fmt.Sprintf(f, a...)
@@ -199,8 +184,8 @@ func dpDerive(find bool) (code int) {
       return 1
    }
    defer func() {
-      if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-         fmt.Fprintf(os.Stderr, "prkf: %s: %v\n", logPath, err)
+      if err := os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+         fmt.Fprintf(os.Stderr, "prkf: %s: %v\n", plainLogPath, err)
          if code == 0 {
             code = 1
          }
@@ -212,9 +197,9 @@ func dpDerive(find bool) (code int) {
       return fail("%v", err)
    }
 
-   // The sample. Both modes need it: the pairing is found by running a real key
-   // through the stages and verified by d*G == extracted.enc.pub, and a synthetic
-   // key cannot be used because the routines reject it.
+   // The sample: the pairing is found by running a real key through the stages and
+   // verified by d*G == extracted.enc.pub, and a synthetic key cannot be used
+   // because the routines reject it.
    prv, pub, err := dpSample()
    if err != nil {
       return fail("%v", err)
@@ -233,34 +218,17 @@ func dpDerive(find bool) (code int) {
    say("")
 
    st := in.prof.Stages[vkey(fam)]
-   switch {
-   case find:
-      say("discovering the (stage 1, stage 2) pairing for family %d", fam)
-      say("")
-      if st, err = dpFindStages(in, fam, pub, say); err != nil {
-         return fail("%v", err)
-      }
-      // ONLY THIS FAMILY. The stage routines are selected by the same byte as the
-      // bijection table, so a pairing found with one family's sample says nothing
-      // about another's. The map is replaced rather than merged, which drops copies
-      // an older profile may hold from that bug.
-      in.prof.Stages = map[string]*profileStages{vkey(fam): st}
-      if err := pfSave(in.prof); err != nil {
-         return fail("write %s: %v", profilePath, err)
-      }
-      say("")
-      say("cached s1=0x%06x s2=0x%06x for family %d in %s", st.S1, st.S2, fam, profilePath)
-
-   case st == nil:
-      // A different BLA selected a family this build has no pairing for. Discover
-      // it here with this sample - the same search -4 runs - then cache it, so every
-      // later sample of this family is instant. The one case where -7 does real
-      // work.
+   if st == nil {
+      // A family this build has no pairing for. Discover it with this sample, then
+      // cache it, so every later sample of this family is instant.
       say("no stage pairing for family %d - discovering it with this sample", fam)
       say("")
       if st, err = dpFindStages(in, fam, pub, say); err != nil {
          return fail("%v", err)
       }
+      // Assigned, not replaced: the stage routines are selected by the same byte as
+      // the bijection table, so this search says nothing about another family, and
+      // dropping a pairing already cached for one would cost it a search.
       if in.prof.Stages == nil {
          in.prof.Stages = map[string]*profileStages{}
       }
@@ -269,7 +237,7 @@ func dpDerive(find bool) (code int) {
          return fail("write %s: %v", profilePath, err)
       }
       say("")
-      say("cached s1=0x%06x s2=0x%06x for family %d", st.S1, st.S2, fam)
+      say("cached s1=0x%06x s2=0x%06x for family %d in %s", st.S1, st.S2, fam, profilePath)
       say("")
    }
 
@@ -277,16 +245,14 @@ func dpDerive(find bool) (code int) {
    if err != nil {
       return fail("%v", err)
    }
-   // dpCommit returns an error, dpDerive an exit code: the two shapes are folded
-   // here rather than at every call site.
-   if err := dpCommit(plain, pub, say, !find); err != nil {
+   if err := dpCommit(plain, pub, say); err != nil {
       return fail("%v", err)
    }
    return 0
 }
 
 // dpSample returns the sample's 0x41-byte key component and its P-256 public key,
-// carving them out of the BLA when -5 has not written them yet.
+// carving them out of the BLA when -4 has not written them yet.
 func dpSample() (prv, pub []byte, err error) {
    if !isFile(encPrvPath) || !isFile(encPubPath) {
       fmt.Printf("carving the key components from %s\n\n", corePath)
@@ -329,8 +295,8 @@ func pubBytes(raw []byte) []byte {
 
 // d*G == Q is the pipeline's only end-to-end proof: a wrong stage descriptor, key
 // half, buffer choice or permutation cannot produce a scalar whose public point
-// lands on the expected key. -4, -6 and -7 all assert it, so it is written once
-// here rather than three times with three opinions about the 0x04 prefix.
+// lands on the expected key. -5 and -6 both assert it, so it is written once here
+// rather than twice with two opinions about the 0x04 prefix.
 
 // pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar. The
 // range check is NewPrivateKey's: d >= N or a wrong length fails there rather than
@@ -353,14 +319,13 @@ func pubMatches(d, raw []byte) bool {
 
 // --- stage entry point ------------------------------------------------------
 
-// stageDerivePlain is -7's entry point: apply the cached pairing, or discover the
-// sample's family first if this build has never seen it.
+// stageDerivePlain is -6's entry point. A positional argument makes this process one
+// of the search's trial children; its stdout is parsed, so it exits on the raw code.
 func stageDerivePlain(args []string) int {
    if len(args) > 0 {
-      fmt.Fprintf(os.Stderr, "prkf -7: unexpected argument %q\n", args[0])
-      return 2
+      return dpTrialChild(args)
    }
-   return dpDerive(false)
+   return dpDerive()
 }
 
 // ---------------------------------------------------------------- the inputs

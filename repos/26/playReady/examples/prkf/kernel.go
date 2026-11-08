@@ -8,7 +8,7 @@
 // # THE CALL
 //
 // op=1 (segment decrypt) is used by -2 alone and lives in warbird.go. op=3
-// (WbHeapExecuteCall) is used by -1, -3, -4 and -6, so its block is wbArgs below.
+// (WbHeapExecuteCall) is used by -1, -3 and -6, so its block is wbArgs below.
 // Both go through callWarbird or the equivalent, and the pointer conversion is
 // confined to one place whose contract is stated.
 //
@@ -29,8 +29,8 @@
 // The cache of everything this program derives from one DLL build, keyed by its
 // SHA-256, and the seam between the two halves of the pipeline:
 //
-//   DLL phase   -1, -2, -3, -4   fill it in; run once per build
-//   BLA phase   -5, -6, -7        read it;    run once per sample
+//   DLL phase   -1, -2, -3   fill it in; run once per build
+//   BLA phase   -4, -5, -6   read it;    run once per sample
 //
 // THE KEY IS THE DLL'S SHA-256, NEVER THE IMAGE'S. Every LoadLibraryW bakes the
 // process load base into IAT slots and relocated fields, so two decrypted images
@@ -61,7 +61,7 @@ import (
 )
 
 // keyLen is the only kernel-ABI constant kept at package scope, because every step
-// names it: 32 bytes is the P-256 private scalar length, the size -6's routine
+// names it: 32 bytes is the P-256 private scalar length, the size -5's routine
 // accepts, and the size it tests for itself with `cmp dword ptr [rcx+10h], 20h`.
 const keyLen = 0x20
 
@@ -222,7 +222,7 @@ func wbPatch(base uintptr, rva uint32, buf []byte) bool {
 //   - it cannot return an error - the signature belongs to the OS;
 //   - it cannot panic - a panic in a syscall.NewCallback trampoline is a fatal
 //     runtime abort, which would replace the FAULT line (the one diagnostic -3 and
-//     -4 parse) with a generic crash dump;
+//     -6 parse) with a generic crash dump;
 //   - it cannot return EXCEPTION_CONTINUE_SEARCH (0) - the fault would fall through
 //     to the default handler and kill the process anyway;
 //   - it cannot return EXCEPTION_CONTINUE_EXECUTION (-1) - the faulting instruction
@@ -310,7 +310,7 @@ func pfRequire(sha string) (*dllProfile, error) {
    if p.DLLSHA256 != sha {
       return nil, fmt.Errorf("%s was built for a different DLL\n"+
          "  profile: %s\n  actual : %s\n"+
-         "  the DLL changed, so every cached result is void: re-run -1 through -4",
+         "  the DLL changed, so every cached result is void: re-run -1 through -3",
          profilePath, p.DLLSHA256, sha)
    }
    if len(p.Map) == 0 {
@@ -362,7 +362,7 @@ type excRecord struct {
 // ALL FOUR heap fields are needed. va is the descriptor's own address and
 // identifies a candidate; descVA is +0x28 and is what a call inside the image
 // targets; the last two locate the code. Storing only the last three left every
-// descriptor with va == 0, collapsed the census onto one map key, and made -4
+// descriptor with va == 0, collapsed the census onto one map key, and made -6
 // report "1 heap-exec descriptor".
 type profileCensus struct {
    Spans [][2]uint32 `json:"spans"`
@@ -378,7 +378,7 @@ type profileMap struct {
    Consumer uint32         `json:"consumer_desc_va"`
 }
 
-// profileStages is -4's result for one family, and it records the WHOLE chain
+// profileStages is -6's result for one family, and it records the WHOLE chain
 // rather than just the two descriptors.
 //
 // S1 and S2 are descriptor addresses - what op=3 is handed. K1 and K2 are which
