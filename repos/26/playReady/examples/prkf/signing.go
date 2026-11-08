@@ -45,7 +45,9 @@
 //
 // VERIFICATION. The plaintext d must satisfy d*G == Q, where Q is the P-256 public
 // key -5 wrote next to the ciphertext. A wrong descriptor, output offset, argument
-// layout or input file cannot produce a scalar whose public point lands on Q.
+// layout or input file cannot produce a scalar whose public point lands on Q. The
+// check itself is pubMatches, in plainkey.go, because -4 and -7 assert the same
+// thing about the same kind of key.
 //
 // NOTE: keyLen, statusOK, wbArgs, newWbArgs, loadWarbird and callWarbird are in
 // kernel.go; the descriptor census and the PE walk are in warbird.go.
@@ -54,7 +56,6 @@ package main
 import (
    "bytes"
    "cmp"
-   "crypto/ecdh"
    "crypto/rand"
    "crypto/sha256"
    "encoding/hex"
@@ -103,25 +104,16 @@ func cmdDecrypt() error {
    if err != nil {
       return err
    }
-   // Normalize to the uncompressed 65-byte SEC 1 form. NewPublicKey accepts the
-   // uncompressed and compressed encodings and rejects anything off the curve or
-   // at infinity, so the on-curve check is not repeated here.
-   if len(raw) == 64 { // raw x||y: add the uncompressed prefix
-      raw = append([]byte{0x04}, raw...)
+   // Normalize to the uncompressed 65-byte SEC 1 form: the key files carry X||Y,
+   // and NewPublicKey rejects anything off the curve or at infinity, so the
+   // on-curve check is not repeated here.
+   want := pubBytes(raw)
+   if want == nil {
+      return fmt.Errorf("%s: not a P-256 public key", sigPubPath)
    }
-   k, err := ecdh.P256().NewPublicKey(raw)
-   if err != nil {
-      return fmt.Errorf("%s: P-256 point: %v", sigPubPath, err)
-   }
-   want := k.Bytes()
-
-   // An out-of-range d makes NewPrivateKey fail, leaving gotPub nil, which falls
-   // through to the same verdict as a mismatched point.
-   var gotPub []byte
-   if priv, err := ecdh.P256().NewPrivateKey(got); err == nil {
-      gotPub = priv.PublicKey().Bytes()
-   }
-   if !bytes.Equal(gotPub, want) {
+   // An out-of-range d makes pubFor return nil, which falls through to the same
+   // verdict as a mismatched point.
+   if gotPub := pubFor(got); gotPub == nil || !bytes.Equal(gotPub, want) {
       return fmt.Errorf("d*G != %s - the plaintext is not the private key for\n"+
          "that public key; the descriptor, the argument layout or the\n"+
          "input file is wrong; nothing was written", sigPubPath)

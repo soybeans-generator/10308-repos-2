@@ -135,7 +135,8 @@ func cmdCert() error {
    // ---- collect every structurally valid candidate -----------------
    magic := []byte("CHAI")
    var candidates []*chain
-   for i := 0; ; {
+   i := 0
+   for {
       j := bytes.Index(buf[i:], magic)
       if j < 0 {
          break

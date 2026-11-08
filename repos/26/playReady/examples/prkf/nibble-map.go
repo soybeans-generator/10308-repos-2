@@ -59,11 +59,10 @@ package main
 
 import (
    "bytes"
-   "crypto/elliptic"
+   "crypto/ecdh"
    "crypto/rand"
    "encoding/hex"
    "fmt"
-   "math/big"
    "os"
    "path/filepath"
    "strconv"
@@ -75,12 +74,6 @@ import (
 // =============================================================================
 // the oracle
 // =============================================================================
-
-var (
-   moParams = elliptic.P256().Params()
-   moN      = moParams.N
-   moP      = moParams.P
-)
 
 // buildOracle writes the 15 key+licence pairs into oracleDir.
 //
@@ -106,32 +99,17 @@ func buildOracle() int {
    if len(sent) != 32 {
       return moFail("sentinel is %d bytes, expected 32", len(sent))
    }
-   mx := new(big.Int).SetBytes(sent)
 
-   // y^2 = x^3 + a*x + b, with a = -3. P = 3 mod 4, so ModSqrt is the square root.
-   // SetBytes below is what proves the pair is really on the curve.
-   three := big.NewInt(3)
-   rhs := new(big.Int).Exp(mx, three, moP)
-   rhs.Sub(rhs, new(big.Int).Mul(three, mx))
-   rhs.Add(rhs, moParams.B)
-   rhs.Mod(rhs, moP)
-   my := new(big.Int).ModSqrt(rhs, moP)
-   if my == nil {
-      return moFail("'HELLO MICROSOFT!' || 0^16 is not an x-coordinate on P-256")
-   }
-   // canonical (even) root, so the Y in the log is stable across runs
-   if my.Bit(0) == 1 {
-      my.Sub(moP, my)
-   }
-
-   enc := make([]byte, 65)
-   enc[0] = 4
-   mx.FillBytes(enc[1:33])
-   my.FillBytes(enc[33:])
-   m, err := nistec.NewP256Point().SetBytes(enc)
+   // 0x02||X is the compressed SEC 1 form, and the 0x02 prefix asks for the even
+   // root - the canonical one, so the Y in the log is stable across runs. SetBytes
+   // is therefore the whole check: it decompresses the point and rejects an X that
+   // is not on the curve. Doing that by hand meant trusting, in this file, that
+   // P = 3 mod 4 and that ModSqrt's root is the canonical one.
+   m, err := nistec.NewP256Point().SetBytes(append([]byte{0x02}, sent...))
    if err != nil {
-      return moFail("sentinel point rejected by nistec: %v", err)
+      return moFail("'HELLO MICROSOFT!' || 0^16 is not an x-coordinate on P-256: %v", err)
    }
+   mb := m.Bytes() // 0x04 || X || Y
 
    if err := os.MkdirAll(out, 0o755); err != nil {
       return moFail("create %s: %v", out, err)
@@ -141,8 +119,8 @@ func buildOracle() int {
    } else {
       fmt.Printf("output    %s\n", out)
    }
-   fmt.Printf("sentinel  X = %064x\n", mx)
-   fmt.Printf("          Y = %064x\n", my)
+   fmt.Printf("sentinel  X = %x\n", mb[1:33])
+   fmt.Printf("          Y = %x\n", mb[33:])
    fmt.Printf("\n")
 
    // Distinct public keys are the oracle's whole output: a collision would silently
@@ -153,13 +131,12 @@ func buildOracle() int {
       // The oracle private scalar: nibble NN repeated 64 times, which is 32 bytes
       // of 0x11*NN. Not 32 bytes of 0x0N: the forced table makes every NIBBLE of
       // the derived scalar equal to the forced value, so a byte is two of them.
-      raw := new(big.Int).SetBytes(bytes.Repeat([]byte{byte(nib * 0x11)}, 32))
-      k := new(big.Int).Mod(raw, moN)
-      if k.Sign() == 0 {
-         return moFail("nibble %02x reduces to a zero scalar", nib)
-      }
+      //
+      // No reduction is possible or needed: the largest, 0x0f, is (2^256-1)/17,
+      // which is below N, so all fifteen are already valid scalars.
+      k := bytes.Repeat([]byte{byte(nib * 0x11)}, 32)
 
-      q, err := nistec.NewP256Point().ScalarBaseMult(moScalar(k))
+      q, err := nistec.NewP256Point().ScalarBaseMult(k)
       if err != nil {
          return moFail("nibble %02x: ScalarBaseMult: %v", nib, err)
       }
@@ -184,11 +161,11 @@ func buildOracle() int {
       if err != nil {
          return moFail("%v", err)
       }
-      c1, err := nistec.NewP256Point().ScalarBaseMult(moScalar(r))
+      c1, err := nistec.NewP256Point().ScalarBaseMult(r)
       if err != nil {
          return moFail("nibble %02x: C1 = r*G: %v", nib, err)
       }
-      rq, err := nistec.NewP256Point().ScalarMult(q, moScalar(r))
+      rq, err := nistec.NewP256Point().ScalarMult(q, r)
       if err != nil {
          return moFail("nibble %02x: r*Q: %v", nib, err)
       }
@@ -210,26 +187,21 @@ func buildOracle() int {
          return moFail("write lic_%02x.blob: %v", nib, err)
       }
 
-      // --- round-trip: C2 - k*C1 must be the sentinel point. The routine uses the
-      // unreduced scalar, which is congruent to k mod N, so this check covers what
-      // the routine will actually compute even for nibble 0x0f.
-      negK := new(big.Int).Sub(moN, k)
-      kc1, err := nistec.NewP256Point().ScalarMult(c1, moScalar(negK))
+      // --- round-trip: k*C1 + M must be C2. That is C2 - k*C1 = M written without
+      // a negation, which is also what keeps the group order out of this file. The
+      // routine uses the unreduced scalar, and k is exactly that value, so this
+      // covers what it will actually compute.
+      kc1, err := nistec.NewP256Point().ScalarMult(c1, k)
       if err != nil {
-         return moFail("nibble %02x: -k*C1: %v", nib, err)
+         return moFail("nibble %02x: k*C1: %v", nib, err)
       }
-      rec := nistec.NewP256Point().Add(c2, kc1)
-      if !bytes.Equal(rec.Bytes(), m.Bytes()) {
+      if rec := nistec.NewP256Point().Add(kc1, m); !bytes.Equal(rec.Bytes(), c2.Bytes()) {
          return moFail("nibble %02x: round-trip did not recover the sentinel point", nib)
       }
 
-      note := ""
-      if raw.Cmp(moN) >= 0 {
-         note = "  (scalar 2^256-1 > N, reduced; nibbles still all 0f)"
-      }
-      fmt.Printf("%02x  d = %064x%s\n", nib, k, note)
-      fmt.Printf("    X %064x\n", pub[:32])
-      fmt.Printf("    Y %064x\n", pub[32:])
+      fmt.Printf("%02x  d = %x\n", nib, k)
+      fmt.Printf("    X %x\n", pub[:32])
+      fmt.Printf("    Y %x\n", pub[32:])
       fmt.Printf("    key 0x40 bytes  blob 0x80 bytes  round-trip OK\n")
    }
 
@@ -527,26 +499,15 @@ func moFail(format string, args ...any) int {
    return 1
 }
 
-// moRandScalar draws a uniform non-zero scalar mod N.
-func moRandScalar() (*big.Int, error) {
-   for {
-      k, err := rand.Int(rand.Reader, moN)
-      if err != nil {
-         return nil, fmt.Errorf("read random: %w", err)
-      }
-      if k.Sign() != 0 {
-         return k, nil
-      }
+// moRandScalar draws a uniform non-zero scalar mod N. crypto/ecdh owns that
+// distribution, so neither the retry loop nor the zero test is repeated here, and
+// the result is the 32-byte big-endian form the point routines want.
+func moRandScalar() ([]byte, error) {
+   k, err := ecdh.P256().GenerateKey(rand.Reader)
+   if err != nil {
+      return nil, fmt.Errorf("generate ephemeral scalar: %w", err)
    }
-}
-
-// moScalar renders v as the 32-byte big-endian scalar nistec expects. FillBytes
-// rather than Bytes: a scalar with leading zero bytes is still 32 bytes long, and
-// the point routines want a fixed-width input.
-func moScalar(v *big.Int) []byte {
-   b := make([]byte, 32)
-   v.FillBytes(b)
-   return b
+   return k.Bytes(), nil
 }
 
 // moXY returns a point as X||Y, the 64-byte form every PlayReady key file uses. An

@@ -354,7 +354,7 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
                continue
             }
             plain, ok := dpChain(in.img, in.cluster[fam], in.mapt[fam], mut)
-            if !ok || !bytes.Equal(dpScalarPub(plain), want) {
+            if !ok || !pubMatches(plain, want) {
                continue
             }
             o := obfList[m.i/2]
@@ -379,7 +379,7 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
       // image - and a pairing that cannot be applied is not a pairing.
       say("  0x%06x candidate match, confirming", d2)
       plain, err := dpApply(in, fam, st, say)
-      if err != nil || !bytes.Equal(dpScalarPub(plain), want) {
+      if err != nil || !pubMatches(plain, want) {
          say("  not reproducible - continuing")
          say("")
          continue

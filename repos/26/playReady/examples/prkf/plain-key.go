@@ -56,7 +56,6 @@ import (
    "crypto/sha256"
    "encoding/hex"
    "fmt"
-   "math/big"
    "os"
    "slices"
    "strconv"
@@ -164,9 +163,9 @@ func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, 
 // search's verification pass, which proves a pairing works and leaves
 // extracted.enc.plain to -7, the step that owns it.
 func dpCommit(plain, want []byte, say func(string, ...any), write bool) error {
-   if got := dpScalarPub(plain); !bytes.Equal(got, want) {
+   if !pubMatches(plain, want) {
       return fmt.Errorf("scalar does not reproduce %s\n  got  %x\n  want %x",
-         encPubPath, got, want)
+         encPubPath, pubFor(plain), pubBytes(want))
    }
    say("pubkey    MATCH")
    if !write {
@@ -312,18 +311,44 @@ func dpSample() (prv, pub []byte, err error) {
    return prv, pub[len(pub)-64:], nil
 }
 
-// dpScalarPub returns the 32-byte X||Y public key for a scalar, or nil when the
-// scalar is out of range. It is the one implementation of the pipeline's only
-// end-to-end check: d*G must equal extracted.enc.pub. A wrong stage descriptor, key
-// half, buffer choice or permutation cannot produce a scalar whose public point
-// lands on Q.
-func dpScalarPub(plain []byte) []byte {
-   d := new(big.Int).SetBytes(plain)
-   priv, err := ecdh.P256().NewPrivateKey(d.FillBytes(make([]byte, 32)))
+// pubBytes normalizes a stored public key to the 65-byte SEC 1 form. The key files
+// carry X||Y with no prefix, so that is the only difference to absorb. nil means
+// the point is off the curve or at infinity, which NewPublicKey rejects.
+func pubBytes(raw []byte) []byte {
+   if len(raw) == 64 {
+      raw = append([]byte{4}, raw...)
+   }
+   k, err := ecdh.P256().NewPublicKey(raw)
    if err != nil {
       return nil
    }
-   return priv.PublicKey().Bytes()[1:]
+   return k.Bytes()
+}
+
+// --- the one P-256 check ----------------------------------------------------
+
+// d*G == Q is the pipeline's only end-to-end proof: a wrong stage descriptor, key
+// half, buffer choice or permutation cannot produce a scalar whose public point
+// lands on the expected key. -4, -6 and -7 all assert it, so it is written once
+// here rather than three times with three opinions about the 0x04 prefix.
+
+// pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar. The
+// range check is NewPrivateKey's: d >= N or a wrong length fails there rather than
+// being caught by hand.
+func pubFor(d []byte) []byte {
+   priv, err := ecdh.P256().NewPrivateKey(d)
+   if err != nil {
+      return nil
+   }
+   return priv.PublicKey().Bytes()
+}
+
+// pubMatches reports whether d*G is the public key in raw, in either form. A nil
+// from either helper is a mismatch, never an accidental equal: bytes.Equal treats
+// two empty slices as equal, so the nils are checked first.
+func pubMatches(d, raw []byte) bool {
+   got, want := pubFor(d), pubBytes(raw)
+   return got != nil && want != nil && bytes.Equal(got, want)
 }
 
 // --- stage entry point ------------------------------------------------------
