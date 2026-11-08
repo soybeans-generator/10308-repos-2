@@ -13,3 +13,10 @@ and there is a function you can call to decrypt the response with the seed
 
 there is higher level functions you can call that do the entire request for you
 but i wanted more control
+
+~~~
+& "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" `
+  /r:"$env:WINDIR\System32\WinMetadata\Windows.Foundation.winmd" `
+  /r:"$env:WINDIR\System32\WinMetadata\Windows.Media.winmd" `
+  PrIndiv.cs
+~~~
