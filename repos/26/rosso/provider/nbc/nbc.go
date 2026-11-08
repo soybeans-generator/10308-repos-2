@@ -85,7 +85,7 @@ type Metadata struct {
 }
 
 func FetchMetadata(name string) (*Metadata, error) {
-   body, err := json.Marshal(map[string]any{
+   body := map[string]any{
       "query": queryPage,
       "variables": map[string]string{
          "app":      "nbc",
@@ -94,12 +94,16 @@ func FetchMetadata(name string) (*Metadata, error) {
          "type":     "VIDEO",
          "userId":   "",
       },
-   })
+   }
+
+   data, err := json.MarshalIndent(body, "", " ")
    if err != nil {
       return nil, err
    }
 
-   req, err := http.NewRequest("POST", "https://friendship.nbc.com/v3/graphql", bytes.NewReader(body))
+   req, err := http.NewRequest(
+      "POST", "https://friendship.nbc.com/v3/graphql", bytes.NewReader(data),
+   )
    if err != nil {
       return nil, err
    }
