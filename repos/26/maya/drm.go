@@ -2,10 +2,10 @@
 package maya
 
 import (
-   "41.neocities.org/diana/playReady"
-   "41.neocities.org/diana/widevine"
    "41.neocities.org/luna/dash"
+   "41.neocities.org/playReady"
    "41.neocities.org/sofia"
+   "41.neocities.org/widevine"
    "bytes"
    "errors"
    "fmt"
