@@ -2,10 +2,6 @@
 
 Anything in here was established empirically during this work. It is either (a) absent from the published technical document, or (b) present there but for a *different* library build, so the values had to be re-derived.
 
-Save as `FINDINGS.md`.
-
----
-
 ## 1. Provenance
 
 | item | value |
