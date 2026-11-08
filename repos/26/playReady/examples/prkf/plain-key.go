@@ -1,71 +1,53 @@
 // plainkey.go begin
 //go:build windows
 
-// prkf -7: extracted.enc.prv -> extracted.enc.plain
+// prkf -7, and the apply half of -4: run a cached pairing and turn its output into
+// the sample's encryption key.
 //
-//   stage 1  prv[0x00:0x20]  --stage-1 routine-->  OBF
-//   stage 2  OBF (mutated in place) --stage-2 routine-->  mut
+//   stage 1  key half  --stage-1 routine-->  OBF
+//   stage 2  OBF       --stage-2 routine-->  mut
 //   stage 3  mut   --64 per-nibble bijection subtables-->  mapped
-//   stage 4  mapped --16-entry permutation from oracle_map.json-->  plain
+//   stage 4  mapped --16-entry permutation-->  plain
 //
 //   Proven by d*G == extracted.enc.pub. Nothing is written unless it holds.
 //
-// No address here is hardcoded. Both stage routines are selected at runtime by
-// walking the code graph outward from the 0x41-byte key consumer; the public key
-// decides which (stage 1, stage 2) pairing is real.
+// # STAGES 3 AND 4 ARE ONE PASS
 //
-// Inputs   encPrvPath, encPubPath, imgPath, mapPath
-// Output   encPlainPath, plainLogPath
+// mut is 32 bytes, so 64 nibbles. Nibble i selects one byte from its own 16-byte
+// row at the family's cluster, and that byte - a value in 0..15 - indexes the
+// 16-entry permutation. So `mapt[img[cluster+i*16+nibble]]`, sixty-four times.
 //
-// USAGE
-//   prkf -7
+// The two stages used to be written as nibble-extract, table lookup, pack, nibble-
+// extract again, permute, pack. The second extraction is the identity: packing then
+// unpacking returns the same 64 nibbles. Writing it out as one pass removes an
+// array and the chance of getting that identity wrong, which is exactly the bug one
+// version had - it re-extracted from the packed bytes and read `mp[0]>>4` instead of
+// `mp[0]`, so every scalar came out wrong and the search reported no pairing.
 //
-//   No flags of its own. Every path above is a manifest entry in main.go.
+// # EACH FAMILY HAS ITS OWN CHAIN
 //
-//   Trials run in children of this same binary, using positional arguments
-//   rather than flags:
-//     prkf -7 s1 <desc> [prep]
-//     prkf -7 s2 <desc> <obf> [prep] [variant]
-//   (internal; the driver spawns them, nothing else should)
+// key[0x40] % 3 selects one of three routine families: a different bijection table
+// AND different stage routines. A pairing found with one family's sample does not
+// apply to another, so -4 records only its own family and -7 discovers a family it
+// has no pairing for - the same search, its own sample, verified against
+// extracted.enc.pub - then caches it.
 //
-// Every child prints rc and status for every call, rejects included, so "wrong
-// routine" and "never called" are distinguishable. The VEH fault line carries
-// the stage tag ("S1 FAULT" / "S2 FAULT") the driver filters on, so a fault is
-// never recorded as "no output".
+// # TWO CHILDREN, NOT ONE PER PAIR
 //
-// EXIT CODES
-//   Nothing here calls os.Exit. dpDriver returns 1 on failure and 0 on success.
-//   The trial child itself is in child.go and returns 0 (a RESULT line), 4
-//   (module load), 5 (bad input or a recovered panic) or 6 (no VEH). The trial
-//   log is written by dpDriver's deferred flush, so no failure path can leave it
-//   unwritten.
+// Applying a pairing is stage 1 then stage 2: two children, using the recorded key
+// halves and buffers rather than defaults. Those were discovered by the search and
+// are the only combination that reproduces the sample's key.
 //
-// The descriptor format, the PE census, the span lookup, the block carving, the
-// page patch and the fault handler are shared with -5 and -6 and live in
-// warbird.go; the spawn helper is in child.go.
+// # THE SAMPLE
 //
-// Pitfalls:
-//   - The stage routines' own blocks must be LEFT CIPHERTEXT. They are heap-exec,
-//     so the kernel decrypts each exactly once during the op=3 call.
-//   - Segment blocks must still be patched, or the helpers the stages call are
-//     ciphertext and the call faults. PREP=carve is the correct middle.
-//   - PREP is overlap-safe by default: it patches segment spans but subtracts the
-//     heap-exec blocks. wbtool_img.bin holds DECRYPTED code at those RVAs, so
-//     copying it over a block the kernel will decrypt again yields garbage.
-//     PREP=full and PREP=none are selectable so the three can be compared.
-//   - If AddVectoredExceptionHandler returns NULL the child reports ERR and exits
-//     6 instead of running unprotected, because with no handler a fault is a
-//     plain process death the driver can only record as NONE.
-//   - On failure a localization matrix runs automatically: each candidate with
-//     real inputs, then zeroed inputs, to separate a data-dependent fault from a
-//     structural one.
+// Both -4 and -7 need a sample's real key component: the stage routines reject
+// synthetic material, and the pairing is verified by d*G == extracted.enc.pub. -4
+// comes before -5 in flag order, so dpSample carves the key components out of
+// msprcore.bla itself when -5 has not written them yet. The BLA is required from -4
+// onward, not optional, and -5 later rewrites the same bytes.
 //
-// GLOBALS
-//   dpPattern is the only one: the size-check signature is read in three places
-//   here and nowhere else. The tuning numbers - tolerance, window, hop and block
-//   caps - are locals next to the code that uses them, and the trial child's ABI
-//   is in child.go.
-
+// USAGE  prkf -4 discovers and caches; prkf -7 applies. Both entry points are in
+// this file and in stages.go.
 package main
 
 import (
@@ -73,32 +55,139 @@ import (
    "crypto/ecdh"
    "crypto/sha256"
    "encoding/hex"
-   "encoding/json"
    "fmt"
    "math/big"
    "os"
    "slices"
    "strconv"
    "strings"
-   "time"
 )
 
-var dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
-
-// One trial, one process.
+// dpApply replays a pairing and returns the scalar its chain produces. Two children
+// - p1 for stage 1, p2 for stage 2 - because those are the only trial modes there
+// are. Stages 3 and 4 are pure table work, so they run here.
 //
-//   -7 s1 <desc> [prep]
-//   -7 s2 <desc> <obf> [prep] [variant]
-//
-// variant 0 real inputs / 1 zero out-buffer / 2 all zero / 3 no second size
+// It uses the recorded key halves and buffers, not defaults: those were discovered
+// by the search and are the only combination that reproduces the sample's key.
+func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any)) ([]byte, error) {
+   say("family %d  cluster 0x%06x", fam, in.cluster[fam])
+   say("stage 1  0x%06x  key half %d  out buffer %d", st.S1, st.K1, st.O1)
+   say("stage 2  0x%06x  key half %d  out buffer %d", st.S2, st.K2, st.O2)
+   say("")
 
-func dpDriver() (code int) {
-   const (
-      tol     = 0x20 // a lea/call target this close to a descriptor VA is that descriptor
-      winSz   = 0x400
-      maxHops = 5
-      maxBlk  = 400
-   )
+   // p1 runs both halves and prints both buffers, so the recorded half and buffer
+   // are picked out of the two rows rather than requested.
+   b1 := dpRunP1([]uint32{st.S1})
+   if b1.loadfail != "" {
+      return nil, fmt.Errorf("%s", b1.loadfail)
+   }
+   var obf []byte
+   for _, r := range b1.res {
+      if r.kind != "RES" || r.h != st.K1 {
+         continue
+      }
+      obf, _ = hex.DecodeString([2]string{r.a, r.b}[st.O1])
+   }
+   if len(obf) != 0x20 {
+      return nil, fmt.Errorf("stage 1 (0x%06x, half %d) produced no output\n"+
+         "  the cached pairing is not this build's: re-run prkf -4", st.S1, st.K1)
+   }
+   say("  obf       %x", obf)
+
+   b2 := dpRunP2(0, []dpObf{{v: hex.EncodeToString(obf)}}, []uint32{st.S2})
+   if b2.loadfail != "" {
+      return nil, fmt.Errorf("%s", b2.loadfail)
+   }
+   var mut []byte
+   for _, r := range b2.res {
+      if r.kind != "RES" || r.i%2 != st.K2 {
+         continue
+      }
+      mut, _ = hex.DecodeString([2]string{r.a, r.b}[st.O2])
+   }
+   if len(mut) != 0x20 {
+      return nil, fmt.Errorf("stage 2 (0x%06x, half %d) produced no output", st.S2, st.K2)
+   }
+   say("  mut       %x", mut)
+
+   plain, ok := dpChain(in.img, in.cluster[fam], in.mapt[fam], mut)
+   if !ok {
+      return nil, fmt.Errorf("stages 3 and 4 could not be applied - re-run prkf -3")
+   }
+   say("  plain     %x", plain)
+   return plain, nil
+}
+
+// dpChain applies stages 3 and 4 in one pass.
+//
+// mut is 32 bytes, so 64 nibbles, high nibble first. Nibble i selects one byte from
+// its own 16-byte row at the family's cluster - a value in 0..15 - and that value
+// indexes the 16-entry permutation. The packed form is rebuilt at the end.
+//
+// The two stages were once written as nibble-extract, lookup, pack, nibble-extract,
+// permute, pack. The second extraction is the identity, so collapsing it removes an
+// array and a place to get that identity wrong; a version that kept it re-extracted
+// from the packed bytes and read mp[0]>>4 instead of mp[0], which broke every scalar.
+func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, bool) {
+   if len(mut) < 0x20 {
+      return nil, false
+   }
+   c := int(cluster)
+   if c < 0 || c+64*16 > len(img) {
+      return nil, false
+   }
+
+   var ns, pl [64]byte
+   for i := range ns {
+      sh := uint(0)
+      if i%2 == 0 {
+         sh = 4
+      }
+      ns[i] = mut[i>>1] >> sh & 0xF
+   }
+   for i := range pl {
+      v, ok := mapt[int(img[c+i*16+int(ns[i])])]
+      if !ok {
+         return nil, false
+      }
+      pl[i] = byte(v)
+   }
+
+   out := make([]byte, 32)
+   for i := 0; i < 64; i += 2 {
+      out[i/2] = pl[i]<<4 | pl[i+1]
+   }
+   return out, true
+}
+
+// dpCommit is the one place a derived scalar becomes a file. write=false is the
+// search's verification pass, which proves a pairing works and leaves
+// extracted.enc.plain to -7, the step that owns it.
+func dpCommit(plain, want []byte, say func(string, ...any), write bool) error {
+   if got := dpScalarPub(plain); !bytes.Equal(got, want) {
+      return fmt.Errorf("scalar does not reproduce %s\n  got  %x\n  want %x",
+         encPubPath, got, want)
+   }
+   say("pubkey    MATCH")
+   if !write {
+      say("plain     %x (not written: prkf -7 writes it)", plain)
+      return nil
+   }
+   if err := os.WriteFile(encPlainPath, plain, 0o644); err != nil {
+      return fmt.Errorf("write %s: %v", encPlainPath, err)
+   }
+   psum := sha256.Sum256(plain)
+   say("written   %s  (%d bytes)  sha256 %x", encPlainPath, len(plain), psum)
+   return nil
+}
+
+// dpDerive is both halves. find=true is -4 (discover, verify, cache, write
+// nothing); find=false is -7 (apply the cache, write the plaintext).
+func dpDerive(find bool) (code int) {
+   logPath := plainLogPath
+   if find {
+      logPath = stageLogPath
+   }
 
    var lines []string
    say := func(f string, a ...any) {
@@ -110,558 +199,220 @@ func dpDriver() (code int) {
       say("FATAL: "+f, a...)
       return 1
    }
-   // The trial log is the only record of how the pairing was found, so it is
-   // flushed by a defer rather than by each exit: a failure path that forgot to
-   // write it would leave the run with no evidence at all.
    defer func() {
-      if err := os.WriteFile(plainLogPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-         fmt.Fprintf(os.Stderr, "prkf -7: %s: %v\n", plainLogPath, err)
+      if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+         fmt.Fprintf(os.Stderr, "prkf: %s: %v\n", logPath, err)
          if code == 0 {
             code = 1
          }
       }
    }()
-   show := func(r dpResult) string {
-      if r.line != "" {
-         return r.line
-      }
-      return fmt.Sprintf("<%s> rc=%d", r.kind, r.rc)
-   }
-
-   for _, f := range []string{mapPath, imgPath, encPrvPath, encPubPath} {
-      if st, err := os.Stat(f); err != nil || st.IsDir() {
-         return fail("missing %s", f)
-      }
-   }
 
    in, err := dpLoadInputs()
    if err != nil {
       return fail("%v", err)
    }
 
-   // A 16-entry permutation: 16 keys in 0..15, each mapping to a distinct value.
-   // Both halves are checked because stage 4 indexes mapt with a nibble and a
-   // missing key would panic mid-child instead of failing here.
-   if len(in.mapt) != 16 {
-      return fail("oracle_map.json is not a 16-entry permutation (%d entries)", len(in.mapt))
+   // The sample. Both modes need it: the pairing is found by running a real key
+   // through the stages and verified by d*G == extracted.enc.pub, and a synthetic
+   // key cannot be used because the routines reject it.
+   prv, pub, err := dpSample()
+   if err != nil {
+      return fail("%v", err)
    }
-   var seenVal uint32
-   for k, v := range in.mapt {
-      if k < 0 || k > 15 || v < 0 || v > 15 {
-         return fail("oracle_map.json: %d -> %d is out of range", k, v)
-      }
-      seenVal |= 1 << uint(v)
-   }
-   if seenVal != 0xFFFF {
-      return fail("oracle_map.json is not a 16-entry permutation (repeated value)")
-   }
-   if in.cluster < 0x1000 {
-      return fail("oracle_map.json cluster RVA 0x%x looks invalid", in.cluster)
+   fam := int(prv[0x40]) % 3
+   if _, ok := in.mapt[fam]; !ok {
+      return fail("%s selects routine family %d, but %s holds only %v\n"+
+         "  that family produced no live set on this build: re-run prkf -3",
+         encPrvPath, fam, profilePath, in.fams)
    }
 
-   sum := sha256.Sum256(in.fb)
-   say("dll    %s", dllPath)
-   say("sha256 %x", sum)
+   say("dll    %s", in.sha)
    say("image  %s  (%d bytes, SizeOfImage 0x%x)", imgPath, len(in.img), in.sizeImg)
-   say("prv    %s  (%d bytes, variant 0x%02x %%3=%d)",
-      encPrvPath, len(in.prv), in.prv[0x40], in.prv[0x40]%3)
+   say("prv    %s  family %d (key[0x40]=0x%02x %%3)", encPrvPath, fam, prv[0x40])
    say("pub    %s", encPubPath)
-   say("cluster 0x%06x  (from %s)", in.cluster, mapPath)
-   if in.magic != "" {
-      say("magic  %s", in.magic)
-   }
    say("")
 
-   ov := 0
-   for _, s := range in.seg {
-      if len(carveRuns(in.merged, s.rva, s.size)) != 1 {
-         ov++
-      }
-   }
-   say("spans intersecting heap-exec blocks: %d of %d", ov, len(in.seg))
-   say("")
-
-   heapDesc := make(map[uint32]imgDesc, len(in.heaps))
-   for _, h := range in.heaps {
-      heapDesc[h.va] = h
-   }
-   descKeys := make([]uint32, 0, len(heapDesc))
-   for d := range heapDesc {
-      descKeys = append(descKeys, d)
-   }
-   slices.Sort(descKeys)
-
-   say("heap-exec descriptors %d", len(heapDesc))
-   say("")
-
-   blockOf := func(rva int) (dv, code, n uint32, ok bool) {
-      for _, d := range descKeys {
-         h := heapDesc[d]
-         if int(h.rva) <= rva && rva < int(h.rva+h.ln) {
-            return d, h.rva, h.ln, true
-         }
-      }
-      return 0, 0, 0, false
-   }
-   matchDesc := func(t int) (uint32, bool) {
-      var best uint32
-      bestDist := tol + 1
-      for _, d := range descKeys {
-         dist := max(int(d)-t, t-int(d))
-         if dist < bestDist {
-            best, bestDist = d, dist
-         }
-      }
-      return best, bestDist <= tol
-   }
-
-   sites := bytes.Count(in.img, dpPattern)
-   say("key-consumer size-check sites: %d at 0x%x", sites, bytes.Index(in.img, dpPattern))
-   if sites != 1 {
-      return fail("expected exactly one 'cmp dword ptr [rcx+0x14], 0x41' in the image")
-   }
-
-   dv0, c0, n0, ok := blockOf(bytes.Index(in.img, dpPattern))
-   if !ok {
-      return fail("no heap-exec block owns the size check")
-   }
-   say("key consumer: descriptor 0x%06x  code 0x%06x+0x%x", dv0, c0, n0)
-   say("")
-
-   // walk the code graph outward from the key consumer
-   cand := map[uint32]bool{}
-   visited := map[[2]int]bool{}
-   frontier := [][2]int{{int(c0), int(n0)}}
-
-   for depth := 0; len(frontier) > 0 && depth < maxHops && len(visited) < maxBlk; {
-      depth++
-      var nxt [][2]int
-
-      for _, b := range frontier {
-         if visited[b] {
-            continue
-         }
-         visited[b] = true
-
-         hi := min(b[0]+b[1], len(in.img)-8)
-         for o := max(0x1000, b[0]); o < hi; o++ {
-            var t int
-            switch {
-            case (in.img[o] == 0x48 || in.img[o] == 0x4C) && in.img[o+1] == 0x8D:
-               switch in.img[o+2] {
-               case 5, 0xD, 0x15, 0x1D, 0x25, 0x2D, 0x35, 0x3D:
-                  t = o + 7 + int(int32(le32(in.img, o+3)))
-               default:
-                  continue
-               }
-            case in.img[o] == 0xE8 || in.img[o] == 0xE9:
-               t = o + 5 + int(int32(le32(in.img, o+1)))
-            default:
-               continue
-            }
-
-            if m, ok := matchDesc(t); ok {
-               cand[m] = true
-               continue
-            }
-            if _, c, n, ok := blockOf(t); ok {
-               nxt = append(nxt, [2]int{int(c), int(n)})
-            } else if t >= 0x1000 && t < len(in.img)-0x40 {
-               nxt = append(nxt, [2]int{t, min(winSz, len(in.img)-t)})
-            }
-         }
-      }
-
-      say("  hop %d: blocks %d -> descriptors %d, next %d",
-         depth, len(frontier), len(cand), len(nxt))
-      frontier = nxt
-   }
-
-   candList := make([]uint32, 0, len(cand))
-   for d := range cand {
-      candList = append(candList, d)
-   }
-   slices.Sort(candList)
-
-   say("stage candidates: %#x", candList)
-   say("")
-   if len(candList) == 0 {
-      return fail("no stage candidates - the lea/call idiom differs on this build")
-   }
-
-   obfs := map[uint32]string{}
-   say("phase 1: stage-1 candidates (PREP=carve)")
-   for _, d := range candList {
-      r := dpRunChild("s1", fmt.Sprintf("0x%x", d), "carve")
-      say("  s1 0x%06x code 0x%06x: %s", d, heapDesc[d].rva, show(r))
-      if r.stderr != "" {
-         say("      stderr: %s", r.stderr)
-      }
-      if w := strings.Fields(r.line); r.kind == "OK" && len(w) > 2 {
-         obfs[d] = w[2]
-      }
-   }
-   say("")
-   say("stage-1 candidates that produced an OBF: %d", len(obfs))
-   say("")
-   if len(obfs) == 0 {
-      return fail("no candidate produced an OBF - stage 1 is not in the candidate set")
-   }
-
-   // The first OBF in descriptor order, not in string order: deterministic
-   // without building and sorting a second slice for one element.
-   obfFirst := ""
-   for _, d1 := range descKeys {
-      if v, ok := obfs[d1]; ok {
-         obfFirst = v
-         break
-      }
-   }
-
-   var found []string
-   nFault, nReject := 0, 0
-
-   say("phase 2: stage-2 pairing (PREP=carve, variant 0)")
-   for _, d1 := range descKeys {
-      obf, ok := obfs[d1]
-      if !ok {
-         continue
-      }
-      for _, d2 := range candList {
-         r := dpRunChild("s2",
-            fmt.Sprintf("0x%x", d2), obf, "carve", "0")
-         switch r.kind {
-         case "MATCH":
-            if found == nil {
-               w := strings.Fields(r.line)
-               found = []string{
-                  strconv.FormatUint(uint64(d1), 10),
-                  strconv.FormatUint(uint64(d2), 10),
-                  obf,
-                  strings.TrimPrefix(w[3], "mut="),
-                  strings.TrimPrefix(w[4], "mapped="),
-                  strings.TrimPrefix(w[5], "plain="),
-               }
-            }
-         case "FAULT":
-            nFault++
-         case "REJECT":
-            nReject++
-            continue
-         }
-         say("  s2 0x%06x code 0x%06x: %s", d2, heapDesc[d2].rva, show(r))
-         if r.stderr != "" {
-            say("      stderr: %s", r.stderr)
-         }
-      }
-   }
-
-   match := 0
-   if found != nil {
-      match = 1
-   }
-   say("")
-   say("summary: MATCH %d  FAULT %d  REJECT %d  of %d attempts",
-      match, nFault, nReject, len(obfs)*len(candList))
-   say("")
-
-   if found == nil {
-      say("no pairing reproduced the public key - localizing")
+   st := in.prof.Stages[vkey(fam)]
+   switch {
+   case find:
+      say("discovering the (stage 1, stage 2) pairing for family %d", fam)
       say("")
-      say("  A: variant 0 (real OBF, real out-buffer, ln 0x30)")
-      say("  B: variant 1 (real OBF, ZERO out-buffer)  -> data dependence")
-      say("  C: variant 2 (all inputs zero)            -> structural vs data")
-      say("  D: variant 3 (ln 0x2C, no second size)    -> arg-length dependence")
-      say("")
-      say("  %-10s%-10s%-8s%-8s%-8s%-8s%s", "cand", "code", "A", "B", "C", "D", "note")
-
-      obf := obfFirst
-      firstReject := candList[0]
-      seenReject := false
-
-      for _, d := range candList {
-         row := make([]string, 4)
-         var notes []string
-         for v := range row {
-            r := dpRunChild("s2",
-               fmt.Sprintf("0x%x", d), obf, "carve", strconv.Itoa(v))
-            row[v] = r.kind
-            if r.stderr != "" {
-               notes = append(notes, fmt.Sprintf("v%d stderr %s", v, r.stderr))
-            }
-         }
-         if !seenReject && row[0] == "REJECT" {
-            firstReject = d
-            seenReject = true
-         }
-         say("  %-10s%-10s%-8s%-8s%-8s%-8s%s",
-            fmt.Sprintf("0x%x", d),
-            fmt.Sprintf("0x%x", heapDesc[d].rva),
-            row[0], row[1], row[2], row[3],
-            strings.Join(notes, "; "))
+      if st, err = dpFindStages(in, fam, pub, say); err != nil {
+         return fail("%v", err)
       }
-
-      say("")
-      say("  reading the matrix")
-      say("    A=FAULT B=FAULT C=FAULT  -> structural: the routine is wrong, or the")
-      say("                                image state is wrong (try PREP=full/none)")
-      say("    A=FAULT B=MATCH/NOMATCH  -> data-dependent: the OBF or prv[0x20:0x40]")
-      say("                                drives a bad index/shift in stage 2")
-      say("    A=FAULT D=REJECT         -> arg-length dependent: ln 0x30 is required")
-      say("                                and the routine rejects it anyway")
-      say("    all REJECT               -> the routine is not stage 2 on this build")
-      say("")
-      say("  prep sensitivity for the best stage-2-looking candidate")
-
-      for _, prep := range []string{"full", "carve", "none"} {
-         r := dpRunChild("s2", fmt.Sprintf("0x%x", firstReject), obf, prep, "0")
-         say("    PREP=%-6s 0x%06x: %s", prep, firstReject, show(r))
-         if r.stderr != "" {
-            say("        stderr: %s", r.stderr)
-         }
+      // ONLY THIS FAMILY. The stage routines are selected by the same byte as the
+      // bijection table, so a pairing found with one family's sample says nothing
+      // about another's. The map is replaced rather than merged, which drops copies
+      // an older profile may hold from that bug.
+      in.prof.Stages = map[string]*profileStages{vkey(fam): st}
+      if err := pfSave(in.prof); err != nil {
+         return fail("write %s: %v", profilePath, err)
       }
-      return fail("no (stage 1, stage 2) pairing reproduced extracted.enc.pub")
+      say("")
+      say("cached s1=0x%06x s2=0x%06x for family %d in %s", st.S1, st.S2, fam, profilePath)
+
+   case st == nil:
+      // A different BLA selected a family this build has no pairing for. Discover
+      // it here with this sample - the same search -4 runs - then cache it, so every
+      // later sample of this family is instant. The one case where -7 does real
+      // work.
+      say("no stage pairing for family %d - discovering it with this sample", fam)
+      say("")
+      if st, err = dpFindStages(in, fam, pub, say); err != nil {
+         return fail("%v", err)
+      }
+      if in.prof.Stages == nil {
+         in.prof.Stages = map[string]*profileStages{}
+      }
+      in.prof.Stages[vkey(fam)] = st
+      if err := pfSave(in.prof); err != nil {
+         return fail("write %s: %v", profilePath, err)
+      }
+      say("")
+      say("cached s1=0x%06x s2=0x%06x for family %d", st.S1, st.S2, fam)
+      say("")
    }
 
-   plain, err := hex.DecodeString(found[5])
+   plain, err := dpApply(in, fam, st, say)
    if err != nil {
-      return fail("bad plain hex from child: %v", err)
+      return fail("%v", err)
    }
-   s1, err := strconv.ParseUint(found[0], 10, 32)
-   if err != nil {
-      return fail("bad stage-1 descriptor from child: %q", found[0])
+   // dpCommit returns an error, dpDerive an exit code: the two shapes are folded
+   // here rather than at every call site.
+   if err := dpCommit(plain, pub, say, !find); err != nil {
+      return fail("%v", err)
    }
-   s2, err := strconv.ParseUint(found[1], 10, 32)
-   if err != nil {
-      return fail("bad stage-2 descriptor from child: %q", found[1])
-   }
-
-   say("stage 1   0x%06x  (descriptor 0x%06x)", heapDesc[uint32(s1)].rva, s1)
-   say("OBF       %s", found[2])
-   say("stage 2   0x%06x  (descriptor 0x%06x)", heapDesc[uint32(s2)].rva, s2)
-   say("in-mutated %s", found[3])
-   say("mapped    %s", found[4])
-   say("plain     %s", found[5])
-
-   d := new(big.Int).SetBytes(plain)
-   priv, err := ecdh.P256().NewPrivateKey(d.FillBytes(make([]byte, 32)))
-   if err != nil {
-      return fail("derived scalar out of range: %v", err)
-   }
-   if got := priv.PublicKey().Bytes()[1:]; !bytes.Equal(got, in.pub) {
-      return fail("scalar does not reproduce %s\n  got  %x\n  want %x", encPubPath, got, in.pub)
-   }
-
-   say("pubkey    MATCH")
-   if err := os.WriteFile(encPlainPath, plain, 0o644); err != nil {
-      return fail("write %s: %v", encPlainPath, err)
-   }
-   psum := sha256.Sum256(plain)
-   say("written   %s  (%d bytes)  sha256 %x", encPlainPath, len(plain), psum)
    return 0
 }
 
-func dpLastLine(s string) string {
-   ls := strings.Split(strings.TrimRight(s, "\r\n"), "\n")
-   return strings.TrimSpace(ls[len(ls)-1])
+// dpSample returns the sample's 0x41-byte key component and its P-256 public key,
+// carving them out of the BLA when -5 has not written them yet.
+func dpSample() (prv, pub []byte, err error) {
+   if !isFile(encPrvPath) || !isFile(encPubPath) {
+      fmt.Printf("carving the key components from %s\n\n", corePath)
+      if err := cmdExtract(); err != nil {
+         return nil, nil, fmt.Errorf("cannot carve %s: %w", corePath, err)
+      }
+      fmt.Println()
+   }
+
+   if prv, err = os.ReadFile(encPrvPath); err != nil {
+      return nil, nil, err
+   }
+   if len(prv) != 0x41 {
+      return nil, nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", encPrvPath, len(prv))
+   }
+   if pub, err = os.ReadFile(encPubPath); err != nil {
+      return nil, nil, err
+   }
+   if len(pub) < 64 {
+      return nil, nil, fmt.Errorf("%s: need at least 64 bytes, got %d", encPubPath, len(pub))
+   }
+   return prv, pub[len(pub)-64:], nil
 }
 
-func dpTag(mode string) string {
-   if mode == "s1" {
-      return "S1"
+// dpScalarPub returns the 32-byte X||Y public key for a scalar, or nil when the
+// scalar is out of range. It is the one implementation of the pipeline's only
+// end-to-end check: d*G must equal extracted.enc.pub. A wrong stage descriptor, key
+// half, buffer choice or permutation cannot produce a scalar whose public point
+// lands on Q.
+func dpScalarPub(plain []byte) []byte {
+   d := new(big.Int).SetBytes(plain)
+   priv, err := ecdh.P256().NewPrivateKey(d.FillBytes(make([]byte, 32)))
+   if err != nil {
+      return nil
    }
-   return "S2"
+   return priv.PublicKey().Bytes()[1:]
 }
 
 // --- stage entry point ------------------------------------------------------
 
+// stageDerivePlain is -7's entry point: apply the cached pairing, or discover the
+// sample's family first if this build has never seen it.
 func stageDerivePlain(args []string) int {
-   // Internal trial modes. Positional, so the command line surface stays at
-   // exactly -1 through -7.
-   if len(args) > 0 && (args[0] == "s1" || args[0] == "s2") {
-      mode, a := args[0], args[1:]
-      if len(a) < 1 {
-         fmt.Fprintln(os.Stderr,
-            "usage: prkf -7 s1 <desc> [prep] | prkf -7 s2 <desc> <obf> [prep] [variant]")
-         return 2
-      }
-      d, err := strconv.ParseUint(a[0], 0, 32)
-      if err != nil {
-         fmt.Printf("%s ERR bad descriptor %q\n", dpTag(mode), a[0])
-         return 5
-      }
-
-      prep, obf, variant := "carve", "", 0
-      if mode == "s1" {
-         if len(a) > 1 {
-            prep = a[1]
-         }
-      } else {
-         if len(a) < 2 {
-            fmt.Fprintln(os.Stderr,
-               "usage: prkf -7 s2 <desc> <obf> [prep] [variant]")
-            return 2
-         }
-         obf = a[1]
-         if len(a) > 2 {
-            prep = a[2]
-         }
-         if len(a) > 3 {
-            v, err := strconv.Atoi(a[3])
-            if err != nil {
-               fmt.Fprintf(os.Stderr, "prkf -7: bad variant %q: %v\n", a[3], err)
-               return 2
-            }
-            variant = v
-         }
-      }
-      return dpWorker(mode, uint32(d), obf, prep, variant)
-   }
    if len(args) > 0 {
       fmt.Fprintf(os.Stderr, "prkf -7: unexpected argument %q\n", args[0])
       return 2
    }
-
-   return dpDriver()
+   return dpDerive(false)
 }
+
+// ---------------------------------------------------------------- the inputs
 
 type dpInputs struct {
    img     []byte
-   fb      []byte
-   secs    []imgSection
-   seg     []imgSpan
-   heaps   []imgDesc
-   merged  []imgInterval
-   prv     []byte
-   pub     []byte
-   mapt    map[int]int
-   cluster uint32
+   sha     string
    sizeImg uint32
-   magic   string
+   prof    *dllProfile
+   fams    []int
+   heaps   []imgDesc
+   seg     []imgSpan
+   merged  []imgInterval
+   cluster map[int]uint32
+   mapt    map[int]map[int]int
 }
 
+// dpLoadInputs reads what the driver needs: the profile, the image, and the census.
+// It does NOT call scanDescs - the census in the profile is that scan's result, and
+// re-running it here would cost the same several gigabytes it costs in -2.
+//
+// The census heap entry is {va, descVA, codeRVA, codeLen} and all four must be read:
+// a version that read it as {descVA, rva, ln} left every descriptor with va == 0,
+// collapsed them onto one map key, and reported "1 heap-exec descriptor".
 func dpLoadInputs() (*dpInputs, error) {
-   in := &dpInputs{}
+   in := &dpInputs{
+      cluster: map[int]uint32{},
+      mapt:    map[int]map[int]int{},
+   }
    var err error
 
+   _, in.sha, err = pfDLL()
+   if err != nil {
+      return nil, err
+   }
+   if in.prof, err = pfRequire(in.sha); err != nil {
+      return nil, err
+   }
+   for k, pm := range in.prof.Map {
+      v, verr := strconv.Atoi(k)
+      if verr != nil {
+         return nil, fmt.Errorf("%s: bad family key %q", profilePath, k)
+      }
+      m := make(map[int]int, len(pm.Map))
+      for mk, mv := range pm.Map {
+         mi, merr := strconv.Atoi(mk)
+         if merr != nil {
+            return nil, fmt.Errorf("%s: bad map key %q", profilePath, mk)
+         }
+         m[mi] = mv
+      }
+      in.cluster[v] = pm.Cluster
+      in.mapt[v] = m
+      in.fams = append(in.fams, v)
+   }
+   slices.Sort(in.fams)
+
+   if in.prof.Census == nil || len(in.prof.Census.Heaps) == 0 {
+      return nil, fmt.Errorf("%s has no census - re-run prkf -2", profilePath)
+   }
    if in.img, err = os.ReadFile(imgPath); err != nil {
       return nil, err
    }
-
-   // oracle_map.json, parsed here rather than in a single-caller helper: the
-   // map, the cluster RVA and the magic sequence all land in dpInputs, and a
-   // separate function would only hand back the same three values.
-   raw, err := os.ReadFile(mapPath)
-   if err != nil {
-      return nil, err
-   }
-   var o dpOracle
-   if err := json.Unmarshal(raw, &o); err != nil {
-      return nil, err
-   }
-   if o.Map == nil {
-      return nil, fmt.Errorf("%s is in the old flat format - re-run prkf -6", mapPath)
-   }
-   in.mapt = make(map[int]int, len(o.Map))
-   for k, v := range o.Map {
-      ki, err := strconv.Atoi(k)
-      if err != nil {
-         return nil, fmt.Errorf("%s: bad map key %q", mapPath, k)
-      }
-      in.mapt[ki] = v
-   }
-   in.cluster, in.magic = uint32(o.Cluster), o.Magic
-
-   if in.prv, err = os.ReadFile(encPrvPath); err != nil {
-      return nil, err
-   }
-   if len(in.prv) != 0x41 {
-      return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", encPrvPath, len(in.prv))
-   }
-   pub, err := os.ReadFile(encPubPath)
-   if err != nil {
-      return nil, err
-   }
-   if len(pub) < 64 {
-      return nil, fmt.Errorf("%s: need at least 64 bytes, got %d", encPubPath, len(pub))
-   }
-   in.pub = pub[len(pub)-64:]
-
-   if in.fb, err = os.ReadFile(dllPath); err != nil {
-      return nil, err
-   }
-   in.sizeImg, in.secs = peSections(in.fb)
-
-   // -7 patches each range once, so unlike -5 it deduplicates by RVA. The
-   // order of first appearance is kept, which is the order the descriptors
-   // appear in the file.
-   segs, heaps := splitDescs(in.fb, in.secs)
-   in.heaps = heaps
-   seen := map[uint32]bool{}
-   for _, d := range segs {
-      for _, sp := range segSpans(in.fb, d, in.sizeImg) {
-         if seen[sp.rva] {
-            continue
-         }
-         seen[sp.rva] = true
-         in.seg = append(in.seg, sp)
-      }
+   in.sizeImg = in.prof.SizeOfImage
+   if uint32(len(in.img)) != in.sizeImg {
+      return nil, fmt.Errorf("%s is %d bytes but this build's SizeOfImage is 0x%x - run prkf -2",
+         imgPath, len(in.img), in.sizeImg)
    }
 
-   in.merged = mergeIntervals(heapIntervals(heaps))
+   for _, h := range in.prof.Census.Heaps {
+      in.heaps = append(in.heaps, imgDesc{va: h[0], descVA: h[1], rva: h[2], ln: h[3]})
+   }
+   for _, s := range in.prof.Census.Spans {
+      in.seg = append(in.seg, imgSpan{rva: s[0], size: s[1]})
+   }
+   in.merged = mergeIntervals(heapIntervals(in.heaps))
    return in, nil
-}
-
-type dpOracle struct {
-   Map     map[string]int `json:"map"`
-   Cluster int            `json:"cluster"`
-   Magic   string         `json:"magic"`
-}
-
-type dpResult struct {
-   kind   string
-   line   string
-   stderr string
-   rc     int
-}
-
-// dpRunChild spawns one trial as `exe -7 <mode> <args...>`. Positional, so no
-// flag is ever involved, and the executable is resolved by the shared helper
-// rather than being threaded through every call site.
-func dpRunChild(mode string, args ...string) dpResult {
-   p := runCollect(append([]string{"-7", mode}, args...), 300*time.Second)
-   if p.timedOut {
-      return dpResult{kind: "TIMEOUT", rc: -1}
-   }
-
-   r := dpResult{kind: "NONE", rc: p.rc}
-   if p.err != nil {
-      r.rc = -1
-   }
-
-   pre := dpTag(mode) + " "
-   for _, x := range strings.Split(string(p.stdout), "\n") {
-      x = strings.TrimSuffix(x, "\r")
-      if !strings.HasPrefix(x, pre) {
-         continue
-      }
-      w := strings.Fields(x)
-      if len(w) < 2 {
-         continue
-      }
-      switch w[1] {
-      case "FAULT":
-         r.kind = "FAULT"
-         r.line = x
-         r.stderr = dpLastLine(string(p.stderr))
-         return r
-      case "OK", "REJECT", "MATCH", "NOMATCH", "ERR":
-         r.kind = w[1]
-         r.line = x
-      }
-   }
-   r.stderr = dpLastLine(string(p.stderr))
-   return r
 }
 
 // plainkey.go end

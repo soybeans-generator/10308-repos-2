@@ -1,5 +1,3 @@
-remove sort
-
 remove bloat
 
 replace hand written ECC

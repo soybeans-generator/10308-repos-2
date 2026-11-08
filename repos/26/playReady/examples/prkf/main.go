@@ -4,67 +4,41 @@
 // prkf is the PlayReady key-extraction pipeline: seven steps, eight files, one
 // binary, one package, one folder.
 //
-//   prkf -1   main.go        carve the CHAI chain, extract the key components
-//   prkf -2   signing.go     locate the signing-key routine descriptor
-//   prkf -3   signing.go     decrypt the signing key
-//   prkf -4   oracle.go      build the nibble oracle
-//   prkf -5   image.go       decrypt the Warbird image
-//   prkf -6   nibblemap.go   derive oracle_map.json
-//   prkf -7   plainkey.go    derive extracted.enc.plain
+//   prkf -1   signing.go     locate the signing-key routine descriptor   DLL
+//   prkf -2   warbird.go     decrypt the Warbird image                   DLL
+//   prkf -3   nibblemap.go   derive the nibble permutation               DLL
+//   prkf -4   stages.go      find the (stage 1, stage 2) pairing         DLL
+//   prkf -5   main.go        carve the CHAI chain, extract key components BLA
+//   prkf -6   signing.go     decrypt the signing key                     BLA
+//   prkf -7   plainkey.go    derive the encryption key                   BLA
 //
-// Three files hold no step of their own: warbird.go is the descriptor format,
-// the PE census, the span and block carving, the kernel ABI, the page patch and
-// the fault handler; child.go is the two bodies this binary re-executes and the
-// trace plumbing they share; main.go is the manifest, the dispatch, and -1.
+// Four files hold no step of their own: warbird.go is the descriptor format, the
+// PE census and the span carving; kernel.go is the kernel ABI, the fault handler
+// and the build profile; child.go is every body this binary re-executes and the
+// plumbing they share; plainkey.go is the apply path -7 uses.
 //
-// A step owns its driver, and a file may hold about 25 KB. The two steps whose
-// driver and child together exceed that (-2 and -7) put the child in child.go -
-// the split -2 needs anyway, since a fault in a descriptor's code kills the
-// process. -6 keeps its sweep child: driver and worker still fit.
+// # RUN ORDER IS FLAG ORDER
 //
-// # DATA FLOW
+// The BLA is required from -4 onward, because finding the pairing means running a
+// sample's real key through the stage routines; -4 carves the key components out
+// of msprcore.bla itself when -5 has not written them yet.
 //
-// Two branches leave -1 and never meet again:
+// That dependency does not propagate. Each routine family has its own chain, so -4
+// records the pairing for its own sample's family and -7 discovers any family it
+// has no pairing for, with its own sample, then caches it.
 //
-//   -1 -> -2 -> -3                  the signing key
-//   -1 -> -4, -5 -> -6 -> -7        the encryption key
+//   -5 -> -1 -> -6                  the signing key
+//   -5 -> -2 -> -3 -> -4 -> -7      the encryption key
 //
-// Every artefact lives under outDir (testdata/), and each name is declared once
-// at the end of this file, so no step spells a path and no two can disagree:
+// Every artefact lives under outDir (testdata/); each name is declared once at the
+// end of this file. dllPath is the one path outside it.
 //
-//   in   msprcore.bla          the PlayReady sample, put here by hand
-//   -1   extracted.{cert,sig.pub,sig.prv,enc.pub,enc.prv}
-//   -2   prsubs.json           signing routine descriptor, keyed by DLL sha256
-//   -2   findprsub.txt         per-descriptor probe log
-//   -3   extracted.sig.plain   signing private scalar, 32 B, plain
-//   -4   oracle/key_NN.pub     nibble oracle public keys, 15 files
-//   -4   oracle/lic_NN.blob    nibble oracle licence blobs, 15 files
-//   -5   wbtool_img.bin        decrypted image, RVA == file offset
-//   -5   decrypt_img.txt       per-block decrypt log
-//   -6   oracle_map.json       nibble permutation + magic sequence
-//   -6   derive_map.txt        sweep log
-//   -7   extracted.enc.plain   encryption private scalar, 32 B, plain
-//   -7   derive_plain.txt      trial log
+// # NO CONCURRENCY
 //
-// dllPath is the one path outside outDir. The module is read, hashed and mapped
-// where Windows installed it, never copied: a descriptor is an RVA into that
-// image, so the bytes hashed and the image executed must be the same one.
-//
-// # CHILD PROCESSES
-//
-// Three steps re-execute this binary rather than working in-process: -2 one
-// child per candidate descriptor, selected by PRKF_PROBE_DESC; -6 one child per
-// (set, licence) sweep, selected by the "sweep" argument; -7 one child per
-// (stage 1, stage 2) trial, selected by "s1"/"s2". The first is an environment
-// variable, so `prkf -h` lists the seven steps and nothing else; the other two
-// are positional, so the command line surface stays at exactly -1 through -7.
-//
-// # EXIT CODES
-//
-// main is the only place that calls os.Exit, with one exception documented at
-// wbVEH: the callback, which has no caller to return to and must not panic.
-// Every worker and stage returns its code instead. Run the steps in order, from
-// the same working directory; `rm -rf testdata` throws the whole run away.
+// There are no goroutines, channels or mutexes anywhere in this program. Speed
+// comes from doing less work per child, not from running children in parallel.
+// main is the only place that calls os.Exit (see wbVEH); every step prints
+// `elapsed`.
 package main
 
 import (
@@ -76,71 +50,72 @@ import (
    "fmt"
    "os"
    "path/filepath"
+   "time"
 )
 
 // ------------------------------------------------- first half: the CHAI chain
 
-// certHdr is the fixed part of one certificate entry, and it is read in four
-// places in parseChain, so it earns a package-level name. The CHAI header's own
-// size is used twice, both inside parseChain, and is a local there.
+// certHdr is the fixed part of one certificate entry, read in four places in
+// parseChain, so it earns a package-level name. The CHAI header's own size is used
+// twice, both inside parseChain, and is a local there.
 const certHdr = 16 // magic(4) version(4) total_length(4) certificate_length(4)
 
 // ------------------------------------------------------------------ manifest
 
-// dllPath is the PlayReady module, read and mapped where Windows installed it.
-// It is the only path in the program outside outDir, and it stays outside on
-// purpose: the descriptor is an RVA into the mapped image, so the bytes hashed
-// here and the image the Warbird gate executes from have to be the same module,
-// and a copy loaded out of testdata/ is a different mapping that the gate is
-// not documented to accept.
+// dllPath is the PlayReady module, read and mapped where Windows installed it. It
+// stays outside outDir on purpose: a descriptor is an RVA into the mapped image,
+// so the bytes hashed and the image the Warbird gate executes must be the same
+// module, and a copy in testdata/ is a different mapping.
 const dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 
 // outDir is the one directory the pipeline uses: the sample it reads and every
-// file it writes. Inputs are fixtures here, not in the working directory, so a
-// run touches nothing outside it and can be discarded as a unit.
-//
-// Nothing else in the pipeline should spell a directory: read and write through
+// file it writes. Nothing else should spell a directory: read and write through
 // dataFile, or through one of the manifest paths below.
 const outDir = "testdata"
 
-// Every file the pipeline reads or writes, named once. The steps below this
-// file use these names and nothing else, so a rename is one line here rather
-// than a hunt through seven files.
+// Every file the pipeline reads or writes, named once, so a rename is one line
+// here rather than a hunt through eight files.
 //
 // They are vars, not consts, only because dataFile resolves outDir; outDir is
 // itself a constant, so the values are fixed for the life of the process.
 var (
-   // The pipeline's one input, read by both halves of -1.
+   // The pipeline's one input, read by -5 and, when -5 has not run, by -4 and -7.
    corePath = dataFile("msprcore.bla")
 
-   // -1 outputs.
+   // --- DLL phase -------------------------------------------------------
+   //
+   // prsubs.json is keyed by the DLL sha256, so this half of the cache was
+   // always sound; it is not folded into the profile because -1 and -6 need
+   // nothing else from it.
+   prsubsPath  = dataFile("prsubs.json")
+   scanLogPath = dataFile("findprsub.txt")
+
+   imgPath    = dataFile("wbtool_img.bin")
+   imgLogPath = dataFile("decrypt_img.txt")
+
+   // The build profile: everything the DLL phase derives, keyed by the DLL's
+   // SHA-256. See kernel.go for why it is keyed by the DLL, not the image.
+   profilePath = dataFile("dllprof.json")
+
+   mapLogPath   = dataFile("derive_map.txt")
+   stageLogPath = dataFile("derive_stages.txt")
+
+   // --- BLA phase -------------------------------------------------------
+   //
+   // -5 outputs. -4 and -7 carve the enc pair themselves when absent.
    certPath   = dataFile("extracted.cert")
    sigPubPath = dataFile("extracted.sig.pub")
    sigPrvPath = dataFile("extracted.sig.prv")
    encPubPath = dataFile("extracted.enc.pub")
    encPrvPath = dataFile("extracted.enc.prv")
 
-   // -2 -> -3.
-   prsubsPath  = dataFile("prsubs.json")
-   scanLogPath = dataFile("findprsub.txt")
-
-   // -3 output.
    sigPlainPath = dataFile("extracted.sig.plain")
-
-   // -4 output directory: oracle/key_NN.pub and oracle/lic_NN.blob.
-   oracleDir = dataFile("oracle")
-
-   // -5 -> -6, -7.
-   imgPath    = dataFile("wbtool_img.bin")
-   imgLogPath = dataFile("decrypt_img.txt")
-
-   // -6 -> -7.
-   mapPath    = dataFile("oracle_map.json")
-   mapLogPath = dataFile("derive_map.txt")
-
-   // -7 output.
    encPlainPath = dataFile("extracted.enc.plain")
    plainLogPath = dataFile("derive_plain.txt")
+
+   // The nibble oracle. Not a step: nibblemap.go builds it on demand when -3
+   // finds it absent. `rm -rf` this directory to force a rebuild.
+   oracleDir = dataFile("oracle")
 )
 
 // cmdCert carves the CHAI certificate chain out of corePath and writes it to
@@ -171,7 +146,6 @@ func cmdCert() error {
       }
       i++
    }
-
    if len(candidates) == 0 {
       return errors.New("no valid CHAI chain found")
    }
@@ -207,8 +181,7 @@ func cmdCert() error {
 
    // ---- context around the chain -----------------------------------
    lo := max(base-16, 0)
-   fmt.Printf("\nbytes 0x%x..0x%x (before CHAI):\n", lo, base)
-   fmt.Printf("  % x\n", buf[lo:base])
+   fmt.Printf("\nbytes 0x%x..0x%x (before CHAI):\n  % x\n", lo, base, buf[lo:base])
    switch {
    case base < 4:
       fmt.Println("  (chain starts before offset 4 - no length prefix possible)")
@@ -219,11 +192,6 @@ func cmdCert() error {
          ch.prefix, totalLength)
    }
 
-   for _, w := range ch.warnings {
-      fmt.Printf("warning: %s\n", w)
-   }
-
-   // ---- write ------------------------------------------------------
    if err := os.WriteFile(certPath, blob, 0o644); err != nil {
       return err
    }
@@ -231,29 +199,22 @@ func cmdCert() error {
    return nil
 }
 
-// cmdExtract implements prkf -1: carve the chain, then extract the keys.
+// cmdExtract implements prkf -5: carve the chain, then extract the keys.
 //
-// The two halves read the same file and write disjoint outputs, so the order
-// is arbitrary. Carving runs first because it is the cheaper structural check
-// on the sample and its failure message is more specific than "not a PRKF".
-//
-// A failure in either half aborts the step: a run that produced a chain but no
-// keys is not a state any later step can use.
+// It is also what -4 and -7 call when the enc pair is absent, which is why it is
+// idempotent: writing the same bytes twice is the price of letting the steps run
+// in flag order.
 func cmdExtract() error {
    if err := cmdCert(); err != nil {
       return err
    }
-   fmt.Println() // separate the two halves' reports
+   fmt.Println()
    return cmdKeys()
 }
 
-// ---------------------------------------------- second half: the key records
-
 // cmdKeys parses the PRKF key-material section and writes the four key
-// components: sigPubPath, sigPrvPath (32 bytes, still obfuscated), encPubPath
-// and encPrvPath (65 bytes). It re-reads corePath rather than taking buf from
-// cmdCert: the two halves are independent, and neither holds state for the
-// other.
+// components. It re-reads corePath rather than taking buf from cmdCert: the two
+// halves are independent, and neither holds state for the other.
 func cmdKeys() error {
    b, err := os.ReadFile(corePath)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
@@ -306,10 +267,9 @@ func cmdKeys() error {
    fmt.Printf("encryption key: %#x  (65-byte private component)\n", enc.off)
 
    // --- signing key: the 32-byte record immediately preceding the encryption
-   //     key.  No field in the PRKF separates it from the other 32-byte record:
-   //     ver/flags/z1/z2 are identical across all three (0x0001 / 0x0100 / 0 / 0)
-   //     and every pubkey occurs exactly twice, so neither header values nor
-   //     cross-reference counts discriminate.
+   //     key. No field separates it from the other 32-byte record: ver/flags/
+   //     z1/z2 are identical across all three and every pubkey occurs exactly
+   //     twice, so neither header values nor reference counts discriminate.
    i := -1
    for j, r := range recs {
       if r == enc {
@@ -317,11 +277,8 @@ func cmdKeys() error {
          break
       }
    }
-   if i < 0 {
-      return fmt.Errorf("internal error: encryption record not found")
-   }
-   if i == 0 {
-      return fmt.Errorf("encryption key is the first record - nothing precedes it")
+   if i <= 0 {
+      return fmt.Errorf("no 32-byte record precedes the encryption key")
    }
 
    sig := recs[i-1]
@@ -349,19 +306,18 @@ func cmdKeys() error {
       }
       fmt.Printf("  %s  %2d B\n", o.path, len(o.b))
    }
-
    return nil
 }
 
 // dataFile returns the path inside outDir for a pipeline file, whether the
-// pipeline reads it or writes it. Both directions go through here, so no step
-// has to know the directory's name and no file can escape it.
+// pipeline reads it or writes it. Both directions go through here, so no step has
+// to know the directory's name and no file can escape it.
 func dataFile(name string) string {
    return filepath.Join(outDir, name)
 }
 
-// ensureOutDir creates outDir if it does not exist. Called once from main
-// before dispatch, so no step has to care.
+// ensureOutDir creates outDir if it does not exist. Called once from main before
+// dispatch, so no step has to care.
 func ensureOutDir() error {
    return os.MkdirAll(outDir, 0o755)
 }
@@ -369,32 +325,24 @@ func ensureOutDir() error {
 // ------------------------------------------------------------------- dispatch
 
 func main() {
-   // A probe child spawned by -2 announces itself through the environment, so
-   // it needs no flag and no argument. Checked first, before the FlagSet
-   // exists, so it never appears in the usage text. A malformed value is an
-   // error out of probeTarget, not an exit inside it.
-   if va, ok, err := probeTarget(); ok {
+   // A probe child spawned by -1 announces itself through the environment, so it
+   // needs no flag and no argument. Checked first, before the FlagSet exists, so
+   // it never appears in the usage text.
+   if vas, ok, err := probeTarget(); ok {
       if err != nil {
          fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
          os.Exit(2)
       }
-      os.Exit(runOne(va))
+      os.Exit(runProbes(vas))
    }
 
-   step1 := flag.Bool("1", false,
-      "carve the CHAI chain ("+certPath+") and the four key components")
-   step2 := flag.Bool("2", false,
-      "locate the signing-key routine ("+prsubsPath+", "+scanLogPath+")")
-   step3 := flag.Bool("3", false,
-      "decrypt the signing key ("+sigPlainPath+")")
-   step4 := flag.Bool("4", false,
-      "build the nibble oracle ("+oracleDir+")")
-   step5 := flag.Bool("5", false,
-      "decrypt the Warbird image ("+imgPath+", "+imgLogPath+")")
-   step6 := flag.Bool("6", false,
-      "derive the nibble map ("+mapPath+", "+mapLogPath+")")
-   step7 := flag.Bool("7", false,
-      "derive the encryption key ("+encPlainPath+", "+plainLogPath+")")
+   step1 := flag.Bool("1", false, "DLL:  locate the signing-key routine")
+   step2 := flag.Bool("2", false, "DLL:  decrypt the Warbird image")
+   step3 := flag.Bool("3", false, "DLL:  derive the nibble permutation")
+   step4 := flag.Bool("4", false, "DLL:  find the (stage 1, stage 2) pairing")
+   step5 := flag.Bool("5", false, "BLA:  carve the CHAI chain and the four key components")
+   step6 := flag.Bool("6", false, "BLA:  decrypt the signing key")
+   step7 := flag.Bool("7", false, "BLA:  derive the encryption key")
 
    flag.Parse()
 
@@ -406,7 +354,6 @@ func main() {
    }
    switch {
    case n == 0:
-      fmt.Fprintln(os.Stderr, "prkf: no step selected")
       flag.Usage()
       os.Exit(2)
    case n > 1:
@@ -414,9 +361,10 @@ func main() {
       os.Exit(2)
    }
 
-   // -1..-5 take no arguments at all. -6 and -7 own their positional worker
-   // modes, so they receive whatever follows the flag verbatim and validate it
-   // themselves; a blanket NArg check here would break their children.
+   // -1, -2, -5 and -6 take no arguments at all. -3 and -4 own their positional
+   // worker modes and -7 owns -4's trial children, so those three receive
+   // whatever follows the flag verbatim and validate it themselves; a blanket
+   // NArg check here would break their children.
    noArgs := func(stage string) bool {
       if flag.NArg() == 0 {
          return true
@@ -431,41 +379,63 @@ func main() {
       os.Exit(1)
    }
 
-   var err error
+   // runStep times one top-level step, prints its duration, and exits with the
+   // step's code. It cannot be a deferred timer inside each stage: main calls
+   // os.Exit with the stage's return value, which unwinds no frames.
+   runStep := func(fn func() int) {
+      t0 := time.Now()
+      code := fn()
+      fmt.Printf("elapsed %s\n", time.Since(t0).Round(time.Millisecond))
+      os.Exit(code)
+   }
+
+   // errCode folds an error-returning step into the code runStep reports.
+   errCode := func(err error) int {
+      if err == nil {
+         return 0
+      }
+      fmt.Fprintln(os.Stderr, err)
+      return 1
+   }
+
    switch {
    case *step1:
       if !noArgs("-1") {
          os.Exit(2)
       }
-      err = cmdExtract()
+      runStep(func() int { return errCode(cmdFindSub()) })
    case *step2:
       if !noArgs("-2") {
          os.Exit(2)
       }
-      err = cmdFindSub()
+      runStep(stageDecryptImg)
    case *step3:
-      if !noArgs("-3") {
-         os.Exit(2)
+      // A positional argument means this process is a sweep child. Its stdout is
+      // parsed, so it exits on the raw code with no duration line.
+      if flag.NArg() > 0 {
+         os.Exit(stageDeriveMap(flag.Args()))
       }
-      err = cmdDecrypt()
+      runStep(func() int { return stageDeriveMap(nil) })
    case *step4:
-      if !noArgs("-4") {
-         os.Exit(2)
+      if flag.NArg() > 0 {
+         os.Exit(stageFindStages(flag.Args()))
       }
-      os.Exit(stageMakeOracle())
+      runStep(func() int { return stageFindStages(nil) })
    case *step5:
       if !noArgs("-5") {
          os.Exit(2)
       }
-      os.Exit(stageDecryptImg())
+      runStep(func() int { return errCode(cmdExtract()) })
    case *step6:
-      os.Exit(stageDeriveMap(flag.Args()))
+      if !noArgs("-6") {
+         os.Exit(2)
+      }
+      runStep(func() int { return errCode(cmdDecrypt()) })
    default:
-      os.Exit(stageDerivePlain(flag.Args()))
-   }
-   if err != nil {
-      fmt.Fprintln(os.Stderr, err)
-      os.Exit(1)
+      if !noArgs("-7") {
+         os.Exit(2)
+      }
+      runStep(func() int { return stageDerivePlain(nil) })
    }
 }
 
@@ -482,16 +452,14 @@ type chain struct {
    totalLength uint32
    flags       uint32
    certCount   uint32
-   warnings    []string
    prefix      uint32
    prefixOK    bool
 }
 
-// parseChain is a self-validating parse of a CHAI chain at base.
-//
-// Only the header fields that are actually used are decoded: the certificate
-// version is not needed to locate anything, and the per-certificate lengths
-// are consumed in the loop rather than retained.
+// parseChain is a self-validating parse of a CHAI chain at base. Only the header
+// fields that are actually used are decoded: the certificate version is not
+// needed to locate anything, and the per-certificate lengths are consumed in the
+// loop rather than retained.
 func parseChain(buf []byte, base int) (*chain, bool) {
    // magic(4) version(4) total_length(4) flags(4) cert_count(4)
    const chaiHdr = 20
@@ -510,13 +478,7 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       return nil, false
    }
 
-   c := &chain{
-      base:        base,
-      totalLength: totalLength,
-      flags:       flags,
-      certCount:   certCount,
-   }
-
+   c := &chain{base: base, totalLength: totalLength, flags: flags, certCount: certCount}
    end := base + int(totalLength)
    off := base + chaiHdr
 
@@ -524,28 +486,10 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       if off+certHdr > end || !bytes.Equal(buf[off:off+4], []byte("CERT")) {
          return nil, false
       }
-
-      // No bounds check needed on these reads: off+certHdr <= end <= len(buf)
-      // was just established, so both fields lie inside the chain.
       cTot := binary.BigEndian.Uint32(buf[off+8:])
-      cLen := binary.BigEndian.Uint32(buf[off+12:])
-
       if cTot < certHdr || off+int(cTot) > end {
          return nil, false
       }
-
-      // An entry is header + certificate body + trailer, and the trailer is
-      // not zero: every entry in a real chain carries a fixed-size signature
-      // block after the certificate (144 bytes in msprcore.bla, 288 for the
-      // leaf, which carries two). So certificate_length is expected to be
-      // smaller than the entry - requiring equality would warn on every
-      // valid chain. The only real defect is a body that does not fit.
-      if cLen > cTot-certHdr {
-         c.warnings = append(c.warnings, fmt.Sprintf(
-            "cert %d @ 0x%x: certificate_length %d exceeds the entry body (%d)",
-            n, off, cLen, cTot-certHdr))
-      }
-
       off += int(cTot)
    }
    if off != end { // entries must tile the chain exactly
@@ -558,12 +502,11 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       c.prefix = p
       c.prefixOK = p == totalLength
    }
-
    return c, true
 }
 
-// keyRecord is one 0x100f record's public and private components. The lengths
-// are len(pub) and len(priv): the record carries them as u32 fields, but every
+// keyRecord is one 0x100f record's public and private components. The lengths are
+// len(pub) and len(priv): the record carries them as u32 fields, but every
 // consumer wants the slice, and a separate field could disagree with it.
 type keyRecord struct {
    off  int
@@ -575,7 +518,6 @@ func parseRec(buf []byte, ps, pe int) *keyRecord {
    if ps+8 > pe {
       return nil
    }
-
    // >HHI : ver(H) flags(H) publen(I)
    publen := int(binary.BigEndian.Uint32(buf[ps+4:]))
    if publen > 0x100 || ps+8+publen+12 > pe {
@@ -590,22 +532,19 @@ func parseRec(buf []byte, ps, pe int) *keyRecord {
    if privlen > 0x200 || q+12+privlen+20 > pe {
       return nil
    }
-
-   priv := buf[q+12 : q+12+privlen]
-   return &keyRecord{off: ps, pub: pub, priv: priv}
+   return &keyRecord{off: ps, pub: pub, priv: buf[q+12 : q+12+privlen]}
 }
 
-// section is a parsed PRKF section header. Only the type and the payload span
-// are retained: the tag, offset and total size are used while walking and
-// have no consumer afterwards.
+// section is a parsed PRKF section header. Only the type and the payload span are
+// retained: the tag, offset and total size are used while walking and have no
+// consumer afterwards.
 type section struct {
    typ, ps, pe int
 }
 
 func walk(buf []byte, start, end int) []section {
    var out []section
-   off := start
-   for off+8 <= end {
+   for off := start; off+8 <= end; {
       typ := int(binary.BigEndian.Uint16(buf[off+2:]))
       total := int(binary.BigEndian.Uint32(buf[off+4:]))
       if total < 8 || off+total > end {

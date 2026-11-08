@@ -1,177 +1,319 @@
 // child.go begin
 //go:build windows
 
-// The two bodies this binary re-executes, and the process plumbing they share.
+// Every body this binary re-executes, and the process plumbing they share.
 //
-//   -2's descriptor probe   probeTarget, runOne, worker, emit, probe
-//   -7's (s1, s2) trial     dpWorker
-//   spawn helpers           selfExe, runCollect, runChild, trace
+//   -4's trials      dpWorkerP1, dpWorkerP2
+//   -3's sweep       dmWorker
+//   trial prep       pfImage, pfPrep, apply
+//   spawn helpers    runCollect, probeBatch, dmSweep
 //
-// Both children take one candidate, run it in a fresh process, and print one
-// terminal verdict line the parent turns into a result kind. -6's sweep child is
-// a different shape - it prints a table of rows for one set - and lives with its
-// driver in nibblemap.go.
+// No goroutines, channels or mutexes anywhere in this program. Speed comes from
+// doing less work per child: the descriptor census is cached in the profile by -2,
+// so a child reads the image and patches a few dozen coalesced runs instead of
+// hashing several gigabytes.
 //
-// # WHY EVERY CHILD IS A SEPARATE PROCESS
+// # WHY A CHILD IS A SEPARATE PROCESS
 //
-// A fault in a descriptor's code is a Windows SEH exception raised inside the
-// DLL, not a Go panic. The Go runtime only converts exceptions on Go-managed
-// stacks into panics, so recover() never runs and the whole process dies.
-// Across 981 arbitrary code blobs that is the normal case, not an edge case:
-// each fault would have to be discovered by crashing, and a crash in the parent
-// would end the scan before it reached the descriptor that matters. One child
-// per descriptor confines a fault to that child; the parent records NO_OUTPUT
-// with the exit status and last trace line and continues.
+// A fault in a descriptor's code is a Windows SEH exception raised inside the DLL,
+// not a Go panic. recover() never runs and the whole process dies, so one child per
+// candidate confines a fault to that candidate. Across 981 arbitrary code blobs that
+// is the normal case, not an edge case.
 //
-// The same reasoning covers -6 and -7: both patch a routine into a loaded image
-// and call it, so both can fault the same way. That is why the process count
-// cannot be reduced - the boundary is the feature - but the spawn code lives
-// here once rather than three times.
+// # WHAT A TRIAL REPORTS
 //
-// NO DEADLINE for the -2 probe. A timeout does not make a hang impossible, it
-// makes it invisible: the driver would print TIMEOUT and move on, and the
-// descriptor that actually hangs would be buried in a line that looks like
-// every other REJECT. A hanging child hangs the run and says so - its trace is
-// streamed into the log as it arrives, so the last line names the phase it
-// never came back from. Interrupt the run and read the log. -6 and -7 do take a
-// deadline, because their children are bounded work rather than open-ended
-// probing.
+// op=3 gets a 0x20-byte key and two 0x20-byte buffers, and a routine may write to
+// either or both. Nothing states which, so every row carries BOTH buffers and the
+// parent decides. Row format, both phases:
+//
+//   RES <i> <half> <a> <b>             two 0x20-byte buffers, hex
+//   RES <i> <half> REJECT rc=.. st=..  the routine refused
+//
+// # THE -3 SWEEP CHILD
+//
+// -3's child is a different shape: one image patch, then every requested family,
+// and a table of rows rather than one verdict. It lives here with the trial
+// children because it shares the prep and the spawn helpers; its driver-side
+// parser is dmSweep below.
 //
 // # EXIT CODES
 //
-// Nothing here calls os.Exit. Both children return their code: 0 after a
-// verdict line, 2 for a bad command line, 4 when the module cannot be loaded,
-// 5 on bad input or a recovered panic, 6 when no fault handler could be
-// installed.
-//
-// NOTE: -2's child is selected by probeEnv; -6's and -7's children are selected
-// positionally. The ABI (keyLen, wbArgs, newWbArgs, callWarbird, loadWarbird,
-// statusOK) is in warbird.go.
+// Nothing here calls os.Exit. Children return their code: 0 after their rows, 2 for
+// a bad command line, 4 when the module cannot be loaded, 5 on bad input or a
+// recovered panic, 6 when no fault handler could be installed.
 package main
 
 import (
    "bufio"
    "bytes"
    "context"
-   "crypto/ecdh"
-   "crypto/rand"
    "encoding/binary"
    "encoding/hex"
+   "encoding/json"
    "fmt"
-   "math/big"
    "os"
    "os/exec"
+   "path/filepath"
    "strconv"
    "strings"
-   "sync"
    "time"
    "unsafe"
 )
 
-// probeEnv carries a descriptor VA into a probe child. runChild sets it,
-// probeTarget reads it, and the parse error names it, so the literal appears
-// three times and a typo in any one of them is a probe child that silently
-// never runs. The environment is used instead of a flag so the child mode never
-// appears in `prkf -h`.
-const probeEnv = "PRKF_PROBE_DESC"
+// ------------------------------------------------------- the -3 sweep child
+
+// dmCLEN is one full bijection set: 64 blocks of 16 bytes, 0x400 in all. It is read
+// by both the scan (nibblemap.go) and the patch, so it lives at package scope.
+const dmCLEN = 0x400
 
 var (
-   // childT0 captures the process start once, so every trace line can carry a
-   // millisecond offset. Reading time.Now() at the trace site would print 0ms
-   // for every line.
-   childT0 = time.Now()
-
-   // selfPath and selfErr are selfExe's cache: three drivers spawn children of
-   // themselves and each needs the same answer.
-   selfOnce sync.Once
-   selfPath string
-   selfErr  error
+   // Static, never-moved scratch handed to native code.
+   dmST  [0x40]byte
+   dmOUT [0x100]byte
+   dmKB  [0x48]byte
+   dmARG [0x40]byte
+   dmCB  []byte
 )
 
-// ------------------------------------------------------- the -7 trial child
+// selfPath and selfErr are resolved once at init: three drivers spawn children of
+// themselves and each needs the same answer.
+var selfPath, selfErr = os.Executable()
 
-// dpWorker is one trial child. It returns the process exit code: 0 after a
-// RESULT line, 4 when the module cannot be loaded, 5 on bad input or a
-// recovered panic, 6 when no fault handler could be installed.
+// dmCall runs the consumer on one blob with the given 0x41-byte key and returns
+// (ntstatus, status dword, 0x20-byte output). It is the one place the consumer's
+// argument block is written:
 //
-// The recover is not a substitute for checking errors: it exists because a
-// panic here would print nothing the parent can parse, and the parent reads
-// "no RESULT line" as NONE. Turning it into the ERR line plus code 5 keeps a
-// programming error distinguishable from a fault in native code.
-func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code int) {
-   t := dpTag(mode)
-   say := func(f string, a ...any) {
-      fmt.Printf("%s "+f+"\n", append([]any{t}, a...)...)
-   }
-   defer func() {
-      if r := recover(); r != nil {
-         say("ERR %v", r)
-         code = 5
-      }
-   }()
+//   +0x00  op = 3
+//   +0x08  descriptor address
+//   +0x10  -> status dword
+//   +0x18  u32 0
+//   +0x1C  -> key       (unaligned: a uintptr, like wbArgs.Out)
+//   +0x24  u32 key size = 0x41
+//   +0x28  -> blob
+//   +0x30  -> output
+//
+// The results are copied out because dmST and dmOUT are reused by the next call.
+func dmCall(base uintptr, desc uint32, prv, blob []byte) (uint32, []byte, []byte) {
+   clear(dmST[:])
+   clear(dmOUT[:])
+   copy(dmKB[:], prv)
+   dmCB = append(dmCB[:0], blob...)
+   a := dmARG[:0x38]
+   binary.LittleEndian.PutUint64(a[0x00:], 3)
+   binary.LittleEndian.PutUint64(a[0x08:], uint64(base)+uint64(desc))
+   binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&dmST[0]))))
+   binary.LittleEndian.PutUint32(a[0x18:], 0)
+   binary.LittleEndian.PutUint64(a[0x1C:], uint64(uintptr(unsafe.Pointer(&dmKB[0]))))
+   binary.LittleEndian.PutUint32(a[0x24:], 0x41)
+   binary.LittleEndian.PutUint64(a[0x28:], uint64(uintptr(unsafe.Pointer(&dmCB[0]))))
+   binary.LittleEndian.PutUint64(a[0x30:], uint64(uintptr(unsafe.Pointer(&dmOUT[0]))))
+   r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), 0x38, 0)
+   return uint32(r), append([]byte(nil), dmST[:4]...), append([]byte(nil), dmOUT[:0x20]...)
+}
 
-   in, err := dpLoadInputs()
+// dmLoadFail prints the LOADFAIL line the parent parses and yields exit code 4.
+func dmLoadFail(f string, a ...any) int {
+   fmt.Printf("LOADFAIL "+f+"\n", a...)
+   return 4
+}
+
+// dmOut validates the field a child prints for one result: exactly 32 bytes of hex.
+// Checking here rather than at the point of use means a format regression is
+// reported against the row that caused it.
+func dmOut(s string) (string, bool) {
+   if len(s) != 0x40 {
+      return "", false
+   }
+   if _, err := hex.DecodeString(s); err != nil {
+      return "", false
+   }
+   return s, true
+}
+
+// dmPrv is a synthetic 0x41-byte key component. Deterministic and free of structure
+// the routine could special-case: the first 0x40 bytes are a fixed non-repeating
+// pattern, and byte 0x40 - the family selector - is the family.
+//
+// Only -3 uses it. -4 drives the real key, because the stage routines reject
+// material that is not real; forcing the table here collapses whatever this key
+// derives, so its bytes cannot matter.
+func dmPrv(family int) []byte {
+   p := make([]byte, 0x41)
+   for i := 0; i < 0x40; i++ {
+      p[i] = byte(i*37 + 0x5A)
+   }
+   p[0x40] = byte(family)
+   return p
+}
+
+// dmWorker is the sweep child. One image patch, then every family: find the live
+// set with one licence, sweep it with fifteen.
+func dmWorker(descArg, famsArg, setsArg string) int {
+   if descArg == "" || famsArg == "" || setsArg == "" {
+      fmt.Fprintln(os.Stderr, "usage: prkf -3 sweep <descRVA> <families> <sets>")
+      return 2
+   }
+   desc, err := strconv.ParseUint(descArg, 0, 32)
    if err != nil {
-      say("ERR %v", err)
-      return 5
+      return dmLoadFail("bad descriptor %q", descArg)
+   }
+   var fams []int
+   for _, x := range strings.Split(famsArg, ",") {
+      n, err := strconv.Atoi(x)
+      if err != nil || n < 0 || n > 2 {
+         return dmLoadFail("bad family %q", x)
+      }
+      fams = append(fams, n)
+   }
+   var sets []uint32
+   for _, x := range strings.Split(setsArg, ",") {
+      n, err := strconv.ParseUint(x, 0, 32)
+      if err != nil {
+         return dmLoadFail("bad set %q", x)
+      }
+      sets = append(sets, uint32(n))
+   }
+   if len(fams) == 0 || len(sets) == 0 {
+      return dmLoadFail("empty family or set list")
    }
 
+   // Every blob is read before the image is touched, so a missing licence fails in
+   // milliseconds instead of after the span patch.
+   blobs := make(map[int][]byte, 15)
+   for nn := 1; nn <= 15; nn++ {
+      b, err := os.ReadFile(filepath.Join(oracleDir, fmt.Sprintf("lic_%02x.blob", nn)))
+      if err != nil {
+         return dmLoadFail("licence %02x: %v", nn, err)
+      }
+      blobs[nn] = b
+   }
+
+   pi, err := pfPrep()
+   if err != nil {
+      return dmLoadFail("%v", err)
+   }
    base, err := loadWarbird()
    if err != nil {
-      say("ERR %v", err)
-      return 4
+      return dmLoadFail("%v", err)
    }
 
-   patched, skipped := 0, 0
-   if prep != "none" {
-      for _, s := range in.seg {
-         if uint64(s.rva)+uint64(s.size) > uint64(len(in.img)) {
-            continue
-         }
-         c := rawAt(in.fb, in.secs, s.rva, s.size)
-         if c == nil || bytes.Equal(in.img[s.rva:s.rva+s.size], c) {
-            continue
-         }
-         runs := []imgRun{{s.rva, s.size}}
-         if prep != "full" {
-            runs = carveRuns(in.merged, s.rva, s.size)
-            if len(runs) == 0 {
-               skipped++
+   patched, skipped := pi.apply(base)
+   fmt.Printf("PATCHED %d skipped %d\n", patched, skipped)
+
+   // A false return means the child runs unprotected: a fault then kills it with no
+   // FAULT line, and the driver reads that as missing rows.
+   if !wbVEH(base, func(s string) {
+      fmt.Println(s)
+   }) {
+      return dmLoadFail("AddVectoredExceptionHandler returned NULL")
+   }
+
+   // A failed patch does not merely skip work: the forced nibble is not forced, so
+   // every row for that set is garbage. It is fatal.
+   force := func(rva uint32, v byte) error {
+      if !wbPatch(base, rva, bytes.Repeat([]byte{v}, dmCLEN)) {
+         return fmt.Errorf("patch set 0x%x: VirtualProtect failed", rva)
+      }
+      return nil
+   }
+   readSet := func(rva uint32) []byte {
+      o := make([]byte, dmCLEN)
+      copy(o, unsafe.Slice((*byte)(wbMemAt(base+uintptr(rva))), dmCLEN))
+      return o
+   }
+
+   for _, f := range fams {
+      prv := dmPrv(f)
+
+      // ---- phase 1: which set does this family read? ----------------------
+      // One licence is enough: forcing 16 different nibbles through a table the
+      // routine actually reads gives 16 different scalars, hence 16 different
+      // outputs. A set it never reads gives the same output 16 times.
+      liveIdx, nLive := -1, 0
+      for i, srva := range sets {
+         orig := readSet(srva)
+         seen := map[string]bool{}
+         ok := true
+         for mm := 0; mm < 16; mm++ {
+            if err := force(srva, byte(mm)); err != nil {
+               return dmLoadFail("%v", err)
             }
+            rc, sd, res := dmCall(base, uint32(desc), prv, blobs[1])
+            if !wbPatch(base, srva, orig) {
+               return dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
+            }
+            if rc != 0 || !statusOK(sd) {
+               ok = false
+               break
+            }
+            seen[hex.EncodeToString(res)] = true
          }
-         for _, x := range runs {
-            if wbPatch(base, x.start, in.img[x.start:x.start+x.length]) {
-               patched++
-            } else {
-               skipped++
+         d := len(seen)
+         if !ok {
+            d = 0
+         }
+         fmt.Printf("PROBE %d %d %d\n", f, i, d)
+         if d == 16 {
+            nLive++
+            if liveIdx < 0 {
+               liveIdx = i
             }
          }
       }
-   }
-   say("PREP %s patched %d skipped %d", prep, patched, skipped)
+      if nLive != 1 {
+         fmt.Printf("NOLIVE %d %d\n", f, nLive)
+         continue
+      }
 
-   if !wbVEH(base, func(s string) {
-      say("%s", s)
-   }) {
-      say("ERR AddVectoredExceptionHandler returned NULL - a fault would be invisible")
-      return 6
-   }
+      srva := sets[liveIdx]
+      fmt.Printf("LIVE %d %d 0x%x\n", f, liveIdx, srva)
 
-   // op3 is not newWbArgs: it passes a variable args length (the whole point of
-   // the variant matrix) and writes a second size dword at +0x2C, which is
-   // wbArgs's blank padding and therefore unaddressable from Go.
-   //
-   // No runtime.KeepAlive is needed: syscall.(*LazyProc).Call is declared
-   // //go:uintptrescapes, so the compiler treats every converted pointer here as
-   // escaping for the duration of the call. a is a local array and stays put;
-   // status, key and out are read again by the caller after op3 returns, which
-   // keeps their backing arrays live regardless.
-   op3 := func(descRVA, ln uint32, status, key, out []byte, size2 *uint32) uint32 {
+      // ---- phase 2: the full permutation ---------------------------------
+      // Forced nibble outer, licence inner: one protection flip per forced value
+      // instead of one per call.
+      orig := readSet(srva)
+      for mm := 0; mm < 16; mm++ {
+         if err := force(srva, byte(mm)); err != nil {
+            return dmLoadFail("%v", err)
+         }
+         for nn := 1; nn <= 15; nn++ {
+            rc, sd, res := dmCall(base, uint32(desc), prv, blobs[nn])
+            fmt.Printf("OUT %d %02x %02x rc=0x%08x st=%x %x\n", f, nn, mm, rc, sd, res)
+         }
+         if !wbPatch(base, srva, orig) {
+            return dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
+         }
+      }
+   }
+   return 0
+}
+
+// dpHalf returns one 0x20-byte half of the key component. Byte 0x40 is the family
+// selector and is never handed to a stage.
+func dpHalf(prv []byte, h int) []byte {
+   if h == 1 {
+      return prv[0x20:0x40]
+   }
+   return prv[0:0x20]
+}
+
+// dpOp3 issues one WbHeapExecuteCall. It returns a closure over `base`, because a
+// plain function would need nine parameters to say the same thing.
+//
+// It is not newWbArgs: the trial path passes a variable args length and writes a
+// second size dword at +0x2C, which is wbArgs's blank padding and therefore
+// unaddressable from Go.
+//
+// No runtime.KeepAlive is needed: syscall.(*LazyProc).Call is declared
+// //go:uintptrescapes, so the compiler treats every converted pointer here as
+// escaping for the duration of the call.
+func dpOp3(base uintptr) func(descRVA, ln uint32, status, kb, out []byte, size2 *uint32) uint32 {
+   return func(descRVA, ln uint32, status, kb, out []byte, size2 *uint32) uint32 {
       var a [0x40]byte
       binary.LittleEndian.PutUint64(a[0x00:], 3)
       binary.LittleEndian.PutUint64(a[0x08:], uint64(base)+uint64(descRVA))
       binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&status[0]))))
-      binary.LittleEndian.PutUint64(a[0x18:], uint64(uintptr(unsafe.Pointer(&key[0]))))
+      binary.LittleEndian.PutUint64(a[0x18:], uint64(uintptr(unsafe.Pointer(&kb[0]))))
       binary.LittleEndian.PutUint32(a[0x20:], 0x20)
       binary.LittleEndian.PutUint64(a[0x24:], uint64(uintptr(unsafe.Pointer(&out[0]))))
       if size2 != nil {
@@ -180,307 +322,446 @@ func dpWorker(mode string, desc uint32, obfHex, prep string, variant int) (code 
       r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
       return uint32(r)
    }
+}
 
-   if mode == "s1" {
-      st := make([]byte, 0x40)
-      kb := make([]byte, 0x40)
-      ob := make([]byte, 0x40)
-      copy(kb, in.prv[:0x20])
+// dpPrepChild loads what a trial needs and patches the image. It is the one place a
+// child pays its fixed cost, so both trial bodies call it and nothing else does.
+func dpPrepChild() (op3 func(uint32, uint32, []byte, []byte, []byte, *uint32) uint32,
+   prv []byte, code int, err error) {
 
-      rc := op3(desc, 0x2C, st, kb, ob, nil)
-      sd := st[:4]
-      var zero [0x20]byte
-      if rc != 0 || !statusOK(sd) || bytes.Equal(ob[:0x20], zero[:]) {
-         say("REJECT rc=0x%08x st=%s out=%s",
-            rc, hex.EncodeToString(sd), hex.EncodeToString(ob[:0x20]))
-      } else {
-         say("OK %s", hex.EncodeToString(ob[:0x20]))
-      }
-      return 0
-   }
-
-   obf, err := hex.DecodeString(obfHex)
+   pi, err := pfPrep()
    if err != nil {
-      say("ERR %v", err)
-      return 5
+      return nil, nil, 5, err
    }
+   if prv, err = dpPrv(); err != nil {
+      return nil, nil, 5, err
+   }
+   base, err := loadWarbird()
+   if err != nil {
+      return nil, nil, 4, err
+   }
+   pi.apply(base)
 
-   var in1, in2 []byte
-   switch variant {
-   case 2:
-      in1, in2 = make([]byte, 0x20), make([]byte, 0x20)
-   case 1:
-      in1, in2 = obf, make([]byte, 0x20)
-   default:
-      in1, in2 = obf, in.prv[0x20:0x40]
+   if !wbVEH(base, func(s string) { fmt.Println(s) }) {
+      return nil, nil, 6, fmt.Errorf("AddVectoredExceptionHandler returned NULL")
    }
+   return dpOp3(base), prv, 0, nil
+}
 
-   ln := uint32(0x30)
-   if variant == 3 {
-      ln = 0x2C
+// ------------------------------------------------------- the -4 trial child
+
+// dpPrv reads the sample's 0x41-byte key component. Every trial drives it: the
+// stage routines reject key material that is not real, which is why a synthetic key
+// made the search unfindable.
+func dpPrv() ([]byte, error) {
+   prv, err := os.ReadFile(encPrvPath)
+   if err != nil {
+      return nil, fmt.Errorf("missing %s - run prkf -5 first", encPrvPath)
    }
+   if len(prv) != 0x41 {
+      return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", encPrvPath, len(prv))
+   }
+   return prv, nil
+}
+
+// dpStage1 is the stage-1 call: a 0x20-byte key half in the key buffer, 0x2C bytes
+// of arguments, no second size. Both buffers are returned, because which one the
+// routine treats as its output is not established.
+func dpStage1(op3 func(uint32, uint32, []byte, []byte, []byte, *uint32) uint32,
+   desc uint32, key []byte) (out, kb []byte, rc uint32, st []byte) {
+
+   st1 := make([]byte, 0x40)
+   b1 := make([]byte, 0x40)
+   b2 := make([]byte, 0x40)
+   copy(b1, key)
+
+   rc = op3(desc, 0x2C, st1, b1, b2, nil)
+   return b2[:0x20], b1[:0x20], rc, st1[:4]
+}
+
+// dpStage2 runs one stage-2 trial: the OBF in the key buffer, a 0x20-byte key half
+// in the output buffer, 0x30 bytes of arguments with a second size dword.
+func dpStage2(op3 func(uint32, uint32, []byte, []byte, []byte, *uint32) uint32,
+   desc uint32, obf, key []byte) (kb, out []byte, rc uint32, st []byte) {
 
    st2 := make([]byte, 0x40)
-   ib := make([]byte, 0x40)
-   ob2 := make([]byte, 0x40)
-   copy(ib, in1)
-   copy(ob2, in2)
+   b1 := make([]byte, 0x40)
+   b2 := make([]byte, 0x40)
+   copy(b1, obf)
+   copy(b2, key)
 
-   var s2 *uint32
-   if variant != 3 {
-      v := uint32(0x20)
-      s2 = &v
+   sz := uint32(0x20)
+   rc = op3(desc, 0x30, st2, b1, b2, &sz)
+   return b1[:0x20], b2[:0x20], rc, st2[:4]
+}
+
+// dpWorkerP1 is the stage-1 probe: every candidate, both key halves, both buffers.
+//
+// Reporting both buffers is what makes the search exhaustive rather than a guess:
+// the routine is handed a 0x20-byte key and two 0x20-byte buffers, and nothing
+// establishes which one it treats as output.
+func dpWorkerP1(descs []uint32) (code int) {
+   say := func(f string, a ...any) { fmt.Printf("S1 "+f+"\n", a...) }
+   defer func() {
+      if r := recover(); r != nil {
+         say("ERR %v", r)
+         code = 5
+      }
+   }()
+
+   op3, prv, code, err := dpPrepChild()
+   if err != nil {
+      say("ERR %v", err)
+      return code
    }
 
-   if rc := op3(desc, ln, st2, ib, ob2, s2); rc != 0 || !statusOK(st2) {
-      say("REJECT var=%d rc=0x%08x st=%s", variant, rc, hex.EncodeToString(st2[:4]))
-      return 0
-   }
-   mut := ib[:0x20]
-
-   // stage 3: 64 per-nibble subtables, stage 4: 16-entry permutation
-   nibs := func(x []byte) []byte {
-      ns := make([]byte, 64)
-      for i := range ns {
-         sh := uint(0)
-         if i%2 == 0 {
-            sh = 4
+   for i, d := range descs {
+      for h := 0; h < 2; h++ {
+         out, kb, rc, sd := dpStage1(op3, d, dpHalf(prv, h))
+         if rc != 0 || !statusOK(sd) {
+            say("RES %d %d REJECT rc=0x%08x st=%s", i, h, rc, hex.EncodeToString(sd))
+            continue
          }
-         ns[i] = x[i>>1] >> sh & 0xF
+         say("RES %d %d %s %s", i, h, hex.EncodeToString(out), hex.EncodeToString(kb))
       }
-      return ns
    }
-   pack := func(ns []byte) []byte {
-      out := make([]byte, 32)
-      for i := 0; i < 64; i += 2 {
-         out[i/2] = ns[i]<<4 | ns[i+1]
-      }
-      return out
-   }
-
-   nm := nibs(mut)
-   mp := make([]byte, 64)
-   for i := range mp {
-      mp[i] = in.img[int(in.cluster)+i*16+int(nm[i])]
-   }
-   mapped := pack(mp)
-
-   nn := nibs(mapped)
-   pl := make([]byte, 64)
-   for i := range pl {
-      v, ok := in.mapt[int(nn[i])]
-      if !ok {
-         panic(fmt.Sprintf("KeyError: %d", nn[i]))
-      }
-      pl[i] = byte(v)
-   }
-   plain := pack(pl)
-
-   d := new(big.Int).SetBytes(plain)
-   res := "NOMATCH"
-   priv, err := ecdh.P256().NewPrivateKey(d.FillBytes(make([]byte, 32)))
-   if err == nil && bytes.Equal(priv.PublicKey().Bytes()[1:], in.pub) {
-      res = "MATCH"
-   }
-   say("%s var=%d mut=%s mapped=%s plain=%s", res, variant,
-      hex.EncodeToString(mut),
-      hex.EncodeToString(mapped),
-      hex.EncodeToString(plain))
    return 0
 }
 
-// ------------------------------------------------------------ the -2 probe
-
-// probeTarget reports whether this process was started as a probe child, and
-// for which descriptor. Called from main before the FlagSet exists.
-//
-// A malformed value is returned rather than exited on: main is the only place
-// in the program that terminates, and it already knows the exit code for a bad
-// command line.
-func probeTarget() (uint32, bool, error) {
-   s := os.Getenv(probeEnv)
-   if s == "" {
-      return 0, false, nil
-   }
-   v, err := strconv.ParseUint(s, 0, 32)
-   if err != nil {
-      return 0, true, fmt.Errorf("%s=%q: %w", probeEnv, s, err)
-   }
-   return uint32(v), true, nil
-}
-
-// runOne is the probe child's whole body. It returns the process exit code:
-// 0 after emit has printed the RESULT line, 2 if the module or a probe could
-// not be set up.
-func runOne(descVA uint32) int {
-   trace("start desc=%#x keyLen=%#x", descVA, keyLen)
-
-   // Two distinct 32-byte inputs: the routine must map them to distinct
-   // outputs, which is what distinguishes a transform from a copy.
-   inputA := make([]byte, keyLen)
-   for i := range inputA {
-      inputA[i] = byte(i)
-   }
-   inputB := make([]byte, keyLen)
-   for i := range inputB {
-      inputB[i] = byte(keyLen + i)
-   }
-   trace("inputs built")
-
-   base, err := loadWarbird()
-   if err != nil {
-      trace("loadWarbird failed: %v", err)
-      fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
-      return 2
-   }
-   trace("dll loaded base=%#x", base)
-
-   w := &worker{
-      base:   base, // HMODULE == image base for a DLL
-      descVA: descVA,
-   }
-
-   a, err := w.probe("A", inputA, keyLen)
-   if err != nil {
-      trace("probe A failed: %v", err)
-      fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
-      return 2
-   }
-   b, err := w.probe("B", inputB, keyLen)
-   if err != nil {
-      trace("probe B failed: %v", err)
-      fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
-      return 2
-   }
-   c, err := w.probe("C", inputA, keyLen-1) // one byte short - must be rejected
-   if err != nil {
-      trace("probe C failed: %v", err)
-      fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
-      return 2
-   }
-   trace("all probes done")
-   return w.emit(a, b, c, inputA, inputB)
-}
-
-// selfExe resolves this binary's own path once. A failure is a property of the
-// process rather than of any one step, so it is resolved on first use and
-// reused, and each caller decides what its own error message should say.
-func selfExe() (string, error) {
-   selfOnce.Do(func() {
-      selfPath, selfErr = os.Executable()
-   })
-   return selfPath, selfErr
-}
-
-// ------------------------------------------------------------ trace + spawn
-
-// trace writes one timestamped line to the child's stderr. Writes to stderr are
-// unbuffered syscalls, so the line is out of this process before the next
-// statement runs - including when the next statement is the kernel call that
-// never returns. The parent streams these lines straight into the log, so the
-// last trace line for a descriptor names the phase that stalled.
-func trace(format string, a ...any) {
-   fmt.Fprintf(os.Stderr, "[pid %d +%dms] %s\n",
-      os.Getpid(), time.Since(childT0).Milliseconds(), fmt.Sprintf(format, a...))
-}
-
-type childOut struct {
-   line    string        // the RESULT line, synthesized if the child died
-   elapsed time.Duration // wall clock for the whole child
-   exit    string        // "ok" or cmd.Run()'s error
-}
-
-// runChild re-executes this binary as the worker for one descriptor.
-//
-// w receives the child's trace lines as they arrive and writes them to the
-// step's log. They are not buffered until the child exits: a child that hangs
-// never exits, and the hang is precisely the case where the last line written
-// is the only evidence there is.
-func runChild(idx int, descVA uint32, w func(string)) childOut {
-   exe, err := selfExe()
-   if err != nil {
-      return childOut{
-         line: fmt.Sprintf("RESULT %#x NO_OUTPUT exit=%v", descVA, err),
-         exit: err.Error(),
+// dpWorkerP2 is the stage-2 probe: every (candidate, OBF, key half) from `start`
+// onwards. The index is flattened as (di*len(obfs)+oi)*2+h, so a resume point is one
+// integer.
+func dpWorkerP2(start int, obfs []string, descs []uint32) (code int) {
+   say := func(f string, a ...any) { fmt.Printf("MX "+f+"\n", a...) }
+   defer func() {
+      if r := recover(); r != nil {
+         say("ERR %v", r)
+         code = 5
       }
+   }()
+
+   op3, prv, code, err := dpPrepChild()
+   if err != nil {
+      say("ERR %v", err)
+      return code
    }
 
-   cmd := exec.Command(exe)
-   cmd.Env = append(os.Environ(), probeEnv+"="+fmt.Sprintf("%#x", descVA))
+   n := len(obfs)
+   for idx := start; idx < len(descs)*n*2; idx++ {
+      di := idx / (n * 2)
+      oi, h := (idx%(n*2))/2, idx%2
+      obf, err := hex.DecodeString(obfs[oi])
+      if err != nil || len(obf) != 0x20 {
+         say("ERR bad obf %q", obfs[oi])
+         return 5
+      }
+      kb, out, rc, st := dpStage2(op3, descs[di], obf, dpHalf(prv, h))
+      if rc != 0 || !statusOK(st) {
+         say("RES %d %d REJECT rc=0x%08x st=%s", idx, h, rc, hex.EncodeToString(st))
+         continue
+      }
+      say("RES %d %d %s %s", idx, h, hex.EncodeToString(kb), hex.EncodeToString(out))
+   }
+   return 0
+}
+
+// probeBatch re-executes this binary as a probe child for a list of descriptors and
+// returns the RESULT line each one produced, keyed by descriptor VA. A descriptor
+// with no line faulted or was never reached, and the caller retries it alone.
+//
+// stderr is streamed into w as it arrives rather than buffered: a child that hangs
+// never exits, and the last trace line is the only evidence of where.
+func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
+   out := map[uint32]string{}
+   if len(descs) == 0 {
+      return out
+   }
+   if selfErr != nil {
+      w(fmt.Sprintf("  spawn: %v", selfErr))
+      return out
+   }
+
+   vas := make([]string, len(descs))
+   for i, d := range descs {
+      vas[i] = fmt.Sprintf("%#x", d.descVA)
+   }
+   cmd := exec.Command(selfPath)
+   cmd.Env = append(os.Environ(), probeEnv+"="+strings.Join(vas, ","))
 
    var stdout bytes.Buffer
    cmd.Stdout = &stdout
 
    er, err := cmd.StderrPipe()
    if err != nil {
-      return childOut{
-         line: fmt.Sprintf("RESULT %#x NO_OUTPUT exit=%v", descVA, err),
-         exit: err.Error(),
-      }
+      w(fmt.Sprintf("  stderr pipe: %v", err))
+      return out
    }
-
-   t0 := time.Now()
    if err := cmd.Start(); err != nil {
-      return childOut{
-         line: fmt.Sprintf("RESULT %#x NO_OUTPUT exit=%v", descVA, err),
-         exit: err.Error(),
-      }
+      w(fmt.Sprintf("  start: %v", err))
+      return out
    }
 
-   // Only the last non-empty trace line is ever reported, so it is tracked as
-   // the lines arrive rather than by keeping them all.
-   var last string
    sc := bufio.NewScanner(er)
    sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
    for sc.Scan() {
-      line := sc.Text()
-      if s := strings.TrimSpace(line); s != "" {
-         last = s
-      }
-      w(fmt.Sprintf("  trace[%d %#x] %s", idx, descVA, line))
+      w("  " + sc.Text())
    }
-   // sc.Err is the only signal that the trace ended early: a line past the
-   // 1 MiB cap, or a read fault on the pipe. Dropped, it would make a
+   // sc.Err is the only signal that the trace ended early. Dropped, it would make a
    // truncated trace indistinguishable from a complete one.
    if serr := sc.Err(); serr != nil {
-      w(fmt.Sprintf("  trace[%d %#x] TRACE TRUNCATED: %v", idx, descVA, serr))
+      w(fmt.Sprintf("  TRACE TRUNCATED: %v", serr))
    }
 
-   // Reading to EOF before Wait is the documented pattern: Wait closes the
-   // pipe, so every trace line is in the log before the summary below.
-   err = cmd.Wait()
-   el := time.Since(t0)
-
-   exit := "ok"
-   if err != nil {
-      exit = err.Error()
+   // Reading to EOF before Wait is the documented pattern: Wait closes the pipe, so
+   // every trace line is in the log before the rows are read.
+   if err := cmd.Wait(); err != nil {
+      w(fmt.Sprintf("  exit: %v", err))
    }
 
    for _, l := range strings.Split(stdout.String(), "\n") {
       l = strings.TrimRight(l, "\r")
-      if strings.HasPrefix(l, "RESULT") {
-         return childOut{line: l, elapsed: el, exit: exit}
+      if !strings.HasPrefix(l, "RESULT ") {
+         continue
+      }
+      f := strings.Fields(l)
+      if len(f) < 2 {
+         continue
+      }
+      if va, err := strconv.ParseUint(f[1], 0, 32); err == nil {
+         out[uint32(va)] = l
       }
    }
+   return out
+}
 
-   // No RESULT line: the child died, or it never got as far as printing one.
-   // The last trace line says which phase it was in.
-   return childOut{
-      line:    fmt.Sprintf("RESULT %#x NO_OUTPUT exit=%s last=%q", descVA, exit, last),
-      elapsed: el,
-      exit:    exit,
+// dmFam is one family's rows from a sweep child.
+type dmFam struct {
+   nLive   int
+   liveIdx int
+   liveRVA uint32
+   outs    map[int]map[int]string // licence -> forced nibble -> hex
+}
+
+// dmResult is one sweep child, parsed.
+type dmResult struct {
+   fams     map[int]*dmFam
+   meta     []string
+   fault    string
+   loadfail string
+   rc       int
+}
+
+// dmSweep spawns one sweep child for the given families and parses its rows.
+func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
+   fs := make([]string, len(fams))
+   for i, x := range fams {
+      fs[i] = strconv.Itoa(x)
    }
+   rs := make([]string, len(sets))
+   for i, x := range sets {
+      rs[i] = fmt.Sprintf("0x%x", x)
+   }
+   p := runCollect([]string{
+      "-3", "sweep",
+      fmt.Sprintf("0x%x", descRVA),
+      strings.Join(fs, ","),
+      strings.Join(rs, ","),
+   }, 30*time.Minute)
+
+   r := dmResult{fams: map[int]*dmFam{}, rc: p.rc}
+   if p.err != nil {
+      r.loadfail = "LOADFAIL " + p.err.Error()
+      return r
+   }
+
+   fam := func(i int) *dmFam {
+      if r.fams[i] == nil {
+         r.fams[i] = &dmFam{liveIdx: -1, outs: map[int]map[int]string{}}
+      }
+      return r.fams[i]
+   }
+
+   for _, ln := range strings.Split(string(p.stdout), "\n") {
+      f := strings.Fields(ln)
+      if len(f) < 2 {
+         continue
+      }
+      switch f[0] {
+      case "PATCHED":
+         r.meta = append(r.meta, ln)
+      case "LOADFAIL":
+         r.loadfail = ln
+      case "FAULT":
+         r.fault = ln
+      case "LIVE":
+         if len(f) < 4 {
+            r.loadfail = "LOADFAIL malformed LIVE row: " + ln
+            return r
+         }
+         v, e1 := strconv.Atoi(f[1])
+         i, e2 := strconv.Atoi(f[2])
+         rva, e3 := strconv.ParseUint(f[3], 0, 32)
+         if e1 != nil || e2 != nil || e3 != nil {
+            r.loadfail = "LOADFAIL malformed LIVE row: " + ln
+            return r
+         }
+         fm := fam(v)
+         fm.liveIdx, fm.liveRVA, fm.nLive = i, uint32(rva), 1
+      case "NOLIVE":
+         if len(f) < 3 {
+            r.loadfail = "LOADFAIL malformed NOLIVE row: " + ln
+            return r
+         }
+         v, e1 := strconv.Atoi(f[1])
+         n, e2 := strconv.Atoi(f[2])
+         if e1 != nil || e2 != nil {
+            r.loadfail = "LOADFAIL malformed NOLIVE row: " + ln
+            return r
+         }
+         fm := fam(v)
+         fm.nLive, fm.liveRVA = n, 0
+      case "OUT":
+         if len(f) < 6 {
+            r.loadfail = "LOADFAIL malformed OUT row: " + ln
+            return r
+         }
+         v, e1 := strconv.Atoi(f[1])
+         nn, e2 := strconv.ParseInt(f[2], 16, 64)
+         mm, e3 := strconv.ParseInt(f[3], 16, 64)
+         if e1 != nil || e2 != nil || e3 != nil {
+            r.loadfail = "LOADFAIL malformed OUT row: " + ln
+            return r
+         }
+         val, ok := dmOut(f[len(f)-1])
+         if !ok {
+            r.loadfail = "LOADFAIL OUT value is not 32 hex bytes: " + ln
+            return r
+         }
+         fm := fam(v)
+         if fm.outs[int(nn)] == nil {
+            fm.outs[int(nn)] = map[int]string{}
+         }
+         fm.outs[int(nn)][int(mm)] = val
+      }
+   }
+   return r
 }
 
-type probeResult struct {
-   ntstatus uint32
-   status   []byte // the 4 status bytes the routine wrote
-   out      []byte
-   fill     []byte
+// dmSweepAll is dmSweep plus the fault fallback: one child covers all families, so
+// a fault costs every family at once. Re-running one family at a time salvages the
+// ones that did not fault, and costs nothing when the batch succeeds.
+func dmSweepAll(descRVA uint32, fams []int, sets []uint32, logf func(string, ...any)) dmResult {
+   r := dmSweep(descRVA, fams, sets)
+   if r.loadfail != "" || len(fams) <= 1 {
+      return r
+   }
+   if r.fault == "" && r.rc == 0 {
+      return r
+   }
+
+   logf("  batch child stopped early - retrying one family at a time")
+   for _, f := range fams {
+      if fm, ok := r.fams[f]; ok && (fm.nLive != 1 || len(fm.outs) == 15) {
+         continue
+      }
+      one := dmSweep(descRVA, []int{f}, sets)
+      if one.loadfail != "" {
+         r.loadfail = one.loadfail
+         return r
+      }
+      if fm, ok := one.fams[f]; ok {
+         r.fams[f] = fm
+      }
+   }
+   r.fault = ""
+   return r
 }
 
-// procOut is one collected child run: everything the -6 and -7 drivers need to
-// turn a child into a result, and nothing else.
+// ------------------------------------------------------------- the trial prep
+
+// pfImage is everything a trial child or a -3 sweep needs: the decrypted image, the
+// census, and the patch plan. It deliberately does NOT include the module: a child
+// used to read the DLL and re-run scanDescs, which hashes several gigabytes, and
+// that was the cost of every child and therefore of every fault.
+type pfImage struct {
+   sha    string
+   size   uint32
+   img    []byte
+   heaps  []imgDesc
+   spans  []imgSpan
+   merged []imgInterval
+}
+
+// pfPrep loads the census and the image. The size check is what proves the image on
+// disk came from this build: the image's own hash changes every run, because
+// LoadLibraryW bakes the load base into relocated fields, but SizeOfImage is a
+// per-build constant.
+func pfPrep() (*pfImage, error) {
+   raw, err := os.ReadFile(profilePath)
+   if err != nil {
+      return nil, fmt.Errorf("no %s - run prkf -2 first", profilePath)
+   }
+   var p dllProfile
+   if err := json.Unmarshal(raw, &p); err != nil {
+      return nil, fmt.Errorf("%s: %v", profilePath, err)
+   }
+   if p.Census == nil || len(p.Census.Heaps) == 0 {
+      return nil, fmt.Errorf("%s has no census - re-run prkf -2", profilePath)
+   }
+
+   pi := &pfImage{sha: p.DLLSHA256, size: p.SizeOfImage}
+   if pi.img, err = os.ReadFile(imgPath); err != nil {
+      return nil, err
+   }
+   if uint32(len(pi.img)) != pi.size {
+      return nil, fmt.Errorf("%s is %d bytes but this build's SizeOfImage is 0x%x - run prkf -2",
+         imgPath, len(pi.img), pi.size)
+   }
+
+   for _, h := range p.Census.Heaps {
+      pi.heaps = append(pi.heaps, imgDesc{va: h[0], descVA: h[1], rva: h[2], ln: h[3]})
+   }
+   for _, s := range p.Census.Spans {
+      pi.spans = append(pi.spans, imgSpan{rva: s[0], size: s[1]})
+   }
+   pi.merged = mergeIntervals(heapIntervals(pi.heaps))
+   return pi, nil
+}
+
+// apply patches the segment plaintext into the loaded image, carving around the
+// heap-exec blocks the kernel decrypts itself.
+//
+// Every span is written, not just the ones that differ from the file: writing the
+// image's own bytes over an unencrypted span is a no-op, and skipping the comparison
+// is what lets a child avoid reading the module at all. The runs are coalesced
+// first, so the protection flips number in the dozens.
+func (p *pfImage) apply(base uintptr) (patched, skipped int) {
+   var runs []imgRun
+   for _, s := range p.spans {
+      if uint64(s.rva)+uint64(s.size) > uint64(len(p.img)) {
+         continue
+      }
+      r := carveRuns(p.merged, s.rva, s.size)
+      if len(r) == 0 {
+         skipped++
+         continue
+      }
+      runs = append(runs, r...)
+   }
+
+   for _, r := range coalesceRuns(runs) {
+      if wbPatch(base, r.start, p.img[r.start:r.start+r.length]) {
+         patched++
+      } else {
+         skipped++
+      }
+   }
+   return patched, skipped
+}
+
+// ------------------------------------------------------------ spawn helpers
+
+// procOut is one collected child run.
 type procOut struct {
    stdout   []byte
    stderr   []byte
@@ -489,24 +770,18 @@ type procOut struct {
    err      error // set only when the process could not be run at all
 }
 
-// runCollect spawns this binary with args under a deadline and returns its
-// output. A non-zero exit is reported as rc, not as an error: every child
-// signals failure that way on purpose, and the caller parses stdout for the
-// reason. err is non-nil only when the process could not be started.
-//
-// This is the -6 and -7 drivers' shared plumbing. -2's runChild is deliberately
-// not built on it: that child's stderr is streamed line by line into the scan
-// log while it runs, which a buffered helper cannot do, and a hang there is
-// diagnosed from the last streamed line rather than from an exit code.
+// runCollect spawns this binary with args under a deadline and returns its output.
+// A non-zero exit is reported as rc, not as an error: every child signals failure
+// that way on purpose, and the caller parses stdout for the reason. err is non-nil
+// only when the process could not be started.
 func runCollect(args []string, timeout time.Duration) procOut {
-   exe, err := selfExe()
-   if err != nil {
-      return procOut{rc: -1, err: err}
+   if selfErr != nil {
+      return procOut{rc: -1, err: selfErr}
    }
    ctx, cancel := context.WithTimeout(context.Background(), timeout)
    defer cancel()
 
-   cmd := exec.CommandContext(ctx, exe, args...)
+   cmd := exec.CommandContext(ctx, selfPath, args...)
    var so, se bytes.Buffer
    cmd.Stdout = &so
    cmd.Stderr = &se
@@ -526,77 +801,6 @@ func runCollect(args []string, timeout time.Duration) procOut {
       p.err = runErr
    }
    return p
-}
-
-type worker struct {
-   base   uintptr
-   descVA uint32
-}
-
-// emit prints the RESULT line and returns the process exit code, 0.
-func (w *worker) emit(a, b, c *probeResult, inputA, inputB []byte) int {
-   // sawSuccess is NTSTATUS 0 AND a zero status dword - not NTSTATUS alone.
-   okA := a.ntstatus == 0 && statusOK(a.status) &&
-      !bytes.Equal(a.out, a.fill) && !bytes.Equal(a.out, inputA)
-   okB := b.ntstatus == 0 && statusOK(b.status) &&
-      !bytes.Equal(b.out, b.fill) && !bytes.Equal(b.out, inputB)
-   okInput := !bytes.Equal(a.out, b.out)
-   okReject := !(c.ntstatus == 0 && statusOK(c.status))
-
-   verdict := "REJECT"
-   if okA && okB && okInput && okReject {
-      verdict = "ACCEPT"
-   }
-   trace("emit verdict=%s input_dep=%t size_enforced=%t", verdict, okInput, okReject)
-
-   fmt.Printf("RESULT %#x %s "+
-      "A(st=%#010x,sv=%s) "+
-      "B(st=%#010x,sv=%s) "+
-      "C(st=%#010x,sv=%s) "+
-      "input_dep=%t size_enforced=%t out=%s\n",
-      w.descVA, verdict,
-      a.ntstatus, hex.EncodeToString(a.status),
-      b.ntstatus, hex.EncodeToString(b.status),
-      c.ntstatus, hex.EncodeToString(c.status),
-      okInput, okReject,
-      hex.EncodeToString(a.out))
-   trace("exiting")
-   return 0
-}
-
-// probe performs one WB heap-exec call. A failure to draw the random fill is
-// returned rather than exited on, so the caller decides the exit code.
-func (w *worker) probe(tag string, data []byte, size uint32) (*probeResult, error) {
-   trace("probe %s begin size=%#x", tag, size)
-
-   fill := make([]byte, keyLen)
-   if _, err := rand.Read(fill); err != nil {
-      return nil, fmt.Errorf("probe %s: random fill: %w", tag, err)
-   }
-   keyBuf := make([]byte, keyLen)
-   copy(keyBuf, data) // always keyLen bytes; a short data leaves the tail zero
-   status := make([]byte, 0x10)
-   out := make([]byte, keyLen)
-   copy(out, fill)
-
-   args := newWbArgs(uint64(w.base)+uint64(w.descVA), status, keyBuf, out, size)
-   trace("probe %s calling kernel op=3 desc=%#x status=%p key=%p out=%p size=%#x",
-      tag, w.base+uintptr(w.descVA), &status[0], &keyBuf[0], &out[0], size)
-
-   r1 := callWarbird(args)
-
-   // Reading out here is also what keeps its backing array alive across the
-   // call: only its address was handed to the kernel, which the directive on
-   // Call cannot see.
-   trace("probe %s returned st=%#010x sv=%x out=%x",
-      tag, uint32(r1), status[:4], out[:8])
-
-   return &probeResult{
-      ntstatus: uint32(r1),
-      status:   status[:4], // per-call buffer, never reused, so no copy
-      out:      out,
-      fill:     fill,
-   }, nil
 }
 
 // child.go end

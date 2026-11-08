@@ -1,68 +1,54 @@
 // signing.go begin
 //go:build windows
 
-// prkf -2 and -3: find the signing-key routine's descriptor, then decrypt the
-// signing key with it. One file, because -2 writes prsubs.json and -3 reads
-// it, both call the same ABI in warbird.go, and both name the same DLL.
+// prkf -1 and -6: find the signing-key routine's descriptor, then decrypt the
+// signing key with it. One file, because -1 writes prsubs.json and -6 reads it,
+// both call the same ABI in kernel.go, and both name the same DLL.
 //
-// -2 scans the DLL for Warbird heap-exec descriptors, then re-executes this
-// binary once per candidate, eight at a time, and reads the RESULT line each
-// child prints. Discovery rests entirely on properties of the routine itself,
-// read from its disassembly - no sample key files:
+// -1 scans the DLL for Warbird heap-exec descriptors, then re-executes this binary
+// once per CHUNK of candidates and reads the RESULT line each descriptor produced.
+// Discovery rests entirely on properties of the routine itself, read from its
+// disassembly - no sample key files:
 //
 //  1. accepts exactly 0x20 bytes and succeeds
 //     (it begins: cmp dword ptr [rcx+10h], 20h)
 //  2. writes its output buffer; 3. different input -> different output
 //  4. REJECTS a size other than 0x20
 //
-// Property 4 is the discriminating one - it collapses the large set of
-// descriptors that merely return success. Verification against a real key is
-// -3's job, not -2's. Zero accepted descriptors, or more than one, is an error
-// to investigate: there is no fallback path. Outputs: prsubsPath (build values,
-// keyed by the DLL sha256) and scanLogPath (probe results and child traces).
+// Property 4 is the discriminating one - it collapses the large set of descriptors
+// that merely return success. Verification against a real key is -6's job, not
+// -1's. Zero accepted descriptors, or more than one, is an error to investigate:
+// there is no fallback path. Outputs: prsubsPath (build values, keyed by the DLL
+// sha256) and scanLogPath (probe results and child traces).
 //
-// DIAGNOSTICS. A scan that stalls has three possible shapes - one child
-// spinning, several spinning, or the parent deadlocked - and the progress line
-// cannot tell them apart. The log can: `job N start/end` per descriptor with
-// wall clock, `trace[i desc]` streamed live, and `watchdog` every 5s naming the
-// descriptors still in flight and for how long. A stuck descriptor leaves its
-// last trace line as the final record for that index: `probe B begin` means the
-// child never returned from the kernel call for probe B. There is no deadline,
-// so interrupt the run and read the log. If work is in flight but the watchdog
-// never names a growing duration, the parent is stuck rather than a child;
-// Ctrl-Break prints a goroutine dump by itself.
+// # CHUNKING, AND WHY THERE IS NO CONCURRENCY
 //
-// NOTE: dllPath is in main.go's manifest; the 0xF0 heap test, scanDescs and
-// splitDescs are in warbird.go; the child this driver spawns, the probeEnv
-// variable that selects it, and the spawn helpers, are in child.go.
+// A child pays LoadLibrary before its first call, so one child per descriptor spent
+// 981 module loads on 981 probes. Descriptors are therefore probed in chunks of 64,
+// sequentially - no goroutines, no worker pool. A chunk that dies takes its
+// remaining descriptors with it; those are detected by the absence of a RESULT line
+// and re-probed one at a time, so a fault costs one extra child.
 //
-// -3 decrypts sigPrvPath -> sigPlainPath, writing output only after every
-// available check passes.
+// Every child streams its stderr into the scan log as it arrives, so a chunk that
+// hangs leaves its last trace line as the final record. There is no deadline: a
+// timeout would make a hang invisible. Interrupt the run and read the log.
 //
-// VERSION SUPPORT. Only ONE value differs between DLL builds: the RVA of the
-// heap descriptor holding the signing-key routine, from prsubsPath keyed by the
-// DLL sha256. This step refuses to run if the cache does not match the DLL.
+// -6 decrypts sigPrvPath -> sigPlainPath, writing output only after every check
+// passes.
 //
-// Everything else is hardcoded because it cannot drift with the DLL: op=3 and
-// the WarbirdCallArgs layout are kernel ABI; the routine's own argument struct
-// is packed (it reads its output pointer unaligned at +0x14) and packed layout
-// is fixed by source; size == 0x20 is the P-256 scalar length, which the
-// routine tests itself.
+// VERSION SUPPORT. Only ONE value differs between DLL builds: the RVA of the heap
+// descriptor holding the signing-key routine, from prsubsPath keyed by the DLL
+// sha256. This step refuses to run if the cache does not match the DLL. Everything
+// else is hardcoded because it cannot drift: op=3 and the WarbirdCallArgs layout
+// are kernel ABI; the routine's argument struct is packed and its layout is fixed
+// by source; size == 0x20 is the P-256 scalar length, which it tests itself.
 //
-// VERIFICATION. The check needs no secret reference: the plaintext d must
-// satisfy d*G == Q, where Q is the P-256 public key -1 wrote next to the
-// ciphertext. A wrong descriptor, output offset, argument layout or input file
-// cannot produce a scalar whose public point lands on Q. NewPublicKey and
-// NewPrivateKey do the on-curve and range checks, so neither is repeated.
+// VERIFICATION. The plaintext d must satisfy d*G == Q, where Q is the P-256 public
+// key -5 wrote next to the ciphertext. A wrong descriptor, output offset, argument
+// layout or input file cannot produce a scalar whose public point lands on Q.
 //
-// Failure is loud, never silent: wrong desc_va -> NTSTATUS 0xC0000095
-// (INTEGER_OVERFLOW); wrong arg layout -> status dword 0x80070057
-// (E_INVALIDARG) plus an unwritten output buffer; output == input -> wrong
-// routine; d*G != sig.pub -> descriptor, argument layout or input is wrong.
-//
-// NOTE: keyLen, statusOK, wbArgs, newWbArgs, loadWarbird and callWarbird are
-// in warbird.go. This half imports neither unsafe nor syscall: the one pointer
-// conversion and the one module load are inside warbird.go.
+// NOTE: keyLen, statusOK, wbArgs, newWbArgs, loadWarbird and callWarbird are in
+// kernel.go; the descriptor census and the PE walk are in warbird.go.
 package main
 
 import (
@@ -79,18 +65,29 @@ import (
    "slices"
    "strconv"
    "strings"
-   "sync"
    "time"
 )
 
-// ------------------------------------------------------------ -3: decrypt
+// probeChunk is how many descriptors one probe child handles. Big enough that the
+// module load is amortised, small enough that a fault costs little.
+const probeChunk = 64
+
+// probeEnv carries the descriptor list into a probe child. The environment is used
+// instead of a flag so the child mode never appears in `prkf -h`.
+const probeEnv = "PRKF_PROBE_DESCS"
+
+// childT0 captures the process start, so every trace line can carry a millisecond
+// offset.
+var childT0 = time.Now()
+
+// ------------------------------------------------------------ -6: decrypt
 
 func cmdDecrypt() error {
    if !isFile(sigPrvPath) {
-      return fmt.Errorf("missing input: %s\n  run prkf -1 first", sigPrvPath)
+      return fmt.Errorf("missing input: %s\n  run prkf -5 first", sigPrvPath)
    }
    if !isFile(sigPubPath) {
-      return fmt.Errorf("missing public key: %s\n  run prkf -1 first", sigPubPath)
+      return fmt.Errorf("missing public key: %s\n  run prkf -5 first", sigPubPath)
    }
 
    // ---- decrypt ------------------------------------------------------
@@ -106,9 +103,9 @@ func cmdDecrypt() error {
    if err != nil {
       return err
    }
-   // Normalize to the uncompressed 65-byte SEC 1 form. NewPublicKey accepts
-   // the uncompressed and compressed encodings and rejects anything off the
-   // curve or at infinity, so the on-curve check is not repeated here.
+   // Normalize to the uncompressed 65-byte SEC 1 form. NewPublicKey accepts the
+   // uncompressed and compressed encodings and rejects anything off the curve or
+   // at infinity, so the on-curve check is not repeated here.
    if len(raw) == 64 { // raw x||y: add the uncompressed prefix
       raw = append([]byte{0x04}, raw...)
    }
@@ -118,8 +115,8 @@ func cmdDecrypt() error {
    }
    want := k.Bytes()
 
-   // An out-of-range d makes NewPrivateKey fail, leaving gotPub nil, which
-   // falls through to the same verdict as a mismatched point.
+   // An out-of-range d makes NewPrivateKey fail, leaving gotPub nil, which falls
+   // through to the same verdict as a mismatched point.
    var gotPub []byte
    if priv, err := ecdh.P256().NewPrivateKey(got); err == nil {
       gotPub = priv.PublicKey().Bytes()
@@ -141,10 +138,10 @@ func cmdDecrypt() error {
    return nil
 }
 
-// cmdFindSub is the entry point for prkf -2.
+// cmdFindSub is the entry point for prkf -1.
 func cmdFindSub() error {
-   // Taken before the DLL is read so the reported total covers the whole
-   // step: read, PE parse, descriptor scan, every probe, and the write.
+   // Taken before the DLL is read so the logged total covers the whole step: read,
+   // PE parse, descriptor scan, every probe, and the write.
    start := time.Now()
 
    data, err := os.ReadFile(dllPath)
@@ -158,47 +155,40 @@ func cmdFindSub() error {
    if err != nil {
       return err
    }
-   // Checked, and checked before the elapsed line runs: the header calls this
-   // log the only evidence a stalled scan leaves behind, so a close that fails
-   // (a full disk is the common case) must not be silent.
+   // Checked, and checked before the elapsed line runs: the header calls this log
+   // the only evidence a stalled scan leaves behind, so a close that fails (a full
+   // disk is the common case) must not be silent.
    defer func() {
       if err := logf.Close(); err != nil {
-         fmt.Fprintf(os.Stderr, "prkf -2: %s: close: %v\n", scanLogPath, err)
+         fmt.Fprintf(os.Stderr, "prkf -1: %s: close: %v\n", scanLogPath, err)
       }
    }()
-   // *os.File writes are unbuffered, so each line reaches the log as soon as
-   // it is written - useful when the scan dies partway through. logMu exists
-   // because the workers and the watchdog both write; logErr keeps the first
-   // write failure, because a log that stops mid-scan is worse than one that
-   // says so.
-   var (
-      logMu  sync.Mutex
-      logErr error
-   )
+   // *os.File writes are unbuffered, so each line reaches the log as soon as it is
+   // written - useful when the scan dies partway through. logErr keeps the first
+   // write failure, because a log that stops mid-scan is worse than one that says
+   // so.
+   var logErr error
    w := func(s string) {
-      logMu.Lock()
-      if logErr == nil {
-         if _, err := fmt.Fprintln(logf, s); err != nil {
-            logErr = err
-         }
+      if logErr != nil {
+         return
       }
-      logMu.Unlock()
+      if _, err := fmt.Fprintln(logf, s); err != nil {
+         logErr = err
+      }
    }
 
    // Deferred, not printed inline: the error returns below (zero accepted,
-   // ambiguous) are exactly when the total time is worth knowing. Registered
-   // after logf's Close, so it still has an open file to write to.
+   // ambiguous) are exactly when the total time is worth knowing. The LOG gets its
+   // own elapsed line because the log is the artefact a failed scan is diagnosed
+   // from, and one that ends without a duration cannot be distinguished from one
+   // that was truncated. stdout's line comes from main.
    defer func() {
       el := time.Since(start).Round(time.Millisecond)
-      logMu.Lock()
-      werr := logErr
-      logMu.Unlock()
       w("elapsed " + el.String())
-      if werr != nil {
-         fmt.Fprintf(os.Stderr, "prkf -2: %s: %v (the log above is incomplete)\n",
-            scanLogPath, werr)
+      if logErr != nil {
+         fmt.Fprintf(os.Stderr, "prkf -1: %s: %v (the log above is incomplete)\n",
+            scanLogPath, logErr)
       }
-      fmt.Printf("elapsed %s\n", el)
    }()
 
    w("dll    " + dllPath)
@@ -212,148 +202,66 @@ func cmdFindSub() error {
    w(fmt.Sprintf("heap descriptors: %d", len(descs)))
    fmt.Printf("heap descriptors: %d\n", len(descs))
 
-   // One resolution for the whole scan, logged once: runChild caches the same
-   // value internally, and a failure here is reported before any child is
-   // spawned rather than once per descriptor.
-   self, err := selfExe()
-   if err != nil {
-      return err
+   // One resolution for the whole scan, logged once.
+   if selfErr != nil {
+      return selfErr
    }
-   w("self   " + self)
+   w("self   " + selfPath)
 
-   // Probe every descriptor, eight at a time. Each probe is its own process
-   // (see child.go), so the children share nothing and the parent only
-   // collects stdout. Results are stored by descriptor index, so the log and
-   // the ACCEPT lines below stay in descriptor order no matter which child
-   // finishes first.
-   results := make([]childOut, len(descs))
+   // ---- probe every descriptor, in chunks ---------------------------------
+   // One RESULT line per descriptor, keyed by descriptor VA. A descriptor with no
+   // line either faulted its chunk or was never reached, and is retried alone
+   // below.
+   results := make([]string, len(descs))
+   chunks := (len(descs) + probeChunk - 1) / probeChunk
+   w(fmt.Sprintf("probing %d descriptors in %d chunks of %d", len(descs), chunks, probeChunk))
 
-   type running struct {
-      desc uint32
-      t0   time.Time
-   }
-
-   var (
-      mu       sync.Mutex
-      done     int
-      accepted int
-      active   = make(map[int]running)
-   )
-
-   // The watchdog answers the question the progress line cannot: when nothing
-   // finishes, is one child stuck or all of them, and for how long. It prints
-   // the descriptors still in flight, never the parent's stacks - see the
-   // diagnostics note at the top of the file.
-   stopWatch := make(chan struct{})
-   watchDone := make(chan struct{})
-   go func() {
-      defer close(watchDone)
-      tk := time.NewTicker(5 * time.Second)
-      defer tk.Stop()
-      for {
-         select {
-         case <-stopWatch:
-            return
-         case <-tk.C:
-            mu.Lock()
-            d, n := done, len(active)
-            snap := make([]string, 0, n)
-            now := time.Now()
-            for idx, r := range active {
-               snap = append(snap, fmt.Sprintf("idx=%d desc=%#x running=%s",
-                  idx, r.desc, now.Sub(r.t0).Round(time.Millisecond)))
-            }
-            mu.Unlock()
-
-            if n == 0 {
-               continue
-            }
-            slices.Sort(snap)
-
-            head := fmt.Sprintf("watchdog: done=%d/%d inflight=%d", d, len(descs), n)
-            w(head)
-            fmt.Println(head)
-            for _, s := range snap {
-               w("  " + s)
-               fmt.Println("  " + s)
-            }
+   for lo := 0; lo < len(descs); lo += probeChunk {
+      hi := min(lo+probeChunk, len(descs))
+      w(fmt.Sprintf("chunk %d/%d  idx %d..%d", lo/probeChunk+1, chunks, lo, hi-1))
+      got := probeBatch(descs[lo:hi], w)
+      for i := lo; i < hi; i++ {
+         if r, ok := got[descs[i].descVA]; ok {
+            results[i] = r
          }
       }
-   }()
-
-   // Eight workers: each child loads the DLL and makes three calls, so this
-   // trades process-table pressure for wall clock. nw == 0 only when there is
-   // nothing to scan, where zero workers is correct - the send loop below is
-   // then empty, so nothing can block.
-   nw := min(8, len(descs))
-
-   jobs := make(chan int)
-   var wg sync.WaitGroup
-   wg.Add(nw)
-   for i := 0; i < nw; i++ {
-      go func() {
-         defer wg.Done()
-         for i := range jobs {
-            desc := descs[i].descVA
-
-            mu.Lock()
-            active[i] = running{desc: desc, t0: time.Now()}
-            mu.Unlock()
-
-            w(fmt.Sprintf("job %d start desc=%#x", i, desc))
-
-            res := runChild(i, desc, w)
-
-            mu.Lock()
-            delete(active, i)
-            mu.Unlock()
-
-            w(fmt.Sprintf("job %d end   desc=%#x elapsed=%s exit=%s",
-               i, desc, res.elapsed.Round(time.Millisecond), res.exit))
-
-            results[i] = res // distinct index per job: no shared write
-
-            mu.Lock()
+      done := 0
+      for _, r := range results {
+         if r != "" {
             done++
-            if strings.Contains(res.line, " ACCEPT ") {
-               accepted++
-            }
-            if done%100 == 0 || done == len(descs) {
-               fmt.Printf("  %d/%d  accepted=%d\n", done, len(descs), accepted)
-            }
-            mu.Unlock()
          }
-      }()
+      }
+      fmt.Printf("  %d/%d  accepted=%d\n", done, len(descs), countAccepted(results))
    }
-   for i := range descs {
-      jobs <- i
-   }
-   close(jobs)
-   wg.Wait()
 
-   // Stopped before the log is read, and waited for: the watchdog writes to
-   // logf, and logf is closed by the deferred Close on return.
-   close(stopWatch)
-   <-watchDone
+   // A chunk that died leaves a hole. Each hole is one descriptor, retried alone,
+   // so a fault costs exactly one extra child.
+   var missing []int
+   for i, r := range results {
+      if r == "" {
+         missing = append(missing, i)
+      }
+   }
+   if len(missing) > 0 {
+      w(fmt.Sprintf("retrying %d descriptors alone", len(missing)))
+      fmt.Printf("  %d descriptors produced no row - retrying alone\n", len(missing))
+   }
+   for _, i := range missing {
+      got := probeBatch(descs[i:i+1], w)
+      if r, ok := got[descs[i].descVA]; ok {
+         results[i] = r
+      } else {
+         results[i] = fmt.Sprintf("RESULT %#x NO_OUTPUT exit=no-row", descs[i].descVA)
+      }
+   }
 
    var acc []imgDesc
-   var slow []int
-   for i, res := range results {
-      w(res.line)
-      if res.elapsed > time.Second {
-         slow = append(slow, i)
-      }
-      if strings.Contains(res.line, " ACCEPT ") {
+   for i, r := range results {
+      w(r)
+      if strings.Contains(r, " ACCEPT ") {
          acc = append(acc, descs[i])
-         fmt.Println("ACCEPT " + res.line)
+         fmt.Println("ACCEPT " + r)
       }
-   }
-
-   w("")
-   w(fmt.Sprintf("children slower than 1s: %d", len(slow)))
-   for _, i := range slow {
-      w(fmt.Sprintf("  idx=%d desc=%#x elapsed=%s exit=%s",
-         i, descs[i].descVA, results[i].elapsed.Round(time.Millisecond), results[i].exit))
    }
 
    w("")
@@ -398,19 +306,31 @@ func cmdFindSub() error {
    return nil
 }
 
+// countAccepted counts the ACCEPT rows in a partial result slice, so the progress
+// line can report it without a second pass at the end.
+func countAccepted(results []string) int {
+   n := 0
+   for _, r := range results {
+      if strings.Contains(r, " ACCEPT ") {
+         n++
+      }
+   }
+   return n
+}
+
 // ---- the kernel call -----------------------------------------------------
 
-// decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key,
-// reading the *.sig.prv component from prvPath and returning the 32-byte
-// plaintext. Nothing is written; cmdDecrypt writes after validating.
+// decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key, reading
+// the *.sig.prv component from prvPath and returning the 32-byte plaintext.
+// Nothing is written; cmdDecrypt writes after validating.
 func decryptSigningKey(prvPath string) ([]byte, error) {
    rec, err := loadPrsubs()
    if err != nil {
       return nil, err
    }
 
-   // The module has to be mapped in this process before the call: rec.DescVA
-   // is an RVA relative to its image base, not a file offset.
+   // The module has to be mapped in this process before the call: rec.DescVA is an
+   // RVA relative to its image base, not a file offset.
    base, err := loadWarbird()
    if err != nil {
       return nil, err
@@ -424,8 +344,8 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
       return nil, fmt.Errorf("%s: expected %d bytes, got %d", prvPath, keyLen, len(enc))
    }
 
-   // A random fill proves the routine actually wrote to the output buffer;
-   // a fixed sentinel could collide with real key material.
+   // A random fill proves the routine actually wrote to the output buffer; a fixed
+   // sentinel could collide with real key material.
    fill := make([]byte, keyLen)
    if _, err := rand.Read(fill); err != nil {
       return nil, err
@@ -434,10 +354,10 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
    status := make([]byte, 0x10)                      // zero-filled
    out := append(make([]byte, 0, keyLen), fill...)
 
-   // The block, the call and the lifetime handling are in warbird.go, so this
-   // step and -2 cannot disagree about the ABI. out must stay live until the
-   // result is read - its address is stored as a uintptr - and it is, by the
-   // comparison below.
+   // The block, the call and the lifetime handling are in kernel.go, so this step
+   // and -1 cannot disagree about the ABI. out must stay live until the result is
+   // read - its address is stored as a uintptr - and it is, by the comparison
+   // below.
    args := newWbArgs(uint64(base)+uint64(rec.DescVA), status, keyBuf, out, keyLen)
    st := callWarbird(args)
 
@@ -451,7 +371,7 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
 
    if !statusOK(status) {
       return nil, fmt.Errorf("routine returned %s - the argument layout no "+
-         "longer matches this build; re-run prkf -2",
+         "longer matches this build; re-run prkf -1",
          hex.EncodeToString(status[:4]))
    }
 
@@ -470,8 +390,53 @@ func isFile(p string) bool {
    return err == nil && fi.Mode().IsRegular()
 }
 
-// spanMapped reports whether [rva, rva+n) lies inside one section's mapped
-// extent, which is the larger of its virtual and raw sizes.
+// ------------------------------------------------------------ the -1 probe
+
+// probeTarget reports whether this process was started as a probe child, and for
+// which descriptors. Called from main before the FlagSet exists, so a malformed
+// value is returned rather than exited on: main is the only place that terminates.
+func probeTarget() ([]uint32, bool, error) {
+   s := os.Getenv(probeEnv)
+   if s == "" {
+      return nil, false, nil
+   }
+   var out []uint32
+   for _, x := range strings.Split(s, ",") {
+      v, err := strconv.ParseUint(x, 0, 32)
+      if err != nil {
+         return nil, true, fmt.Errorf("%s=%q: %w", probeEnv, s, err)
+      }
+      out = append(out, uint32(v))
+   }
+   if len(out) == 0 {
+      return nil, true, fmt.Errorf("%s is empty", probeEnv)
+   }
+   return out, true, nil
+}
+
+// runProbes is the probe child's whole body: one module load, then three calls per
+// descriptor.
+func runProbes(descs []uint32) int {
+   trace("start descriptors=%d keyLen=%#x", len(descs), keyLen)
+
+   base, err := loadWarbird()
+   if err != nil {
+      trace("loadWarbird failed: %v", err)
+      fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
+      return 2
+   }
+   trace("dll loaded base=%#x", base)
+
+   w := &worker{base: base} // HMODULE == image base for a DLL
+   for _, d := range descs {
+      w.runOne(d)
+   }
+   trace("done")
+   return 0
+}
+
+// spanMapped reports whether [rva, rva+n) lies inside one section's mapped extent,
+// which is the larger of its virtual and raw sizes.
 func spanMapped(secs []imgSection, rva, n uint32) bool {
    lo, hi := uint64(rva), uint64(rva)+uint64(n)
    for _, s := range secs {
@@ -482,17 +447,24 @@ func spanMapped(secs []imgSection, rva, n uint32) bool {
    return false
 }
 
+// trace writes one timestamped line to the child's stderr. Writes to stderr are
+// unbuffered syscalls, so the line is out of this process before the next statement
+// runs - including when the next statement is the kernel call that never returns.
+func trace(format string, a ...any) {
+   fmt.Fprintf(os.Stderr, "[pid %d +%dms] %s\n",
+      os.Getpid(), time.Since(childT0).Milliseconds(), fmt.Sprintf(format, a...))
+}
+
 // ------------------------------------------------------------- descriptors
 
-// signingCandidates is the shared census filtered to what -2 can probe: a
-// heap-exec descriptor whose code span is non-empty and lies inside a mapped
-// section.
+// signingCandidates is the shared census filtered to what -1 can probe: a heap-exec
+// descriptor whose code span is non-empty and lies inside a mapped section.
 //
-// This is a filter, not a second scan. The digest validation, the section walk
-// and the size cap are all scanDescs's, so -2 cannot drift from -5, -6 and -7
-// about which bytes are a descriptor. The dedupe by (desc_va, code rva, len)
-// stays because overlapping section extents can present the same descriptor
-// twice, and probing it twice would waste a process and inflate the count.
+// This is a filter, not a second scan. The digest validation, the section walk and
+// the size cap are all scanDescs's, so -1 cannot drift from -2, -3 and -4 about
+// which bytes are a descriptor. The dedupe by (desc_va, code rva, len) stays
+// because overlapping section extents can present the same descriptor twice, and
+// probing it twice would waste a call and inflate the count.
 func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    type key struct{ va, rva, ln uint32 }
    seen := make(map[key]bool)
@@ -511,10 +483,10 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
       out = append(out, d)
    }
 
-   // A total order over keys the map already deduplicated: no equal elements
-   // can reach the comparator, so stability would buy nothing. Slices are
-   // compared field by field, rva first, so the descriptor order matches the
-   // code layout the log reports.
+   // A total order over keys the map already deduplicated: no equal elements can
+   // reach the comparator, so stability would buy nothing. Slices are compared
+   // field by field, rva first, so the descriptor order matches the code layout the
+   // log reports.
    slices.SortFunc(out, func(a, b imgDesc) int {
       if c := cmp.Compare(a.rva, b.rva); c != 0 {
          return c
@@ -527,16 +499,22 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    return out
 }
 
+type probeResult struct {
+   ntstatus uint32
+   status   []byte // the 4 status bytes the routine wrote
+   out      []byte
+   fill     []byte
+}
+
 // ---------------------------------------------------------------- the cache
 
-// subRecord is prsubs.json: the one build-specific value the pipeline caches,
-// plus the descriptor it came from, so the file records what -2 picked without
-// anyone having to re-run it.
+// subRecord is prsubs.json: the one build-specific value the pipeline caches, plus
+// the descriptor it came from, so the file records what -1 picked without anyone
+// having to re-run it.
 //
-// -2 writes all four fields; -3 reads SHA256 and DescVA and ignores the other
-// two, which is why there is one type here and not two. -3's validation is the
-// SHA256 comparison: a cache written against another DLL is refused, not
-// reinterpreted.
+// -1 writes all four fields; -6 reads SHA256 and DescVA and ignores the other two,
+// which is why there is one type here and not two. -6's validation is the SHA256
+// comparison: a cache written against another DLL is refused, not reinterpreted.
 type subRecord struct {
    SHA256  string `json:"sha256"`
    DescVA  uint32 `json:"desc_va"`
@@ -554,7 +532,7 @@ func loadPrsubs() (*subRecord, error) {
    sha := hex.EncodeToString(sum[:])
 
    if !isFile(prsubsPath) {
-      return nil, fmt.Errorf("no %s - run prkf -2 first", prsubsPath)
+      return nil, fmt.Errorf("no %s - run prkf -1 first", prsubsPath)
    }
    raw, err := os.ReadFile(prsubsPath)
    if err != nil {
@@ -569,12 +547,110 @@ func loadPrsubs() (*subRecord, error) {
       return nil, fmt.Errorf("%s was built for a different DLL\n"+
          "  cache : %s\n"+
          "  actual: %s\n"+
-         "  re-run prkf -2", prsubsPath, rec.SHA256, sha)
+         "  re-run prkf -1", prsubsPath, rec.SHA256, sha)
    }
    if rec.DescVA == 0 {
-      return nil, fmt.Errorf("%s has no desc_va - re-run prkf -2", prsubsPath)
+      return nil, fmt.Errorf("%s has no desc_va - re-run prkf -1", prsubsPath)
    }
    return &rec, nil
+}
+
+type worker struct{ base uintptr }
+
+// probe performs one WB heap-exec call. A failure to draw the random fill is
+// returned rather than exited on, so the caller decides what to print.
+func (w *worker) probe(descVA uint32, tag string, data []byte, size uint32) (*probeResult, error) {
+   trace("probe %#x %s begin size=%#x", descVA, tag, size)
+
+   fill := make([]byte, keyLen)
+   if _, err := rand.Read(fill); err != nil {
+      return nil, fmt.Errorf("probe %s: random fill: %w", tag, err)
+   }
+   keyBuf := make([]byte, keyLen)
+   copy(keyBuf, data) // always keyLen bytes; a short data leaves the tail zero
+   status := make([]byte, 0x10)
+   out := make([]byte, keyLen)
+   copy(out, fill)
+
+   args := newWbArgs(uint64(w.base)+uint64(descVA), status, keyBuf, out, size)
+   r1 := callWarbird(args)
+
+   // Reading out here is also what keeps its backing array alive across the call:
+   // only its address was handed to the kernel, which the directive on Call cannot
+   // see.
+   trace("probe %#x %s returned st=%#010x sv=%x", descVA, tag, uint32(r1), status[:4])
+
+   return &probeResult{
+      ntstatus: uint32(r1),
+      status:   status[:4], // per-call buffer, never reused, so no copy
+      out:      out,
+      fill:     fill,
+   }, nil
+}
+
+// runOne probes one descriptor and prints its RESULT line. A probe that cannot be
+// set up still prints a line, because the parent would otherwise retry this
+// descriptor forever.
+func (w *worker) runOne(descVA uint32) {
+   trace("probe %#x begin", descVA)
+
+   // Two distinct 32-byte inputs: the routine must map them to distinct outputs,
+   // which is what distinguishes a transform from a copy.
+   inputA := make([]byte, keyLen)
+   for i := range inputA {
+      inputA[i] = byte(i)
+   }
+   inputB := make([]byte, keyLen)
+   for i := range inputB {
+      inputB[i] = byte(keyLen + i)
+   }
+
+   fail := func(tag string, err error) {
+      trace("probe %s failed: %v", tag, err)
+      fmt.Printf("RESULT %#x NO_OUTPUT exit=setup:%v\n", descVA, err)
+   }
+
+   a, err := w.probe(descVA, "A", inputA, keyLen)
+   if err != nil {
+      fail("A", err)
+      return
+   }
+   b, err := w.probe(descVA, "B", inputB, keyLen)
+   if err != nil {
+      fail("B", err)
+      return
+   }
+   c, err := w.probe(descVA, "C", inputA, keyLen-1) // one byte short - must be rejected
+   if err != nil {
+      fail("C", err)
+      return
+   }
+
+   // sawSuccess is NTSTATUS 0 AND a zero status dword - not NTSTATUS alone.
+   okA := a.ntstatus == 0 && statusOK(a.status) &&
+      !bytes.Equal(a.out, a.fill) && !bytes.Equal(a.out, inputA)
+   okB := b.ntstatus == 0 && statusOK(b.status) &&
+      !bytes.Equal(b.out, b.fill) && !bytes.Equal(b.out, inputB)
+   okInput := !bytes.Equal(a.out, b.out)
+   okReject := !(c.ntstatus == 0 && statusOK(c.status))
+
+   verdict := "REJECT"
+   if okA && okB && okInput && okReject {
+      verdict = "ACCEPT"
+   }
+   trace("emit %#x verdict=%s", descVA, verdict)
+
+   fmt.Printf("RESULT %#x %s "+
+      "A(st=%#010x,sv=%s) "+
+      "B(st=%#010x,sv=%s) "+
+      "C(st=%#010x,sv=%s) "+
+      "input_dep=%t size_enforced=%t out=%s\n",
+      descVA, verdict,
+      a.ntstatus, hex.EncodeToString(a.status),
+      b.ntstatus, hex.EncodeToString(b.status),
+      c.ntstatus, hex.EncodeToString(c.status),
+      okInput, okReject,
+      hex.EncodeToString(a.out))
 }
 
 // signing.go end
