@@ -3,7 +3,9 @@ package claire
 
 import (
    _ "embed"
+   "errors"
    "fmt"
+   "go/build"
    "html/template"
    "io/fs"
    "log"
@@ -13,6 +15,8 @@ import (
    "slices"
    "strings"
 )
+
+var packageTemplate = template.Must(template.New("package").Parse(packageTemplateFile))
 
 //go:embed package.tmpl
 var packageTemplateFile string
@@ -40,7 +44,6 @@ func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
    // Parse every package. A package with no exported documentation is not
    // documentable: it gets no page and no link.
    pkgDocs := make(map[string]*PackageDoc, len(pkgDirs))
-   var documented []string
    for _, d := range pkgDirs {
       fullPath := filepath.Join(sourceDir, d)
       pd, err := ParsePackageDoc(fullPath)
@@ -52,15 +55,13 @@ func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
          continue
       }
       pkgDocs[d] = pd
-      documented = append(documented, d)
    }
 
    // A directory needs a page if it is the root, if it holds documented
    // declarations, or if it is an ancestor of a directory that does.
    dirSet := map[string]struct{}{".": {}}
-   for _, p := range documented {
-      dirSet[p] = struct{}{}
-      for d := p; d != "." && d != string(filepath.Separator); d = filepath.Dir(d) {
+   for p := range pkgDocs {
+      for d := p; d != "."; d = filepath.Dir(d) {
          dirSet[d] = struct{}{}
       }
    }
@@ -91,29 +92,28 @@ func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
    // Each directory lists its immediate children. Href is relative to the
    // linking page; Path is what gets displayed.
    link := func(from, to string) PackageLink {
-      rel, err := filepath.Rel(from, to)
-      if err != nil {
-         rel = to // unreachable for paths under the same root
-      }
+      rel, _ := filepath.Rel(from, to) // both live under the same root
       return PackageLink{
          Path: filepath.ToSlash(to),
          Href: filepath.ToSlash(rel) + "/",
       }
    }
+   children := make(map[string][]string, len(dirs))
    for _, d := range dirs {
-      for _, child := range dirs {
-         if child == "." || child == d {
-            continue
-         }
-         if filepath.Dir(child) == d {
-            docs[d].SubPackages = append(docs[d].SubPackages, link(d, child))
-         }
+      if d == "." {
+         continue
+      }
+      parent := filepath.Dir(d)
+      children[parent] = append(children[parent], d)
+   }
+   for _, d := range dirs {
+      for _, child := range children[d] {
+         docs[d].SubPackages = append(docs[d].SubPackages, link(d, child))
       }
    }
 
    for _, d := range dirs {
-      htmlOutputPath := filepath.Join(outputDir, d, "index.html")
-      if err := docs[d].Render(htmlOutputPath); err != nil {
+      if err := docs[d].Render(filepath.Join(outputDir, d, "index.html")); err != nil {
          return err
       }
    }
@@ -128,40 +128,35 @@ func calculateStyleSheetPath(importPath string) string {
    return path.Join("/", pathPrefix, "style.css")
 }
 
+// findAllPackageDirs returns the module-relative directories holding buildable
+// Go code. go/build decides what counts, so build-constrained, cgo-less and
+// test-only directories are skipped instead of aborting the run.
 func findAllPackageDirs(root string) ([]string, error) {
-   packageSet := make(map[string]struct{})
-
-   err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+   var packages []string
+   err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
       if err != nil {
          return err
       }
-
-      if d.IsDir() {
-         if path != root && d.Name() == "vendor" {
-            return filepath.SkipDir
+      if !d.IsDir() {
+         return nil
+      }
+      if p != root && (d.Name() == "vendor" || d.Name() == "testdata") {
+         return filepath.SkipDir
+      }
+      if _, err := build.ImportDir(p, 0); err != nil {
+         var noGo *build.NoGoError
+         if !errors.As(err, &noGo) {
+            return err
          }
          return nil
       }
-
-      name := d.Name()
-      if strings.HasSuffix(name, ".go") &&
-         !strings.HasSuffix(name, "_test.go") {
-         dir := filepath.Dir(path)
-         relDir, err := filepath.Rel(root, dir)
-         if err != nil {
-            return err
-         }
-         packageSet[relDir] = struct{}{}
+      rel, err := filepath.Rel(root, p)
+      if err != nil {
+         return err
       }
-
+      packages = append(packages, rel)
       return nil
    })
-
-   packages := make([]string, 0, len(packageSet))
-   for pkg := range packageSet {
-      packages = append(packages, pkg)
-   }
-
    return packages, err
 }
 
