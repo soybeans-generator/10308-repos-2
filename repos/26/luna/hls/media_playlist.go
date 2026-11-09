@@ -9,6 +9,14 @@ import (
    "strings"
 )
 
+// checkHeader verifies the mandatory #EXTM3U prologue.
+func checkHeader(lines []string) error {
+   if len(lines) == 0 || lines[0] != "#EXTM3U" {
+      return errors.New("not an HLS playlist: missing #EXTM3U")
+   }
+   return nil
+}
+
 type MediaPlaylist struct {
    TargetDuration int
    MediaSequence  int
@@ -23,6 +31,9 @@ type MediaPlaylist struct {
 // DecodeMedia parses a Media Playlist.
 func DecodeMedia(content string) (*MediaPlaylist, error) {
    lines := splitLines(content)
+   if err := checkHeader(lines); err != nil {
+      return nil, err
+   }
    return parseMedia(lines)
 }
 

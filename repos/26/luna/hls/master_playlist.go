@@ -67,6 +67,9 @@ type MasterPlaylist struct {
 // relative URIs
 func DecodeMaster(content string, base *url.URL) (*MasterPlaylist, error) {
    lines := splitLines(content)
+   if err := checkHeader(lines); err != nil {
+      return nil, err
+   }
    master, err := parseMaster(lines)
    if err != nil {
       return nil, err
