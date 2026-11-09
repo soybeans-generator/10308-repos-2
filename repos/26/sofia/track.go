@@ -17,18 +17,8 @@ type EncBox struct {
 func DecodeEncBox(data []byte) (*EncBox, error) {
    b := &EncBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
-   }
-
-   boxSize := int(b.Header.Size)
-   if boxSize == 0 {
-      boxSize = len(data)
-      b.Header.Size = uint32(boxSize)
-   }
-   if boxSize < 8 || boxSize > len(data) {
-      return nil, fmt.Errorf("enc box size %d invalid for %d bytes of data", boxSize, len(data))
    }
 
    var entrySize int
@@ -40,56 +30,36 @@ func DecodeEncBox(data []byte) (*EncBox, error) {
    default:
       return nil, fmt.Errorf("unknown encryption box type %q", b.Header.Type[:])
    }
-
-   payloadOffset := 8
-   if boxSize < payloadOffset+entrySize {
-      return nil, fmt.Errorf("enc box too small for sample entry header: need %d bytes, have %d", payloadOffset+entrySize, boxSize)
+   if end := boxEnd(data, b.Header); end < 8+entrySize {
+      return nil, fmt.Errorf("enc box too small for sample entry header: need %d bytes, have %d", 8+entrySize, end)
    }
-   b.EntryHeader = data[payloadOffset : payloadOffset+entrySize]
+   b.EntryHeader = data[8 : 8+entrySize]
 
-   payload := data[payloadOffset+entrySize : boxSize]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      childSize := int(header.Size)
-      if childSize == 0 {
-         childSize = len(payload) - offset
-      }
-      if childSize < 8 || offset+childSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+childSize]
-      switch string(header.Type[:]) {
-      case "sinf":
-         sinf, err := DecodeSinfBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Sinf = sinf
-      default:
+   err = walkBoxes(boxPayloadFrom(data, b.Header, 8+entrySize), func(typ [4]byte, content []byte) error {
+      if string(typ[:]) != "sinf" {
          b.RawChildren = append(b.RawChildren, content)
+         return nil
       }
-      offset += childSize
+      sinf, decErr := DecodeSinfBox(content)
+      if decErr != nil {
+         return decErr
+      }
+      b.Sinf = sinf
+      return nil
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *EncBox) Encode() []byte {
-   buffer := make([]byte, 8)
-   buffer = append(buffer, b.EntryHeader...)
+   children := make([][]byte, 0, 1+len(b.RawChildren))
    if b.Sinf != nil {
-      buffer = append(buffer, b.Sinf.Encode()...)
+      children = append(children, b.Sinf.Encode())
    }
-   for _, child := range b.RawChildren {
-      buffer = append(buffer, child...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, b.EntryHeader, children)
 }
 
 // --- FRMA ---
@@ -101,11 +71,9 @@ type FrmaBox struct {
 func DecodeFrmaBox(data []byte) (*FrmaBox, error) {
    b := &FrmaBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
    if len(data) < 12 {
       return nil, errors.New("frma box is too small")
    }
@@ -114,12 +82,7 @@ func DecodeFrmaBox(data []byte) (*FrmaBox, error) {
 }
 
 func (b *FrmaBox) Encode() []byte {
-   buffer := make([]byte, 12)
-   w := writer{buf: buffer}
-   w.PutUint32(12)
-   w.PutBytes([]byte{'f', 'r', 'm', 'a'})
-   w.PutBytes(b.DataFormat[:])
-   return buffer
+   return encodeBox(b.Header, b.DataFormat[:], nil)
 }
 
 // --- MDHD ---
@@ -138,11 +101,9 @@ type MdhdBox struct {
 func DecodeMdhdBox(data []byte) (*MdhdBox, error) {
    b := &MdhdBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
    if len(data) < 12 {
       return nil, errors.New("mdhd box too small")
    }
@@ -156,19 +117,10 @@ func DecodeMdhdBox(data []byte) (*MdhdBox, error) {
       if len(data) < 44 {
          return nil, errors.New("mdhd v1 too short")
       }
-      b.CreationTime = p.Uint64()
-      b.ModificationTime = p.Uint64()
-      b.Timescale = p.Uint32()
-      b.Duration = p.Uint64()
-   } else { // Version 0
-      if len(data) < 32 {
-         return nil, errors.New("mdhd v0 too short")
-      }
-      b.CreationTime = uint64(p.Uint32())
-      b.ModificationTime = uint64(p.Uint32())
-      b.Timescale = p.Uint32()
-      b.Duration = uint64(p.Uint32())
+   } else if len(data) < 32 {
+      return nil, errors.New("mdhd v0 too short")
    }
+   b.CreationTime, b.ModificationTime, b.Timescale, b.Duration = decodeTimes(&p, b.Version)
 
    if len(data) < p.offset+4 {
       return nil, errors.New("mdhd truncated at language/quality")
@@ -179,37 +131,18 @@ func DecodeMdhdBox(data []byte) (*MdhdBox, error) {
 }
 
 func (b *MdhdBox) Encode() []byte {
-   var size uint32
+   bodySize := 24 // 4 version/flags + 16 v0 body + 4 language/quality
    if b.Version == 1 {
-      size = 44
-   } else {
-      size = 32
+      bodySize = 36 // 4 version/flags + 28 v1 body + 4 language/quality
    }
-   buffer := make([]byte, size)
-   w := writer{buf: buffer}
-
-   w.PutUint32(size)
-   w.PutBytes(b.Header.Type[:])
+   body := make([]byte, bodySize)
+   w := writer{buf: body}
    w.PutByte(b.Version)
    w.PutBytes(b.Flags[:])
-
-   if b.Version == 1 {
-      w.PutUint64(b.CreationTime)
-      w.PutUint64(b.ModificationTime)
-      w.PutUint32(b.Timescale)
-      w.PutUint64(b.Duration)
-   } else {
-      w.PutUint32(uint32(b.CreationTime))
-      w.PutUint32(uint32(b.ModificationTime))
-      w.PutUint32(b.Timescale)
-      w.PutUint32(uint32(b.Duration))
-   }
-
+   encodeTimes(&w, b.Version, b.CreationTime, b.ModificationTime, b.Timescale, b.Duration)
    w.PutBytes(b.Language[:])
    w.PutBytes(b.Quality[:])
-
-   b.Header.Size = size
-   return buffer
+   return encodeBox(b.Header, body, nil)
 }
 
 func (b *MdhdBox) SetDuration(duration uint64) {
@@ -230,62 +163,37 @@ type MdiaBox struct {
 func DecodeMdiaBox(data []byte) (*MdiaBox, error) {
    b := &MdiaBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      var decErr error
+      switch string(typ[:]) {
       case "mdhd":
-         mdhd, err := DecodeMdhdBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Mdhd = mdhd
+         b.Mdhd, decErr = DecodeMdhdBox(content)
       case "minf":
-         minf, err := DecodeMinfBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Minf = minf
+         b.Minf, decErr = DecodeMinfBox(content)
       default:
          b.RawChildren = append(b.RawChildren, content)
       }
-      offset += boxSize
+      return decErr
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *MdiaBox) Encode() []byte {
-   buffer := make([]byte, 8)
+   var children [][]byte
    if b.Mdhd != nil {
-      buffer = append(buffer, b.Mdhd.Encode()...)
+      children = append(children, b.Mdhd.Encode())
    }
    if b.Minf != nil {
-      buffer = append(buffer, b.Minf.Encode()...)
+      children = append(children, b.Minf.Encode())
    }
-   for _, child := range b.RawChildren {
-      buffer = append(buffer, child...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, nil, children)
 }
 
 // --- MINF ---
@@ -298,53 +206,34 @@ type MinfBox struct {
 func DecodeMinfBox(data []byte) (*MinfBox, error) {
    b := &MinfBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
-      case "stbl":
-         stbl, err := DecodeStblBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Stbl = stbl
-      default:
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      if string(typ[:]) != "stbl" {
          b.RawChildren = append(b.RawChildren, content)
+         return nil
       }
-      offset += boxSize
+      stbl, decErr := DecodeStblBox(content)
+      if decErr != nil {
+         return decErr
+      }
+      b.Stbl = stbl
+      return nil
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *MinfBox) Encode() []byte {
-   buffer := make([]byte, 8)
+   var children [][]byte
    if b.Stbl != nil {
-      buffer = append(buffer, b.Stbl.Encode()...)
+      children = append(children, b.Stbl.Encode())
    }
-   for _, child := range b.RawChildren {
-      buffer = append(buffer, child...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, nil, children)
 }
 
 // --- SCHI (Scheme Information) ---
@@ -357,53 +246,34 @@ type SchiBox struct {
 func DecodeSchiBox(data []byte) (*SchiBox, error) {
    b := &SchiBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
-      case "tenc":
-         tenc, err := DecodeTencBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Tenc = tenc
-      default:
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      if string(typ[:]) != "tenc" {
          b.RawChildren = append(b.RawChildren, content)
+         return nil
       }
-      offset += boxSize
+      tenc, decErr := DecodeTencBox(content)
+      if decErr != nil {
+         return decErr
+      }
+      b.Tenc = tenc
+      return nil
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *SchiBox) Encode() []byte {
-   buffer := make([]byte, 8)
+   var children [][]byte
    if b.Tenc != nil {
-      buffer = append(buffer, b.Tenc.Encode()...)
+      children = append(children, b.Tenc.Encode())
    }
-   for _, child := range b.RawChildren {
-      buffer = append(buffer, child...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, nil, children)
 }
 
 // --- SINF ---
@@ -417,62 +287,37 @@ type SinfBox struct {
 func DecodeSinfBox(data []byte) (*SinfBox, error) {
    b := &SinfBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      var decErr error
+      switch string(typ[:]) {
       case "frma":
-         frma, err := DecodeFrmaBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Frma = frma
+         b.Frma, decErr = DecodeFrmaBox(content)
       case "schi":
-         schi, err := DecodeSchiBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Schi = schi
+         b.Schi, decErr = DecodeSchiBox(content)
       default:
          b.RawChildren = append(b.RawChildren, content)
       }
-      offset += boxSize
+      return decErr
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *SinfBox) Encode() []byte {
-   buffer := make([]byte, 8)
+   var children [][]byte
    if b.Frma != nil {
-      buffer = append(buffer, b.Frma.Encode()...)
+      children = append(children, b.Frma.Encode())
    }
    if b.Schi != nil {
-      buffer = append(buffer, b.Schi.Encode()...)
+      children = append(children, b.Schi.Encode())
    }
-   for _, child := range b.RawChildren {
-      buffer = append(buffer, child...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, nil, children)
 }
 
 // --- STSD ---
@@ -486,74 +331,53 @@ type StsdBox struct {
 func DecodeStsdBox(data []byte) (*StsdBox, error) {
    b := &StsdBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
    if len(data) < 16 {
       return nil, errors.New("stsd box too short")
    }
    copy(b.HeaderFields[:], data[8:16])
 
-   payload := data[16:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
+   err = walkBoxes(boxPayloadFrom(data, b.Header, 16), func(typ [4]byte, content []byte) error {
+      switch string(typ[:]) {
       case "encv", "enca":
-         enc, err := DecodeEncBox(content)
-         if err != nil {
-            return nil, err
+         enc, decErr := DecodeEncBox(content)
+         if decErr != nil {
+            return decErr
          }
          b.EncChildren = append(b.EncChildren, enc)
       default:
          b.RawChildren = append(b.RawChildren, content)
       }
-      offset += boxSize
+      return nil
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *StsdBox) Encode() []byte {
-   buffer := make([]byte, 16)
-   copy(buffer[8:16], b.HeaderFields[:])
+   children := make([][]byte, 0, len(b.EncChildren)+len(b.RawChildren))
    for _, child := range b.EncChildren {
-      buffer = append(buffer, child.Encode()...)
+      children = append(children, child.Encode())
    }
-   for _, child := range b.RawChildren {
-      buffer = append(buffer, child...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, b.HeaderFields[:], children)
 }
 
-func (b *StsdBox) RemoveSinf() error {
+// RemoveSinf turns each encrypted sample entry into its plain form: the
+// entry type becomes the original format from frma and the sinf box is
+// dropped.
+func (b *StsdBox) RemoveSinf() {
    for _, child := range b.EncChildren {
-      if child.Sinf == nil {
+      if child.Sinf == nil || child.Sinf.Frma == nil {
          continue
       }
-      frma := child.Sinf.Frma
-      if frma == nil {
-         continue
-      }
-      child.Header.Type = frma.DataFormat
-      child.Sinf = nil // Remove the sinf box
+      child.Header.Type = child.Sinf.Frma.DataFormat
+      child.Sinf = nil
    }
-   return nil
 }
 
 // --- TRAK ---
@@ -566,64 +390,38 @@ type TrakBox struct {
 func DecodeTrakBox(data []byte) (*TrakBox, error) {
    b := &TrakBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
-      case "mdia":
-         mdia, err := DecodeMdiaBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Mdia = mdia
-      default:
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      if string(typ[:]) != "mdia" {
          b.RawChildren = append(b.RawChildren, content)
+         return nil
       }
-      offset += boxSize
+      mdia, decErr := DecodeMdiaBox(content)
+      if decErr != nil {
+         return decErr
+      }
+      b.Mdia = mdia
+      return nil
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *TrakBox) Encode() []byte {
-   buffer := make([]byte, 8)
+   var children [][]byte
    if b.Mdia != nil {
-      buffer = append(buffer, b.Mdia.Encode()...)
+      children = append(children, b.Mdia.Encode())
    }
-   for _, child := range b.RawChildren {
-      buffer = append(buffer, child...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, nil, children)
 }
 
 func (b *TrakBox) RemoveEdts() {
-   var kept [][]byte
-   for _, child := range b.RawChildren {
-      if len(child) >= 8 && string(child[4:8]) == "edts" {
-         continue
-      }
-      kept = append(kept, child)
-   }
-   b.RawChildren = kept
+   b.RawChildren = removeChildren(b.RawChildren, "edts")
 }
 
 // track.go marker preserve

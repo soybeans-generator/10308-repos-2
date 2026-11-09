@@ -6,6 +6,38 @@ import (
    "errors"
 )
 
+// decodeTimes reads the time fields shared by mvhd and mdhd, whose layout
+// differs only by FullBox version.
+func decodeTimes(p *parser, version byte) (creation, modification uint64, timescale uint32, duration uint64) {
+   if version == 1 {
+      creation = p.Uint64()
+      modification = p.Uint64()
+      timescale = p.Uint32()
+      duration = p.Uint64()
+   } else {
+      creation = uint64(p.Uint32())
+      modification = uint64(p.Uint32())
+      timescale = p.Uint32()
+      duration = uint64(p.Uint32())
+   }
+   return
+}
+
+// encodeTimes is decodeTimes in the other direction.
+func encodeTimes(w *writer, version byte, creation, modification uint64, timescale uint32, duration uint64) {
+   if version == 1 {
+      w.PutUint64(creation)
+      w.PutUint64(modification)
+      w.PutUint32(timescale)
+      w.PutUint64(duration)
+   } else {
+      w.PutUint32(uint32(creation))
+      w.PutUint32(uint32(modification))
+      w.PutUint32(timescale)
+      w.PutUint32(uint32(duration))
+   }
+}
+
 // --- MOOV ---
 type MoovBox struct {
    Header      *BoxHeader
@@ -18,69 +50,46 @@ type MoovBox struct {
 func DecodeMoovBox(data []byte) (*MoovBox, error) {
    b := &MoovBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      var decErr error
+      switch string(typ[:]) {
       case "mvhd":
-         mvhd, err := DecodeMvhdBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Mvhd = mvhd
+         b.Mvhd, decErr = DecodeMvhdBox(content)
       case "trak":
-         trak, err := DecodeTrakBox(content)
-         if err != nil {
-            return nil, err
+         var trak *TrakBox
+         if trak, decErr = DecodeTrakBox(content); decErr == nil {
+            b.Trak = append(b.Trak, trak)
          }
-         b.Trak = append(b.Trak, trak)
       case "pssh":
-         pssh, err := DecodePsshBox(content)
-         if err != nil {
-            return nil, err
+         var pssh *PsshBox
+         if pssh, decErr = DecodePsshBox(content); decErr == nil {
+            b.Pssh = append(b.Pssh, pssh)
          }
-         b.Pssh = append(b.Pssh, pssh)
       default:
          b.RawChildren = append(b.RawChildren, content)
       }
-      offset += boxSize
+      return decErr
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
 
 func (b *MoovBox) Encode() []byte {
-   buffer := make([]byte, 8)
+   children := make([][]byte, 0, 1+len(b.Trak)+len(b.RawChildren))
    if b.Mvhd != nil {
-      buffer = append(buffer, b.Mvhd.Encode()...)
+      children = append(children, b.Mvhd.Encode())
    }
    for _, trak := range b.Trak {
-      buffer = append(buffer, trak.Encode()...)
+      children = append(children, trak.Encode())
    }
    // pssh is skipped on encode
-   for _, raw := range b.RawChildren {
-      buffer = append(buffer, raw...)
-   }
-   b.Header.Size = uint32(len(buffer))
-   b.Header.Put(buffer)
-   return buffer
+   children = append(children, b.RawChildren...)
+   return encodeBox(b.Header, nil, children)
 }
 
 // FindDefaultKID walks the first track's sample entries and returns the first
@@ -118,14 +127,7 @@ func (b *MoovBox) FindPssh(systemID []byte) (*PsshBox, bool) {
 }
 
 func (b *MoovBox) RemoveMvex() {
-   var kept [][]byte
-   for _, child := range b.RawChildren {
-      if len(child) >= 8 && string(child[4:8]) == "mvex" {
-         continue
-      }
-      kept = append(kept, child)
-   }
-   b.RawChildren = kept
+   b.RawChildren = removeChildren(b.RawChildren, "mvex")
 }
 
 // --- MVHD ---
@@ -143,11 +145,9 @@ type MvhdBox struct {
 func DecodeMvhdBox(data []byte) (*MvhdBox, error) {
    b := &MvhdBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
    if len(data) < 12 {
       return nil, errors.New("mvhd box too small")
    }
@@ -161,55 +161,27 @@ func DecodeMvhdBox(data []byte) (*MvhdBox, error) {
       if len(data) < 40 { // 8 header + 4 version/flags + 28 v1 body
          return nil, errors.New("mvhd v1 too short")
       }
-      b.CreationTime = p.Uint64()
-      b.ModificationTime = p.Uint64()
-      b.Timescale = p.Uint32()
-      b.Duration = p.Uint64()
-   } else { // Version 0
-      if len(data) < 28 { // 8 header + 4 version/flags + 16 v0 body
-         return nil, errors.New("mvhd v0 too short")
-      }
-      b.CreationTime = uint64(p.Uint32())
-      b.ModificationTime = uint64(p.Uint32())
-      b.Timescale = p.Uint32()
-      b.Duration = uint64(p.Uint32())
+   } else if len(data) < 28 { // 8 header + 4 version/flags + 16 v0 body
+      return nil, errors.New("mvhd v0 too short")
    }
+   b.CreationTime, b.ModificationTime, b.Timescale, b.Duration = decodeTimes(&p, b.Version)
 
-   b.RemainingData = data[p.offset:b.Header.Size]
+   b.RemainingData = boxPayloadFrom(data, b.Header, p.offset)
    return b, nil
 }
 
 func (b *MvhdBox) Encode() []byte {
-   var bodySize int
+   bodySize := 20 // 4 version/flags + 16 v0 body
    if b.Version == 1 {
-      bodySize = 32 // 8+8+4+8 + 4 for ver/flags
-   } else {
-      bodySize = 20 // 4+4+4+4 + 4 for ver/flags
+      bodySize = 32 // 4 version/flags + 28 v1 body
    }
-   totalSize := uint32(8 + bodySize + len(b.RemainingData))
-   buffer := make([]byte, totalSize)
-
-   w := writer{buf: buffer}
-   w.PutUint32(totalSize)
-   w.PutBytes(b.Header.Type[:])
+   body := make([]byte, bodySize+len(b.RemainingData))
+   w := writer{buf: body}
    w.PutByte(b.Version)
    w.PutBytes(b.Flags[:])
-
-   if b.Version == 1 {
-      w.PutUint64(b.CreationTime)
-      w.PutUint64(b.ModificationTime)
-      w.PutUint32(b.Timescale)
-      w.PutUint64(b.Duration)
-   } else {
-      w.PutUint32(uint32(b.CreationTime))
-      w.PutUint32(uint32(b.ModificationTime))
-      w.PutUint32(b.Timescale)
-      w.PutUint32(uint32(b.Duration))
-   }
-
+   encodeTimes(&w, b.Version, b.CreationTime, b.ModificationTime, b.Timescale, b.Duration)
    w.PutBytes(b.RemainingData)
-   b.Header.Size = totalSize
-   return buffer
+   return encodeBox(b.Header, body, nil)
 }
 
 func (b *MvhdBox) SetDuration(duration uint64) {

@@ -15,15 +15,21 @@ var ErrStopped = errors.New("process stopped")
 
 // readBox buffers a complete box, header included, so the []byte
 // decoders can work on it unchanged. Only for small boxes: never mdat.
-func readBox(r io.Reader, typ [4]byte, size int64) ([]byte, error) {
+// hdr is the number of header bytes readBoxHeader already consumed: 8
+// for a 32-bit size, 16 when a 64-bit largesize field was present. A
+// largesize box is rewritten into the equivalent 32-bit-size form, so
+// the decoders always see an 8-byte header whose size matches the
+// length of the returned slice.
+func readBox(r io.Reader, typ [4]byte, size, hdr int64) ([]byte, error) {
    if size < 0 {
       return nil, errors.New("box extends to EOF; cannot buffer it")
    }
-   if size > 0xFFFFFFFF {
+   newSize := 8 + (size - hdr)
+   if newSize > 0xFFFFFFFF {
       return nil, errors.New("box too large to buffer")
    }
-   buf := make([]byte, size)
-   binary.BigEndian.PutUint32(buf[0:4], uint32(size))
+   buf := make([]byte, newSize)
+   binary.BigEndian.PutUint32(buf[0:4], uint32(newSize))
    copy(buf[4:8], typ[:])
    if _, err := io.ReadFull(r, buf[8:]); err != nil {
       return nil, err
@@ -32,16 +38,18 @@ func readBox(r io.Reader, typ [4]byte, size int64) ([]byte, error) {
 }
 
 // readBoxHeader reads one box header from r and returns the box type
-// with the full box size, header included. A size of -1 means the size
-// field was 0 and the box extends to the end of the stream, which only
-// makes sense for mdat.
-func readBoxHeader(r io.Reader) (typ [4]byte, size int64, err error) {
+// with the full box size, header included, and the number of header
+// bytes consumed (8, or 16 when a 64-bit largesize field was present).
+// A size of -1 means the size field was 0 and the box extends to the
+// end of the stream, which only makes sense for mdat.
+func readBoxHeader(r io.Reader) (typ [4]byte, size int64, hdr int64, err error) {
    var head [8]byte
    if _, err = io.ReadFull(r, head[:]); err != nil {
       return
    }
    copy(typ[:], head[4:8])
    n := binary.BigEndian.Uint32(head[0:4])
+   hdr = 8
    switch {
    case n == 0:
       size = -1
@@ -50,6 +58,7 @@ func readBoxHeader(r io.Reader) (typ [4]byte, size int64, err error) {
       if _, err = io.ReadFull(r, large[:]); err != nil {
          return
       }
+      hdr = 16
       size = int64(binary.BigEndian.Uint64(large[:]))
       if size < 16 {
          err = errors.New("invalid box largesize")
@@ -64,14 +73,14 @@ func readBoxHeader(r io.Reader) (typ [4]byte, size int64, err error) {
 }
 
 // skipBox discards a box payload. The header was already consumed by
-// readBoxHeader, so only size-8 bytes remain. size -1 means discard to
-// EOF.
-func skipBox(r io.Reader, size int64) error {
+// readBoxHeader, so size-hdr bytes remain, where hdr is 8 or 16. A size
+// of -1 means discard to EOF.
+func skipBox(r io.Reader, size, hdr int64) error {
    if size < 0 {
       _, err := io.Copy(io.Discard, r)
       return err
    }
-   _, err := io.CopyN(io.Discard, r, size-8)
+   _, err := io.CopyN(io.Discard, r, size-hdr)
    return err
 }
 
@@ -128,13 +137,11 @@ func (r *Remuxer) AddSegment(segmentData []byte) error {
          pendingMoof = box.Moof
          continue
       }
-      if box.Mdat != nil {
-         if pendingMoof != nil {
-            if err := r.processFragment(pendingMoof, box.Mdat); err != nil {
-               return fmt.Errorf("processing fragment at box index %d: %w", i, err)
-            }
-            pendingMoof = nil
+      if box.Mdat != nil && pendingMoof != nil {
+         if err := r.processFragment(pendingMoof, box.Mdat); err != nil {
+            return fmt.Errorf("processing fragment at box index %d: %w", i, err)
          }
+         pendingMoof = nil
       }
    }
    return nil
@@ -282,7 +289,7 @@ func (r *Remuxer) Process(reader io.Reader) error {
          default:
          }
       }
-      typ, size, err := readBoxHeader(br)
+      typ, size, hdr, err := readBoxHeader(br)
       if err == io.EOF {
          return nil
       }
@@ -292,10 +299,10 @@ func (r *Remuxer) Process(reader io.Reader) error {
       switch string(typ[:]) {
       case "moov":
          if r.Moov != nil {
-            err = skipBox(br, size)
+            err = skipBox(br, size, hdr)
             break
          }
-         data, bufErr := readBox(br, typ, size)
+         data, bufErr := readBox(br, typ, size, hdr)
          if bufErr != nil {
             err = bufErr
             break
@@ -312,7 +319,7 @@ func (r *Remuxer) Process(reader io.Reader) error {
             err = r.OnMoov(moov)
          }
       case "moof":
-         data, bufErr := readBox(br, typ, size)
+         data, bufErr := readBox(br, typ, size, hdr)
          if bufErr != nil {
             err = bufErr
             break
@@ -320,7 +327,7 @@ func (r *Remuxer) Process(reader io.Reader) error {
          pendingMoof, err = DecodeMoofBox(data)
       case "mdat":
          if pendingMoof == nil {
-            err = skipBox(br, size)
+            err = skipBox(br, size, hdr)
             break
          }
          var mdat *MdatBox
@@ -333,7 +340,7 @@ func (r *Remuxer) Process(reader io.Reader) error {
             }
             mdat = &MdatBox{Payload: data}
          } else {
-            data, bufErr := readBox(br, typ, size)
+            data, bufErr := readBox(br, typ, size, hdr)
             if bufErr != nil {
                err = bufErr
                break
@@ -350,7 +357,7 @@ func (r *Remuxer) Process(reader io.Reader) error {
          r.segmentCount++
          r.resumeOffset = br.N
       default:
-         err = skipBox(br, size)
+         err = skipBox(br, size, hdr)
       }
       if err != nil {
          return err
@@ -402,10 +409,10 @@ func (r *Remuxer) initMoov(initSegment []byte) error {
    if !ok {
       return errors.New("no moov found")
    }
-   r.Moov = moovPtr
-   if len(r.Moov.Trak) == 0 {
+   if len(moovPtr.Trak) == 0 {
       return errors.New("no trak found")
    }
+   r.Moov = moovPtr
    return nil
 }
 
