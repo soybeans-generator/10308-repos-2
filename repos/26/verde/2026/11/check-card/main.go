@@ -20,6 +20,7 @@ var targets = []Target{
    {Name: "FIREHOUSE SUBS", Distance: "4.2 mi"},
    {Name: "IN-N-OUT", Distance: "4.1 mi"},
    {Name: "JASON'S DELI"},
+   {Name: "JOES COFFEE SHOP"},
    {Name: "LA MADELEINE"},
    {Name: "MCDONALD'S"},
    {Name: "SCHLOTZSKYS"},
