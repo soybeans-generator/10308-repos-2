@@ -1,50 +1,30 @@
 // kernel.go begin
 //go:build windows
 
-// The Warbird kernel interface and the build profile: the one place a Go pointer
-// becomes a uintptr, the one fault handler, the op=3 argument block, and the cache
-// of everything derived from one DLL build.
+// The Warbird kernel interface and the build profile.
 //
-// # THE CALL
+// op=1 (segment decrypt) is -2's and lives in warbird.go. op=3
+// (WbHeapExecuteCall) is -1's, -3's and -6's, so its argument block is wbArgs.
 //
-// op=1 (segment decrypt) is used by -2 alone and lives in warbird.go. op=3
-// (WbHeapExecuteCall) is used by -1, -3 and -6, so its block is wbArgs below.
-// Both go through callWarbird or the equivalent, and the pointer conversion is
-// confined to one place whose contract is stated.
+// REJECTION IS IN THE STATUS DWORD, NOT IN NTSTATUS. The routine writes 0x80070057
+// (E_INVALIDARG) to the status pointer and returns normally, so NtQuerySystemInformation
+// still returns 0 and a check written as "NTSTATUS != 0" never fires. statusOK is the
+// one implementation of it.
 //
-// IMPORTANT: rejection is in the STATUS DWORD, not in NTSTATUS. The routine writes
-// 0x80070057 (E_INVALIDARG) to the status pointer and returns normally, so
-// NtQuerySystemInformation still returns 0 and a check written as "NTSTATUS != 0"
-// never fires. statusOK is the one implementation of it.
+// A FAULT IN A DESCRIPTOR'S CODE IS A WINDOWS SEH EXCEPTION, not a Go panic:
+// recover() never runs. wbVEH turns it into a FAULT line.
 //
-// # THE FAULT HANDLER
-//
-// A fault in a descriptor's code is a Windows SEH exception, not a Go panic, so
-// recover() never runs. wbVEH installs a first-chance handler that prints a FAULT
-// line and exits; without it a fault is a silent process death the parent can only
-// record as "no result".
-//
-// # THE BUILD PROFILE
-//
-// The cache of everything this program derives from one DLL build, keyed by its
-// SHA-256, and the seam between the two halves of the pipeline:
+// THE PROFILE is everything derived from one DLL build, keyed by its SHA-256:
 //
 //   DLL phase   -1, -2, -3   fill it in; run once per build
 //   BLA phase   -4, -5, -6   read it;    run once per sample
 //
-// THE KEY IS THE DLL'S SHA-256, NEVER THE IMAGE'S. Every LoadLibraryW bakes the
-// process load base into IAT slots and relocated fields, so two decrypted images
-// of the same DLL do not hash alike. A per-image key would invalidate the cache on
-// every run.
+// Never keyed by the image: LoadLibraryW bakes the process load base into IAT slots
+// and relocated fields, so two decrypted images of one DLL never hash alike. Map and
+// Stages are keyed by routine family via vkey.
 //
-// Map and Stages are keyed by routine family ("0", "1", "2"): key[0x40] % 3
-// selects one of three chains, and each has its own table AND its own stage
-// routines. vkey is the only function that builds those keys.
-//
-// THE CENSUS IS WHY THE PROFILE EXISTS AT ALL. scanDescs hashes several gigabytes,
-// and every trial child needs the spans and heap blocks it produces. Caching them
-// turns a child from a five-second process into a half-second one, and a fault
-// costs a child.
+// The census is why the profile exists: scanDescs hashes several gigabytes, and every
+// trial child needs its output.
 package main
 
 import (
@@ -60,25 +40,16 @@ import (
    "unsafe"
 )
 
-// keyLen is the only kernel-ABI constant kept at package scope, because every step
-// names it: 32 bytes is the P-256 private scalar length, the size -5's routine
-// accepts, and the size it tests for itself with `cmp dword ptr [rcx+10h], 20h`.
+// keyLen is the only kernel-ABI constant kept at package scope: 32 bytes is the
+// P-256 scalar length, the size -5's routine accepts, and the size it tests for
+// itself with `cmp dword ptr [rcx+10h], 20h`.
 const keyLen = 0x20
-
-// ----------------------------------------------------------- the build profile
 
 const profileVersion = 5
 
-// wbKernel32 is one LazyDLL for every kernel32 entry point below.
-//
-// wbVirtualProtect and wbNtQuery are resolved names because both are called from
-// hot paths, so a LazyProc built at the call site would be re-resolved by Find on
-// every call.
-//
-// wbMappedName is K32GetMappedFileNameW, not GetMappedFileNameW: the unprefixed
-// name lives in psapi.dll, and a LazyProc built for it on kernel32 panics on first
-// Call - which here is inside the VEH callback, turning a reported fault into a
-// silent process death.
+// wbMappedName is K32GetMappedFileNameW, not GetMappedFileNameW: the unprefixed name
+// lives in psapi.dll, and a LazyProc built for it on kernel32 panics on first Call -
+// which here is inside the VEH callback, turning a reported fault into a silent death.
 var (
    wbKernel32 = syscall.NewLazyDLL("kernel32.dll")
 
@@ -91,42 +62,32 @@ var (
 // callWarbird makes one op=3 call and is the only place a Go pointer becomes a
 // uintptr for the kernel.
 //
-// The conversion is unavoidable: Call takes ...uintptr. It needs no
-// runtime.KeepAlive because syscall.(*LazyProc).Call is declared
-// //go:uintptrescapes, so the compiler treats the converted pointer as escaping
-// for the duration of the call.
-//
-// What that directive does NOT cover is Out: its address is stored as a uintptr
-// inside the struct, so the GC cannot follow it, and the caller must keep the
-// output buffer live until it has read the result.
+// It needs no runtime.KeepAlive because syscall.(*LazyProc).Call is declared
+// //go:uintptrescapes. That directive does NOT cover Out, whose address is stored as
+// a uintptr the GC cannot follow, so the caller must keep the output buffer live
+// until it has read the result.
 func callWarbird(a *wbArgs) uintptr {
-   // SystemExtendedProcessInformation (0xB9) is the Warbird call gate.
-   r1, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(a)), 0x34, 0)
+   r1, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(a)), 0x34, 0) // 0xB9 = call gate
    return r1
 }
 
-// loadWarbird maps the PlayReady module into this process and resolves the Warbird
-// call gate, returning the image base.
-//
-// The module must be mapped before any call: the descriptor address is relative to
-// that image base in this process, not a file offset. The handle is not retained
-// or released - the module has to stay mapped for the life of the process.
+// loadWarbird maps the PlayReady module into this process and resolves the call gate,
+// returning the image base. The module must stay mapped for the life of the process.
 func loadWarbird() (base uintptr, err error) {
    base, err = wbLoad(dllPath)
    if err != nil {
       return 0, fmt.Errorf("loading %s: %w", dllPath, err)
    }
-   // Resolve now, not on first Call: a Find failure inside mustFind panics, and a
-   // panic at the call site would look like a fault in the descriptor's code.
+   // Resolve now: a Find failure inside mustFind panics, and a panic at the call site
+   // would look like a fault in the descriptor's code.
    if err := wbNtQuery.Find(); err != nil {
       return 0, fmt.Errorf("NtQuerySystemInformation: %w", err)
    }
    return base, nil
 }
 
-// pfDLL reads the module and returns its bytes and hex digest. Every step that
-// touches the profile starts here, so the bytes hashed and the image loaded are the
-// same read.
+// pfDLL returns the module's bytes and hex digest from one read, so the bytes hashed
+// and the image loaded are provably the same.
 func pfDLL() ([]byte, string, error) {
    fb, err := os.ReadFile(dllPath)
    if err != nil {
@@ -136,9 +97,8 @@ func pfDLL() ([]byte, string, error) {
    return fb, hex.EncodeToString(sum[:]), nil
 }
 
-// pfSave writes the profile, indented so it can be read by a human: it is small,
-// and "which build is cached, and how far did it get" is a question worth being
-// able to answer without running anything.
+// pfSave writes the profile indented: it is small, and "which build is cached, and
+// how far did it get" is worth being able to read.
 func pfSave(p *dllProfile) error {
    blob, err := json.MarshalIndent(p, "", "  ")
    if err != nil {
@@ -147,27 +107,21 @@ func pfSave(p *dllProfile) error {
    return os.WriteFile(profilePath, append(blob, '\n'), 0o644)
 }
 
-// statusOK reports whether the routine's status dword - the four bytes it writes at
-// its own +0x00 - is zero. See the note at the top of the file for why this and not
-// NTSTATUS is the rejection signal.
+// statusOK reports whether the routine's status dword is zero. See the file header
+// for why this and not NTSTATUS is the rejection signal.
 func statusOK(b []byte) bool {
    return len(b) >= 4 && b[0]|b[1]|b[2]|b[3] == 0
 }
 
-// vkey is the profile's key for one routine family. JSON object keys must be
-// strings, and every writer and reader goes through this one function.
+// vkey is the profile's key for one routine family. JSON object keys are strings,
+// and every writer and reader goes through this one function.
 func vkey(v int) string { return strconv.Itoa(v) }
 
 // wbFree releases one reference taken by wbLoad. The error is returned rather than
-// swallowed: -2 reloads the module once per heap block, so a leak here is a leak of
-// hundreds of mappings.
+// swallowed: -2 reloads the module once per heap block.
 func wbFree(h uintptr) error { return syscall.FreeLibrary(syscall.Handle(h)) }
 
 // wbLoad maps a module into this process and returns its base address.
-//
-// LoadLibrary rather than LoadDLL: the *DLL wrapper only exists so a caller can
-// resolve exports by name, and nothing here does. An unretained *DLL would let the
-// wrapper be collected while the module stays mapped.
 func wbLoad(path string) (uintptr, error) {
    h, err := syscall.LoadLibrary(path)
    if err != nil {
@@ -176,21 +130,18 @@ func wbLoad(path string) (uintptr, error) {
    return uintptr(h), nil
 }
 
-// wbMemAt reinterprets an address the OS handed us as an integer.
-//
-// The direct form unsafe.Pointer(u) is rejected by vet's unsafeptr check, which
-// cannot see that these integers are mapped addresses. unsafe.Add is the identity
-// on the address and vet accepts it. The pointer never escapes: every caller copies
-// immediately.
+// wbMemAt reinterprets an address the OS handed us as an integer. The direct form
+// unsafe.Pointer(u) is rejected by vet's unsafeptr check, which cannot see that these
+// integers are mapped addresses; unsafe.Add is the identity and vet accepts it. The
+// pointer never escapes: every caller copies immediately.
 func wbMemAt(u uintptr) unsafe.Pointer { return unsafe.Add(unsafe.Pointer(nil), u) }
 
 // wbPatch copies buf to base+rva, flipping the containing pages to RWX for the copy
 // and restoring the previous protection afterwards.
 //
 // The restore is part of the operation, not cleanup: a page left writable is a page
-// the kernel refuses to take a descriptor from (0xc000000d), so a failed restore is
-// reported as a failed patch rather than left for the next call to blame on the
-// routine it was about to invoke.
+// the kernel refuses to take a descriptor from (0xc000000d), so a failed restore is a
+// failed patch.
 func wbPatch(base uintptr, rva uint32, buf []byte) bool {
    if len(buf) == 0 {
       return true
@@ -209,28 +160,18 @@ func wbPatch(base uintptr, rva uint32, buf []byte) bool {
    return r != 0
 }
 
-// wbVEH installs a first-chance handler that reports the fault and exits.
-//
-// A false return means no handler was installed, and the caller must treat that as
-// fatal: with no handler every fault is a plain process death with no output at
-// all, which the parent can only record as "no result".
+// wbVEH installs a first-chance handler that reports the fault and exits. A false
+// return means no handler was installed, and the caller must treat that as fatal:
+// with no handler every fault is a plain process death with no output at all.
 //
 // THE os.Exit BELOW IS DELIBERATE AND IS THE PROGRAM'S ONLY ONE OUTSIDE main. The
 // callback is invoked by Windows' exception dispatcher, not by Go code, so there is
-// no caller to return a code to and no stack of ours to unwind:
-//
-//   - it cannot return an error - the signature belongs to the OS;
-//   - it cannot panic - a panic in a syscall.NewCallback trampoline is a fatal
-//     runtime abort, which would replace the FAULT line (the one diagnostic -3 and
-//     -6 parse) with a generic crash dump;
-//   - it cannot return EXCEPTION_CONTINUE_SEARCH (0) - the fault would fall through
-//     to the default handler and kill the process anyway;
-//   - it cannot return EXCEPTION_CONTINUE_EXECUTION (-1) - the faulting instruction
-//     would be retried forever.
-//
-// Exiting here is also safe: ExitProcess is legal from a callback thread, and the
-// FAULT line is already out because stdout is unbuffered.
-func wbVEH(base uintptr, say func(string)) bool {
+// no caller to return a code to and no stack of ours to unwind: it cannot return an
+// error (the signature belongs to the OS), cannot panic (a panic in a NewCallback
+// trampoline is a fatal runtime abort that would replace the FAULT line with a crash
+// dump), cannot CONTINUE_SEARCH (the fault would kill the process anyway) and cannot
+// CONTINUE_EXECUTION (the faulting instruction would retry forever).
+func wbVEH(base uintptr) bool {
    cb := syscall.NewCallback(func(ep *excPointers) uintptr {
       mod := "-"
       var nm [512]uint16
@@ -246,9 +187,9 @@ func wbVEH(base uintptr, say func(string)) bool {
          raw = hex.EncodeToString(unsafe.Slice((*byte)(wbMemAt(ep.Record.Address)), 16))
       }
 
-      say(fmt.Sprintf("FAULT 0x%08x addr=0x%016x off=%+#x module=%s bytes=%s",
+      fmt.Printf("FAULT 0x%08x addr=0x%016x off=%+#x module=%s bytes=%s\n",
          ep.Record.Code, ep.Record.Address,
-         int64(ep.Record.Address)-int64(base), mod, raw))
+         int64(ep.Record.Address)-int64(base), mod, raw)
       os.Exit(3)
       return 0
    })
@@ -266,38 +207,24 @@ type dllProfile struct {
 }
 
 // pfLoad returns the profile for sha, or an empty one when the file is missing,
-// unreadable, or written for a different build.
-//
-// Only the DLL-phase steps call this. They are about to fill in a section, and
-// discarding a stale file costs nothing but the work they were going to redo
-// anyway.
+// unreadable, or written for a different build. Only the DLL-phase steps call it:
+// they are about to fill in a section, so discarding a stale file is free.
 func pfLoad(sha string) *dllProfile {
-   raw, err := os.ReadFile(profilePath)
-   if err != nil {
-      return pfNew(sha)
+   if raw, err := os.ReadFile(profilePath); err == nil {
+      var p dllProfile
+      if json.Unmarshal(raw, &p) == nil && p.Version == profileVersion && p.DLLSHA256 == sha {
+         return &p
+      }
    }
-   var p dllProfile
-   if err := json.Unmarshal(raw, &p); err != nil {
-      return pfNew(sha)
-   }
-   if p.Version != profileVersion || p.DLLSHA256 != sha {
-      return pfNew(sha)
-   }
-   return &p
-}
-
-// pfNew is an empty profile for this build.
-func pfNew(sha string) *dllProfile {
    return &dllProfile{Version: profileVersion, DLLSHA256: sha}
 }
 
-// pfRequire is pfLoad for the steps that cannot start over: they need the map
-// another step filled in. The error names the command that fixes it rather than the
-// missing field, because the fix is the same for all of them.
+// pfRequire is pfLoad for the steps that cannot start over: they need the map another
+// step filled in.
 //
-// Every family present is validated here rather than in each caller: 16 keys in
-// 0..15 mapping to 16 distinct values is a bijection, and stage 4 indexes a table
-// with it, so a repeated value would panic inside a child instead of failing here.
+// Every family present is validated here rather than in each caller: 16 keys in 0..15
+// mapping to 16 distinct values is a bijection, and stage 4 indexes a table with it,
+// so a repeated value would panic inside a child instead of failing here.
 func pfRequire(sha string) (*dllProfile, error) {
    raw, err := os.ReadFile(profilePath)
    if err != nil {
@@ -321,10 +248,7 @@ func pfRequire(sha string) (*dllProfile, error) {
       if err != nil || v < 0 || v > 2 {
          return nil, fmt.Errorf("%s: map key %q is not a family index", profilePath, k)
       }
-      if pm == nil || len(pm.Map) != 16 {
-         return nil, fmt.Errorf("%s: family %d has no usable permutation - run prkf -3", profilePath, v)
-      }
-      if pm.Consumer == 0 || pm.Cluster < 0x1000 {
+      if pm == nil || len(pm.Map) != 16 || pm.Consumer == 0 || pm.Cluster < 0x1000 {
          return nil, fmt.Errorf("%s: family %d has no usable map - run prkf -3", profilePath, v)
       }
       var seen uint32
@@ -342,8 +266,8 @@ func pfRequire(sha string) (*dllProfile, error) {
    return &p, nil
 }
 
-// excPointers and excRecord are EXCEPTION_POINTERS and the head of
-// EXCEPTION_RECORD. Nothing past ExceptionAddress is dereferenced.
+// excPointers and excRecord are EXCEPTION_POINTERS and the head of EXCEPTION_RECORD.
+// Nothing past ExceptionAddress is dereferenced.
 type excPointers struct {
    Record  *excRecord
    Context uintptr
@@ -356,21 +280,16 @@ type excRecord struct {
    Address uintptr
 }
 
-// profileCensus is the descriptor census, flattened. Spans are the segment ranges
-// to patch; Heaps are {va, descVA, codeRVA, codeLen}.
-//
-// ALL FOUR heap fields are needed. va is the descriptor's own address and
-// identifies a candidate; descVA is +0x28 and is what a call inside the image
-// targets; the last two locate the code. Storing only the last three left every
-// descriptor with va == 0, collapsed the census onto one map key, and made -6
-// report "1 heap-exec descriptor".
+// profileCensus is the descriptor census, flattened. Spans are the segment ranges to
+// patch; Heaps are {va, descVA, codeRVA, codeLen}. All four heap fields are needed:
+// storing only three left every descriptor with va == 0 and collapsed the census onto
+// one map key.
 type profileCensus struct {
    Spans [][2]uint32 `json:"spans"`
    Heaps [][4]uint32 `json:"heaps"`
 }
 
-// profileMap is -3's result for one family: the live bijection set, the magic
-// sequence recovered from it, and the nibble permutation.
+// profileMap is -3's result for one family.
 type profileMap struct {
    Cluster  uint32         `json:"cluster"`
    Magic    string         `json:"magic"`
@@ -378,15 +297,11 @@ type profileMap struct {
    Consumer uint32         `json:"consumer_desc_va"`
 }
 
-// profileStages is -6's result for one family, and it records the WHOLE chain
-// rather than just the two descriptors.
-//
-// S1 and S2 are descriptor addresses - what op=3 is handed. K1 and K2 are which
-// 0x20-byte half of the sample's key component each stage receives; O1 and O2 are
-// which of the two 0x20-byte buffers holds that stage's output. The layout is not
-// self-evident from the code - op=3 is handed a key pointer and an output pointer,
-// and a routine may write to either or both - so the search tries every
-// combination and this is what it records.
+// profileStages is -6's result for one family, recording the WHOLE chain rather than
+// just the two descriptors: S1/S2 are descriptor addresses, K1/K2 which 0x20-byte
+// half of the key component each stage receives, O1/O2 which of the two buffers holds
+// its output. op=3 hands a routine a key pointer and an output pointer, and a routine
+// may write to either or both, so the search tries every combination.
 type profileStages struct {
    S1 uint32 `json:"s1_desc_va"`
    S2 uint32 `json:"s2_desc_va"`
@@ -397,8 +312,8 @@ type profileStages struct {
 }
 
 // wbArgs is the kernel WarbirdCallArgs block for op=3. The arguments the routine
-// itself sees begin at +0x10, which is why its documented +0x14 output field lands
-// at +0x24 here:
+// itself sees begin at +0x10, which is why its documented +0x14 output field lands at
+// +0x24 here:
 //
 //   +0x00  op = 3
 //   +0x08  descriptor address
@@ -407,14 +322,9 @@ type profileStages struct {
 //   +0x20  u32 key size      (routine's +0x10)
 //   +0x24  -> output buffer  (routine's +0x14)
 //
-// Out is a byte array and not a *byte field because +0x24 is not 8-byte aligned:
-// Go would insert four bytes of padding before a pointer field and move the output
-// pointer to +0x28, where the routine never looks. The struct ends at +0x34; Go
-// rounds its size up to 0x38, but the tail is never written and never read,
-// because the call is told 0x34.
-//
-// Status and Key are real *byte fields, so the GC can follow them. Out cannot be,
-// which is why the output buffer has a separate lifetime rule; see newWbArgs.
+// Out is a byte array and not a *byte field because +0x24 is not 8-byte aligned: Go
+// would insert four bytes of padding and move the output pointer to +0x28, where the
+// routine never looks. The struct ends at +0x34; the call is told 0x34.
 type wbArgs struct {
    Op      uint64  // +0x00
    Desc    uint64  // +0x08
@@ -425,14 +335,11 @@ type wbArgs struct {
    _       [8]byte // +0x2c, padding
 }
 
-// newWbArgs builds the block for one call. All three slices must be non-empty; an
-// empty slice panics here, at construction, rather than passing a null pointer to
-// the kernel.
+// newWbArgs builds the block for one call. All three slices must be non-empty.
 //
-// Lifetime: status and key are reachable through the struct's pointer fields, so
-// keeping the struct alive keeps both buffers alive. out is not - only its address
-// is stored, as a uintptr the GC cannot follow - so the caller must keep it live
-// until it has read the result.
+// Lifetime: status and key are reachable through the struct's pointer fields. out is
+// not - only its address is stored, as a uintptr the GC cannot follow - so the caller
+// must keep it live until it has read the result.
 func newWbArgs(descAddr uint64, status, key, out []byte, size uint32) *wbArgs {
    a := &wbArgs{
       Op:      3,
@@ -441,8 +348,8 @@ func newWbArgs(descAddr uint64, status, key, out []byte, size uint32) *wbArgs {
       Key:     &key[0],
       KeySize: size,
    }
-   // The only unaligned pointer in the program. The field is a byte array by ABI,
-   // so the address has to be written as a uintptr.
+   // The only unaligned pointer in the program. The field is a byte array by ABI, so
+   // the address has to be written as a uintptr.
    binary.LittleEndian.PutUint64(a.Out[:], uint64(uintptr(unsafe.Pointer(&out[0]))))
    return a
 }

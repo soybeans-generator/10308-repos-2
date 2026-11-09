@@ -14,37 +14,28 @@
 // # THIS STEP OWNS THE SEARCH
 //
 // The search used to be a flag of its own, numbered before the carve step, and that
-// could not work: every candidate is accepted only when the scalar its chain
-// produces satisfies d*G == extracted.enc.pub, and nothing local can stand in for
-// that check, since a tuple verified against itself is consistent by construction.
-// There is no sample before -4, so the search lives here, cached per family, and the
-// DLL phase is -1, -2 and -3.
+// could not work: every candidate is accepted only when the scalar its chain produces
+// satisfies d*G == extracted.enc.pub, and nothing local can stand in for that check,
+// since a tuple verified against itself is consistent by construction. There is no
+// sample before -4, so the search lives here, cached per family.
 //
 // # STAGES 3 AND 4 ARE ONE PASS
 //
-// mut is 32 bytes, so 64 nibbles. Nibble i selects one byte from its own 16-byte
-// row at the family's cluster, and that byte - a value in 0..15 - indexes the
-// 16-entry permutation. So `mapt[img[cluster+i*16+nibble]]`, sixty-four times.
+// mut is 32 bytes, so 64 nibbles. Nibble i selects one byte from its own 16-byte row
+// at the family's cluster, and that byte - a value in 0..15 - indexes the 16-entry
+// permutation. So `mapt[img[cluster+i*16+nibble]]`, sixty-four times.
 //
-// The two stages used to be written as nibble-extract, table lookup, pack, nibble-
-// extract again, permute, pack. The second extraction is the identity: packing then
-// unpacking returns the same 64 nibbles. Writing it out as one pass removes an
-// array and the chance of getting that identity wrong, which is exactly the bug one
-// version had - it re-extracted from the packed bytes and read `mp[0]>>4` instead of
-// `mp[0]`, so every scalar came out wrong and the search reported no pairing.
+// The two stages were once written as nibble-extract, table lookup, pack, nibble-
+// extract again, permute, pack. The second extraction is the identity, and a version
+// that kept it re-extracted from the packed bytes and read `mp[0]>>4` instead of
+// `mp[0]`, so every scalar came out wrong.
 //
 // key[0x40] % 3 selects one of three routine families, each with its own bijection
 // table AND its own stage routines, so a search records only the family it was run
-// for and a sample of a family this build has never seen pays for one search.
+// for.
 //
-// Applying a pairing is two children - stage 1 then stage 2 - using the recorded
-// key halves and buffers, which the search found to be the only combination that
-// reproduces the sample's key. dpSample carves the key components out of
-// msprcore.bla itself when -4 has not written them yet.
-//
-// USAGE  prkf -6. Its children are selected by trialEnv and take no arguments
-//
-//   (see stages.go and childMode in child.go).
+// Applying a pairing is two children - stage 1 then stage 2 - using the recorded key
+// halves and buffers, the only combination that reproduces the sample's key.
 package main
 
 import (
@@ -59,20 +50,17 @@ import (
    "strings"
 )
 
-// dpApply replays a pairing and returns the scalar its chain produces. Two children
-// - p1 for stage 1, p2 for stage 2 - because those are the only trial modes there
-// are. Stages 3 and 4 are pure table work, so they run here.
-//
-// It uses the recorded key halves and buffers, not defaults: those were discovered
-// by the search and are the only combination that reproduces the sample's key.
+// dpApply replays a pairing and returns the scalar its chain produces. Two children -
+// p1 for stage 1, p2 for stage 2 - because those are the only trial modes there are.
+// Stages 3 and 4 are pure table work, so they run here.
 func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any)) ([]byte, error) {
    say("family %d  cluster 0x%06x", fam, in.cluster[fam])
    say("stage 1  0x%06x  key half %d  out buffer %d", st.S1, st.K1, st.O1)
    say("stage 2  0x%06x  key half %d  out buffer %d", st.S2, st.K2, st.O2)
    say("")
 
-   // p1 runs both halves and prints both buffers, so the recorded half and buffer
-   // are picked out of the two rows rather than requested.
+   // p1 runs both halves and prints both buffers, so the recorded half and buffer are
+   // picked out of the two rows rather than requested.
    b1 := dpRunP1([]uint32{st.S1})
    if b1.loadfail != "" {
       return nil, fmt.Errorf("%s", b1.loadfail)
@@ -119,11 +107,6 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
 // mut is 32 bytes, so 64 nibbles, high nibble first. Nibble i selects one byte from
 // its own 16-byte row at the family's cluster - a value in 0..15 - and that value
 // indexes the 16-entry permutation. The packed form is rebuilt at the end.
-//
-// The two stages were once written as nibble-extract, lookup, pack, nibble-extract,
-// permute, pack. The second extraction is the identity, so collapsing it removes an
-// array and a place to get that identity wrong; a version that kept it re-extracted
-// from the packed bytes and read mp[0]>>4 instead of mp[0], which broke every scalar.
 func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, bool) {
    if len(mut) < 0x20 {
       return nil, false
@@ -157,8 +140,8 @@ func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, 
 }
 
 // dpCommit is the one place a derived scalar becomes a file. The check is repeated
-// here rather than trusted from the caller: this is the only write, so it is the
-// only place a wrong scalar could reach the disk.
+// here rather than trusted from the caller: this is the only write, so it is the only
+// place a wrong scalar could reach the disk.
 func dpCommit(plain, want []byte, say func(string, ...any)) error {
    if !pubMatches(plain, want) {
       return fmt.Errorf("scalar does not reproduce %s\n  got  %x\n  want %x",
@@ -199,9 +182,9 @@ func dpDerive() (code int) {
       return fail("%v", err)
    }
 
-   // The sample: the pairing is found by running a real key through the stages and
-   // verified by d*G == extracted.enc.pub, and a synthetic key cannot be used
-   // because the routines reject it.
+   // The pairing is found by running a real key through the stages and verified by
+   // d*G == extracted.enc.pub; a synthetic key cannot be used because the routines
+   // reject it.
    prv, pub, err := dpSample()
    if err != nil {
       return fail("%v", err)
@@ -214,7 +197,7 @@ func dpDerive() (code int) {
    }
 
    say("dll    %s", in.sha)
-   say("image  %s  (%d bytes, SizeOfImage 0x%x)", imgPath, len(in.img), in.sizeImg)
+   say("image  %s  (%d bytes, SizeOfImage 0x%x)", imgPath, len(in.img), in.size)
    say("prv    %s  family %d (key[0x40]=0x%02x %%3)", encPrvPath, fam, prv[0x40])
    say("pub    %s", encPubPath)
    say("")
@@ -229,8 +212,7 @@ func dpDerive() (code int) {
          return fail("%v", err)
       }
       // Assigned, not replaced: the stage routines are selected by the same byte as
-      // the bijection table, so this search says nothing about another family, and
-      // dropping a pairing already cached for one would cost it a search.
+      // the bijection table, so this search says nothing about another family.
       if in.prof.Stages == nil {
          in.prof.Stages = map[string]*profileStages{}
       }
@@ -280,8 +262,8 @@ func dpSample() (prv, pub []byte, err error) {
 }
 
 // pubBytes normalizes a stored public key to the 65-byte SEC 1 form. The key files
-// carry X||Y with no prefix, so that is the only difference to absorb. nil means
-// the point is off the curve or at infinity, which NewPublicKey rejects.
+// carry X||Y with no prefix, so that is the only difference to absorb. nil means the
+// point is off the curve or at infinity, which NewPublicKey rejects.
 func pubBytes(raw []byte) []byte {
    if len(raw) == 64 {
       raw = append([]byte{4}, raw...)
@@ -293,16 +275,8 @@ func pubBytes(raw []byte) []byte {
    return k.Bytes()
 }
 
-// --- the one P-256 check ----------------------------------------------------
-
-// d*G == Q is the pipeline's only end-to-end proof: a wrong stage descriptor, key
-// half, buffer choice or permutation cannot produce a scalar whose public point
-// lands on the expected key. -5 and -6 both assert it, so it is written once here
-// rather than twice with two opinions about the 0x04 prefix.
-
 // pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar. The
-// range check is NewPrivateKey's: d >= N or a wrong length fails there rather than
-// being caught by hand.
+// range check is NewPrivateKey's.
 func pubFor(d []byte) []byte {
    priv, err := ecdh.P256().NewPrivateKey(d)
    if err != nil {
@@ -311,61 +285,49 @@ func pubFor(d []byte) []byte {
    return priv.PublicKey().Bytes()
 }
 
-// pubMatches reports whether d*G is the public key in raw, in either form. A nil
-// from either helper is a mismatch, never an accidental equal: bytes.Equal treats
-// two empty slices as equal, so the nils are checked first.
+// pubMatches reports whether d*G is the public key in raw, in either form. The nils
+// are checked first: bytes.Equal treats two empty slices as equal.
 func pubMatches(d, raw []byte) bool {
    got, want := pubFor(d), pubBytes(raw)
    return got != nil && want != nil && bytes.Equal(got, want)
 }
 
-// ---------------------------------------------------------------- the inputs
-
+// dpInputs is the profile plus the family tables -6 needs. The image, census and patch
+// plan come from pfImage, which is the same load a trial child does.
 type dpInputs struct {
-   img     []byte
-   sha     string
-   sizeImg uint32
+   *pfImage
    prof    *dllProfile
    fams    []int
-   heaps   []imgDesc
-   seg     []imgSpan
-   merged  []imgInterval
    cluster map[int]uint32
    mapt    map[int]map[int]int
 }
 
-// dpLoadInputs reads what the driver needs: the profile, the image, and the census.
-// It does NOT call scanDescs - the census in the profile is that scan's result, and
-// re-running it here would cost the same several gigabytes it costs in -2.
-//
-// The census heap entry is {va, descVA, codeRVA, codeLen} and all four must be read:
-// a version that read it as {descVA, rva, ln} left every descriptor with va == 0,
-// collapsed them onto one map key, and reported "1 heap-exec descriptor".
+// dpLoadInputs reads the profile and the image through pfPrep, then the validated map
+// through pfRequire. It does NOT call scanDescs: the census in the profile is that
+// scan's result.
 func dpLoadInputs() (*dpInputs, error) {
-   in := &dpInputs{
-      cluster: map[int]uint32{},
-      mapt:    map[int]map[int]int{},
-   }
-   var err error
-
-   _, in.sha, err = pfDLL()
+   pi, err := pfPrep()
    if err != nil {
       return nil, err
    }
-   if in.prof, err = pfRequire(in.sha); err != nil {
+   prof, err := pfRequire(pi.sha)
+   if err != nil {
       return nil, err
    }
-   for k, pm := range in.prof.Map {
-      v, verr := strconv.Atoi(k)
-      if verr != nil {
-         return nil, fmt.Errorf("%s: bad family key %q", profilePath, k)
-      }
+
+   in := &dpInputs{
+      pfImage: pi,
+      prof:    prof,
+      cluster: make(map[int]uint32, len(prof.Map)),
+      mapt:    make(map[int]map[int]int, len(prof.Map)),
+   }
+   // pfRequire has already validated every key and value, so the Atoi results cannot
+   // fail and the range checks are not repeated.
+   for k, pm := range prof.Map {
+      v, _ := strconv.Atoi(k)
       m := make(map[int]int, len(pm.Map))
       for mk, mv := range pm.Map {
-         mi, merr := strconv.Atoi(mk)
-         if merr != nil {
-            return nil, fmt.Errorf("%s: bad map key %q", profilePath, mk)
-         }
+         mi, _ := strconv.Atoi(mk)
          m[mi] = mv
       }
       in.cluster[v] = pm.Cluster
@@ -373,26 +335,6 @@ func dpLoadInputs() (*dpInputs, error) {
       in.fams = append(in.fams, v)
    }
    slices.Sort(in.fams)
-
-   if in.prof.Census == nil || len(in.prof.Census.Heaps) == 0 {
-      return nil, fmt.Errorf("%s has no census - re-run prkf -2", profilePath)
-   }
-   if in.img, err = os.ReadFile(imgPath); err != nil {
-      return nil, err
-   }
-   in.sizeImg = in.prof.SizeOfImage
-   if uint32(len(in.img)) != in.sizeImg {
-      return nil, fmt.Errorf("%s is %d bytes but this build's SizeOfImage is 0x%x - run prkf -2",
-         imgPath, len(in.img), in.sizeImg)
-   }
-
-   for _, h := range in.prof.Census.Heaps {
-      in.heaps = append(in.heaps, imgDesc{va: h[0], descVA: h[1], rva: h[2], ln: h[3]})
-   }
-   for _, s := range in.prof.Census.Spans {
-      in.seg = append(in.seg, imgSpan{rva: s[0], size: s[1]})
-   }
-   in.merged = mergeIntervals(heapIntervals(in.heaps))
    return in, nil
 }
 
