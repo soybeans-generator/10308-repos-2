@@ -1,5 +1,5 @@
 # activation
 
 ~~~
-cl /nologo /EHsc provision-remote.cpp /link mfuuid.lib propsys.lib ole32.lib
+cl provision-remote.cpp ole32.lib propsys.lib
 ~~~

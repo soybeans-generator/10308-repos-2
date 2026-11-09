@@ -12,11 +12,7 @@ using namespace Microsoft::WRL;
 
 int main()
 {
-    wchar_t root[MAX_PATH], bla[MAX_PATH];
-    GetTempPathW(MAX_PATH, root);
-    lstrcatW(root, L"playReady");
-    swprintf_s(bla, L"%s\\Cache\\msprcore.bla", root);
-    CreateDirectoryW(root, nullptr);
+    CreateDirectoryW(L"testdata", nullptr);
 
     CK(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
@@ -31,7 +27,7 @@ int main()
     ComPtr<IPropertyStore> st;
     CK(PSCreateMemoryPropertyStore(IID_PPV_ARGS(&st)));
     PROPVARIANT sp;
-    CK(InitPropVariantFromString(root, &sp));
+    CK(InitPropVariantFromString(L"testdata", &sp));
     st->SetValue(MF_CONTENTDECRYPTIONMODULE_STOREPATH, sp);
     IPropertyStore* cfgs[1] = { st.Get() };
 
@@ -46,15 +42,13 @@ int main()
     CK(cdm->CreateSession(MF_MEDIAKEYSESSION_TYPE_TEMPORARY, nullptr, &sess));
 
     static const BYTE one[1] = { 0 };
-    sess->GenerateRequest(L"cenc", one, 1);
+    HRESULT gr = sess->GenerateRequest(L"cenc", one, 1);
+    std::printf("[i] GenerateRequest -> 0x%08X\n", (unsigned)gr);
 
-    for (int i = 0; i < 480; i++) {
-        if (GetFileAttributesW(bla) != INVALID_FILE_ATTRIBUTES) {
-            std::printf("%ls\n", bla);
-            return 0;
-        }
-        Sleep(250);
-    }
-    std::printf("[!] no msprcore.bla in 120s\n");
+    Sleep(2000);
+
+    if (GetFileAttributesW(L"testdata/Cache/msprcore.bla") != INVALID_FILE_ATTRIBUTES)
+        return 0;
+    std::printf("[!] no msprcore.bla after 2s\n");
     return 1;
 }
