@@ -471,17 +471,21 @@ func moXY(nib int, what string, p *nistec.P256Point) ([]byte, error) {
 
 // dmFindConsumer returns the heap-exec descriptor owning the unique size-check site and the
 // site itself, so the driver does not look it up a second time.
-func dmFindConsumer(img []byte, heaps []imgDesc) (imgDesc, int, bool) {
+//
+// The descriptor comes back by pointer to match every other imgDesc parameter, and &h is
+// safe because Go 1.22 makes the loop variable per-iteration: the caller gets its own
+// 24-byte copy and cannot alias a row of the census it was derived from.
+func dmFindConsumer(img []byte, heaps []imgDesc) (*imgDesc, int, bool) {
    site := bytes.Index(img, dpPattern)
    if site < 0 || bytes.Count(img, dpPattern) != 1 {
-      return imgDesc{}, site, false
+      return nil, site, false
    }
    for _, h := range heaps {
       if h.ln != 0 && int(h.rva) <= site && site < int(h.rva+h.ln) {
-         return h, site, true
+         return &h, site, true
       }
    }
-   return imgDesc{}, site, false
+   return nil, site, false
 }
 
 // nibblemap.go end
