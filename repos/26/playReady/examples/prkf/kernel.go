@@ -107,6 +107,47 @@ func pfSave(p *dllProfile) error {
    return os.WriteFile(profilePath, append(blob, '\n'), 0o644)
 }
 
+// pfValidate is the check the BLA-phase steps cannot start without: the profile must
+// belong to this build and must already hold a usable map.
+//
+// Every family present is validated here rather than in each caller: 16 keys in 0..15
+// mapping to 16 distinct values is a bijection, and stage 4 indexes a table with it,
+// so a repeated value would panic inside a child instead of failing here.
+//
+// It takes an already-parsed profile, so pfPrep's single Unmarshal is the only read.
+func pfValidate(p *dllProfile, sha string) error {
+   if p.DLLSHA256 != sha {
+      return fmt.Errorf("%s was built for a different DLL\n"+
+         "  profile: %s\n  actual : %s\n"+
+         "  the DLL changed, so every cached result is void: re-run -1 through -3",
+         profilePath, p.DLLSHA256, sha)
+   }
+   if len(p.Map) == 0 {
+      return fmt.Errorf("%s has no map section - run prkf -3", profilePath)
+   }
+   for k, pm := range p.Map {
+      v, err := strconv.Atoi(k)
+      if err != nil || v < 0 || v > 2 {
+         return fmt.Errorf("%s: map key %q is not a family index", profilePath, k)
+      }
+      if pm == nil || len(pm.Map) != 16 || pm.Consumer == 0 || pm.Cluster < 0x1000 {
+         return fmt.Errorf("%s: family %d has no usable map - run prkf -3", profilePath, v)
+      }
+      var seen uint32
+      for mk, mv := range pm.Map {
+         mi, err := strconv.Atoi(mk)
+         if err != nil || mi < 0 || mi > 15 || mv < 0 || mv > 15 {
+            return fmt.Errorf("%s: family %d: bad entry %q -> %d", profilePath, v, mk, mv)
+         }
+         if seen&(1<<uint(mv)) != 0 {
+            return fmt.Errorf("%s: family %d is not a permutation: 0x%x twice", profilePath, v, mv)
+         }
+         seen |= 1 << uint(mv)
+      }
+   }
+   return nil
+}
+
 // statusOK reports whether the routine's status dword is zero. See the file header
 // for why this and not NTSTATUS is the rejection signal.
 func statusOK(b []byte) bool {
@@ -115,11 +156,15 @@ func statusOK(b []byte) bool {
 
 // vkey is the profile's key for one routine family. JSON object keys are strings,
 // and every writer and reader goes through this one function.
-func vkey(v int) string { return strconv.Itoa(v) }
+func vkey(v int) string {
+   return strconv.Itoa(v)
+}
 
 // wbFree releases one reference taken by wbLoad. The error is returned rather than
 // swallowed: -2 reloads the module once per heap block.
-func wbFree(h uintptr) error { return syscall.FreeLibrary(syscall.Handle(h)) }
+func wbFree(h uintptr) error {
+   return syscall.FreeLibrary(syscall.Handle(h))
+}
 
 // wbLoad maps a module into this process and returns its base address.
 func wbLoad(path string) (uintptr, error) {
@@ -134,7 +179,9 @@ func wbLoad(path string) (uintptr, error) {
 // unsafe.Pointer(u) is rejected by vet's unsafeptr check, which cannot see that these
 // integers are mapped addresses; unsafe.Add is the identity and vet accepts it. The
 // pointer never escapes: every caller copies immediately.
-func wbMemAt(u uintptr) unsafe.Pointer { return unsafe.Add(unsafe.Pointer(nil), u) }
+func wbMemAt(u uintptr) unsafe.Pointer {
+   return unsafe.Add(unsafe.Pointer(nil), u)
+}
 
 // wbPatch copies buf to base+rva, flipping the containing pages to RWX for the copy
 // and restoring the previous protection afterwards.
@@ -217,53 +264,6 @@ func pfLoad(sha string) *dllProfile {
       }
    }
    return &dllProfile{Version: profileVersion, DLLSHA256: sha}
-}
-
-// pfRequire is pfLoad for the steps that cannot start over: they need the map another
-// step filled in.
-//
-// Every family present is validated here rather than in each caller: 16 keys in 0..15
-// mapping to 16 distinct values is a bijection, and stage 4 indexes a table with it,
-// so a repeated value would panic inside a child instead of failing here.
-func pfRequire(sha string) (*dllProfile, error) {
-   raw, err := os.ReadFile(profilePath)
-   if err != nil {
-      return nil, fmt.Errorf("no %s - run prkf -1, -2 and -3 once for this DLL", profilePath)
-   }
-   var p dllProfile
-   if err := json.Unmarshal(raw, &p); err != nil {
-      return nil, fmt.Errorf("%s: %v", profilePath, err)
-   }
-   if p.DLLSHA256 != sha {
-      return nil, fmt.Errorf("%s was built for a different DLL\n"+
-         "  profile: %s\n  actual : %s\n"+
-         "  the DLL changed, so every cached result is void: re-run -1 through -3",
-         profilePath, p.DLLSHA256, sha)
-   }
-   if len(p.Map) == 0 {
-      return nil, fmt.Errorf("%s has no map section - run prkf -3", profilePath)
-   }
-   for k, pm := range p.Map {
-      v, err := strconv.Atoi(k)
-      if err != nil || v < 0 || v > 2 {
-         return nil, fmt.Errorf("%s: map key %q is not a family index", profilePath, k)
-      }
-      if pm == nil || len(pm.Map) != 16 || pm.Consumer == 0 || pm.Cluster < 0x1000 {
-         return nil, fmt.Errorf("%s: family %d has no usable map - run prkf -3", profilePath, v)
-      }
-      var seen uint32
-      for mk, mv := range pm.Map {
-         mi, err := strconv.Atoi(mk)
-         if err != nil || mi < 0 || mi > 15 || mv < 0 || mv > 15 {
-            return nil, fmt.Errorf("%s: family %d: bad entry %q -> %d", profilePath, v, mk, mv)
-         }
-         if seen&(1<<uint(mv)) != 0 {
-            return nil, fmt.Errorf("%s: family %d is not a permutation: 0x%x twice", profilePath, v, mv)
-         }
-         seen |= 1 << uint(mv)
-      }
-   }
-   return &p, nil
 }
 
 // excPointers and excRecord are EXCEPTION_POINTERS and the head of EXCEPTION_RECORD.

@@ -335,31 +335,21 @@ func dpPrv() ([]byte, error) {
    return prv, nil
 }
 
-// dpStage1 is the stage-1 call: a 0x20-byte key half in the key buffer, 0x2C bytes of
-// arguments, no second size. Both buffers are returned, because which one the routine
-// treats as its output is not established.
-func dpStage1(op3 op3Func, desc uint32, key []byte) (out, kb []byte, rc uint32, st []byte) {
-   st1 := make([]byte, 0x40)
+// dpTrial runs one op=3 trial. k1 goes in the key buffer, k2 in the output buffer, and
+// ln / size2 are the only things that differ between the two stages: stage 1 is 0x2C
+// bytes with no second size, stage 2 is 0x30 bytes with a 0x20 there.
+//
+// Both buffers come back because which one a routine treats as its output is not
+// established; the caller picks with its recorded O index.
+func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, out []byte, rc uint32, st []byte) {
+   sb := make([]byte, 0x40)
    b1 := make([]byte, 0x40)
    b2 := make([]byte, 0x40)
-   copy(b1, key)
+   copy(b1, k1)
+   copy(b2, k2) // nil k2 leaves this zero-filled
 
-   rc = op3(desc, 0x2C, st1, b1, b2, nil)
-   return b2[:0x20], b1[:0x20], rc, st1[:4]
-}
-
-// dpStage2 runs one stage-2 trial: the OBF in the key buffer, a 0x20-byte key half in
-// the output buffer, 0x30 bytes of arguments with a second size dword.
-func dpStage2(op3 op3Func, desc uint32, obf, key []byte) (kb, out []byte, rc uint32, st []byte) {
-   st2 := make([]byte, 0x40)
-   b1 := make([]byte, 0x40)
-   b2 := make([]byte, 0x40)
-   copy(b1, obf)
-   copy(b2, key)
-
-   sz := uint32(0x20)
-   rc = op3(desc, 0x30, st2, b1, b2, &sz)
-   return b1[:0x20], b2[:0x20], rc, st2[:4]
+   rc = op3(desc, ln, sb, b1, b2, size2)
+   return b1[:0x20], b2[:0x20], rc, sb[:4]
 }
 
 // dpWorkerP1 is the stage-1 probe: every candidate, both key halves, both buffers.
@@ -380,7 +370,7 @@ func dpWorkerP1(descs []uint32) (code int) {
 
    for i, d := range descs {
       for h := 0; h < 2; h++ {
-         out, kb, rc, sd := dpStage1(op3, d, dpHalf(prv, h))
+         kb, out, rc, sd := dpTrial(op3, d, 0x2C, dpHalf(prv, h), nil, nil)
          if rc != 0 || !statusOK(sd) {
             say("RES %d %d REJECT rc=0x%08x st=%s", i, h, rc, hex.EncodeToString(sd))
             continue
@@ -409,6 +399,7 @@ func dpWorkerP2(start int, obfs []string, descs []uint32) (code int) {
       return code
    }
 
+   sz := uint32(0x20)
    n := len(obfs)
    for idx := start; idx < len(descs)*n*2; idx++ {
       di := idx / (n * 2)
@@ -418,7 +409,7 @@ func dpWorkerP2(start int, obfs []string, descs []uint32) (code int) {
          say("ERR bad obf %q", obfs[oi])
          return 5
       }
-      kb, out, rc, st := dpStage2(op3, descs[di], obf, dpHalf(prv, h))
+      kb, out, rc, st := dpTrial(op3, descs[di], 0x30, obf, dpHalf(prv, h), &sz)
       if rc != 0 || !statusOK(st) {
          say("RES %d %d REJECT rc=0x%08x st=%s", idx, h, rc, hex.EncodeToString(st))
          continue
@@ -691,15 +682,21 @@ func dpPrepChild() (op3 op3Func, prv []byte, code int, err error) {
 // ------------------------------------------------------------- the trial prep
 
 // pfImage is everything a trial child or a -3 sweep needs: the decrypted image, the
-// census, and the patch plan. It deliberately does NOT include the module: a child used
-// to read the DLL and re-run scanDescs, which hashes several gigabytes.
+// census, the patch plan, and the profile those came from. It deliberately does NOT
+// include the module: a child used to read the DLL and re-run scanDescs, which hashes
+// several gigabytes.
+//
+// prof is the parse pfPrep already performed. Carrying it is what stops the BLA-phase
+// steps reading and unmarshalling dllprof.json a second time just to reach Map and
+// Stages.
 type pfImage struct {
    sha    string
    size   uint32
    img    []byte
    heaps  []imgDesc
    spans  []imgSpan
-   merged []imgInterval
+   merged []imgRun
+   prof   *dllProfile
 }
 
 // pfPrep loads the census and the image. The size check is what proves the image on disk
@@ -718,7 +715,7 @@ func pfPrep() (*pfImage, error) {
       return nil, fmt.Errorf("%s has no census - re-run prkf -2", profilePath)
    }
 
-   pi := &pfImage{sha: p.DLLSHA256, size: p.SizeOfImage}
+   pi := &pfImage{sha: p.DLLSHA256, size: p.SizeOfImage, prof: &p}
    if pi.img, err = os.ReadFile(imgPath); err != nil {
       return nil, err
    }
@@ -733,7 +730,7 @@ func pfPrep() (*pfImage, error) {
    for _, s := range p.Census.Spans {
       pi.spans = append(pi.spans, imgSpan{rva: s[0], size: s[1]})
    }
-   pi.merged = mergeIntervals(heapIntervals(pi.heaps))
+   pi.merged = mergeRuns(heapRuns(pi.heaps))
    return pi, nil
 }
 
@@ -758,7 +755,7 @@ func (p *pfImage) apply(base uintptr) (patched, skipped int) {
       runs = append(runs, r...)
    }
 
-   for _, r := range coalesceRuns(runs) {
+   for _, r := range mergeRuns(runs) {
       if wbPatch(base, r.start, p.img[r.start:r.start+r.length]) {
          patched++
       } else {

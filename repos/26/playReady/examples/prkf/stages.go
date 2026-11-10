@@ -113,16 +113,11 @@ func dpTrialChild(spec string) int {
 // isZeroHex reports whether a hex field is absent or all zero bytes. A stage that
 // writes nothing is not a stage: an all-zero buffer carries no information and would
 // only add pairs to the matrix.
+//
+// The 0x40-length test is what rejects an absent field, and it is not redundant with
+// the trim: a 64-character string of any other hex digits trims to itself.
 func isZeroHex(s string) bool {
-   if len(s) != 0x40 {
-      return true
-   }
-   for i := 0; i < len(s); i++ {
-      if s[i] != '0' {
-         return false
-      }
-   }
-   return true
+   return len(s) != 0x40 || strings.Trim(s, "0") == ""
 }
 
 // dpFindStages is the search. It returns one confirmed pairing and writes nothing: the
@@ -135,15 +130,6 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
       maxHops = 7
       maxBlk  = 4000
    )
-
-   ov := 0
-   for _, s := range in.spans {
-      if len(carveRuns(in.merged, s.rva, s.size)) != 1 {
-         ov++
-      }
-   }
-   say("spans intersecting heap-exec blocks: %d of %d", ov, len(in.spans))
-   say("")
 
    blockOf := func(rva int) (imgDesc, bool) {
       for _, h := range in.heaps {
@@ -385,21 +371,19 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
       return st, nil
    }
 
-   say("")
    if why != "" {
-      return nil, fmt.Errorf("no pairing found, but the walk was TRUNCATED - the search\n" +
-         "  was not exhaustive, so this is not a conclusion. Raise the caps in dpFindStages")
+      return nil, fmt.Errorf("no pairing found, but the walk was TRUNCATED - the search\n"+
+         "  was not exhaustive, so this is not a conclusion. Raise the caps in dpFindStages\n"+
+         "  (%s)", why)
    }
-   say("no pairing reproduced %s.", encPubPath)
-   say("  %d stage-1 candidates produced %d distinct OBF(s) over both key halves;",
-      len(candList), len(obfList))
-   say("  %d stage-2 candidates were tried against each, with both halves and both",
-      len(d2s))
-   say("  buffers, each in its own child. Nothing matched, so one of these is wrong:")
-   say("    - stage 1 or stage 2 is outside the candidate set")
-   say("    - stage 3/4 are not the consumer's table and permutation")
-   say("    - %s does not hold this build's family %d table", profilePath, fam)
-   return nil, fmt.Errorf("no (stage 1, stage 2) pairing reproduced %s", encPubPath)
+   return nil, fmt.Errorf("no (stage 1, stage 2) pairing reproduced %s\n"+
+      "  %d stage-1 candidates produced %d distinct OBF(s); %d stage-2 candidates were\n"+
+      "  tried against each, with both halves and both buffers, each in its own child.\n"+
+      "  Nothing matched, so one of these is wrong:\n"+
+      "    - stage 1 or stage 2 is outside the candidate set\n"+
+      "    - stage 3/4 are not the consumer's table and permutation\n"+
+      "    - %s does not hold this build's family %d table",
+      encPubPath, len(candList), len(obfList), len(d2s), profilePath, fam)
 }
 
 // dpBatch is one trial child, parsed: its rows, or the reason it produced none.

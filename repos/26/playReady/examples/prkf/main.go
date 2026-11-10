@@ -199,14 +199,16 @@ func cmdKeys() error {
          r.off, len(r.pub), len(r.priv), hex.EncodeToString(head))
    }
 
-   // The encryption key is the unique record with a 65-byte private component.
+   // The encryption key is the unique record with a 65-byte private component, and its
+   // index is kept here because the signing key is the record immediately before it.
    var enc *keyRecord
-   for _, r := range recs {
+   encIdx := -1
+   for j, r := range recs {
       if len(r.priv) == 65 {
          if enc != nil {
             return fmt.Errorf("more than one record has a 65-byte private component")
          }
-         enc = r
+         enc, encIdx = r, j
       }
    }
    if enc == nil {
@@ -217,17 +219,10 @@ func cmdKeys() error {
    // The signing key is the 32-byte record immediately preceding it. No field
    // separates it from the other 32-byte record: ver/flags/z1/z2 are identical
    // across all three and every pubkey occurs exactly twice.
-   i := -1
-   for j, r := range recs {
-      if r == enc {
-         i = j
-         break
-      }
-   }
-   if i <= 0 {
+   if encIdx == 0 {
       return fmt.Errorf("no 32-byte record precedes the encryption key")
    }
-   sig := recs[i-1]
+   sig := recs[encIdx-1]
    if len(sig.priv) != 32 {
       return fmt.Errorf("record before the encryption key has a %d-byte private component, expected 32", len(sig.priv))
    }

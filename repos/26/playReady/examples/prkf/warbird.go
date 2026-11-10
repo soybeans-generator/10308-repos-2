@@ -96,14 +96,17 @@ func diMakeDesc(hdr, params []byte, rva, size uint32) []byte {
 // diReadMem copies n bytes out of the process we are running in.
 func diReadMem(base uintptr, n int) []byte {
    out := make([]byte, n)
-   if n != 0 {
-      copy(out, unsafe.Slice((*byte)(wbMemAt(base)), n))
-   }
+   copy(out, unsafe.Slice((*byte)(wbMemAt(base)), n))
    return out
 }
 
-func le16(b []byte, o int) uint16 { return binary.LittleEndian.Uint16(b[o:]) }
-func le32(b []byte, o int) uint32 { return binary.LittleEndian.Uint32(b[o:]) }
+func le16(b []byte, o int) uint16 {
+   return binary.LittleEndian.Uint16(b[o:])
+}
+
+func le32(b []byte, o int) uint32 {
+   return binary.LittleEndian.Uint32(b[o:])
+}
 
 func stageDecryptImg() (code int) {
    var lines []string
@@ -209,12 +212,8 @@ func stageDecryptImg() (code int) {
    }
 
    done, same, errCount := 0, 0, 0
-   type unchanged struct{ rva, size, owner uint32 }
-   var fails []unchanged
 
    for i, h := range heaps {
-      idx := i + 1
-
       if h.rva == 0 || h.ln == 0 || uint64(h.rva)+uint64(h.ln) > uint64(sizeImg) {
          errCount++
          continue
@@ -237,23 +236,20 @@ func stageDecryptImg() (code int) {
       case rc == 0:
          // was already plaintext (e.g. .data entries) - not an error
          same++
-         if len(fails) < 12 {
-            fails = append(fails, unchanged{h.rva, h.ln, h.va})
+         if same <= 12 {
+            logf("  unchanged 0x%06x+0x%x owner 0x%x", h.rva, h.ln, h.va)
          }
       default:
          errCount++
       }
 
-      if idx%200 == 0 {
-         logf("  %d/%d  changed %d  same %d  err %d", idx, len(heaps), done, same, errCount)
+      if (i+1)%200 == 0 {
+         logf("  %d/%d  changed %d  same %d  err %d", i+1, len(heaps), done, same, errCount)
       }
    }
 
    logf("")
    logf("heap-exec %d  changed %d  unchanged %d  error %d", len(heaps), done, same, errCount)
-   for _, u := range fails {
-      logf("  unchanged 0x%06x+0x%x owner 0x%x", u.rva, u.size, u.owner)
-   }
    logf("")
 
    if err := os.WriteFile(imgPath, img, 0o644); err != nil {
@@ -372,39 +368,14 @@ func splitDescs(fb []byte, secs []imgSection) (segs, heaps []imgDesc) {
 // heap reports whether this is a heap-exec descriptor. 0xF0 is the only size the
 // kernel treats that way, and the size field is covered by the digest, so the test
 // cannot be spoofed by a corrupt byte.
-func (d imgDesc) heap() bool { return d.size == 0xF0 }
-
-// imgInterval is a half-open RVA range: one heap-exec block, or a merged run.
-type imgInterval struct{ lo, hi uint32 }
-
-// heapIntervals turns heap-exec descriptors into the RVA ranges the kernel decrypts
-// itself, ready for mergeIntervals.
-func heapIntervals(heaps []imgDesc) []imgInterval {
-   var ivs []imgInterval
-   for _, h := range heaps {
-      if h.ln != 0 {
-         ivs = append(ivs, imgInterval{h.rva, h.rva + h.ln})
-      }
-   }
-   return ivs
+func (d imgDesc) heap() bool {
+   return d.size == 0xF0
 }
 
-// mergeIntervals sorts and coalesces ranges, so carveRuns can binary-search them.
-func mergeIntervals(ivs []imgInterval) []imgInterval {
-   slices.SortFunc(ivs, func(a, b imgInterval) int { return cmp.Compare(a.lo, b.lo) })
-
-   var out []imgInterval
-   for _, p := range ivs {
-      if n := len(out); n > 0 && p.lo <= out[n-1].hi {
-         out[n-1].hi = max(out[n-1].hi, p.hi)
-         continue
-      }
-      out = append(out, p)
-   }
-   return out
-}
-
-// imgRun is a half-open RVA range that is safe to patch.
+// imgRun is a half-open RVA range. It serves three jobs with one type: one heap-exec
+// block, a merged run of them, and a patchable run carved out of a span. The two
+// earlier types for this were the same struct twice over, which meant a conversion
+// function whose only content was field renaming.
 type imgRun struct{ start, length uint32 }
 
 // carveRuns returns [r, r+s) minus every interval, as the runs that remain.
@@ -412,31 +383,32 @@ type imgRun struct{ start, length uint32 }
 // Both patching callers need it for the same reason: the kernel decrypts a heap-exec
 // block itself on op=3, so copying already-decrypted bytes over one causes a double
 // decrypt and the routine executes garbage.
-func carveRuns(merged []imgInterval, r, s uint32) []imgRun {
+func carveRuns(merged []imgRun, r, s uint32) []imgRun {
    var out []imgRun
    cur, end := r, r+s
 
-   // Start at the last interval whose lo is at or below r. BinarySearchFunc reports
+   // Start at the last interval whose start is at or below r. BinarySearchFunc reports
    // the first entry not less than the target, so an exact hit is that entry and a
    // miss leaves pos one past the last candidate.
-   pos, found := slices.BinarySearchFunc(merged, r, func(m imgInterval, t uint32) int {
-      return cmp.Compare(m.lo, t)
+   pos, found := slices.BinarySearchFunc(merged, r, func(m imgRun, t uint32) int {
+      return cmp.Compare(m.start, t)
    })
    if !found {
       pos = max(pos-1, 0)
    }
 
    for _, m := range merged[pos:] {
-      if m.hi <= cur {
+      hi := m.start + m.length
+      if hi <= cur {
          continue
       }
-      if m.lo >= end {
+      if m.start >= end {
          break
       }
-      if m.lo > cur {
-         out = append(out, imgRun{cur, min(m.lo, end) - cur})
+      if m.start > cur {
+         out = append(out, imgRun{cur, min(m.start, end) - cur})
       }
-      if cur = max(cur, m.hi); cur >= end {
+      if cur = max(cur, hi); cur >= end {
          break
       }
    }
@@ -446,22 +418,37 @@ func carveRuns(merged []imgInterval, r, s uint32) []imgRun {
    return out
 }
 
-// coalesceRuns sorts runs and merges the ones that touch. Every run is written from
-// the same source image, so adjacent runs are equivalent to their union - and merging
-// turns thousands of VirtualProtect pairs into a few dozen.
-func coalesceRuns(runs []imgRun) []imgRun {
-   slices.SortFunc(runs, func(a, b imgRun) int { return cmp.Compare(a.start, b.start) })
+// heapRuns turns heap-exec descriptors into the RVA ranges the kernel decrypts itself,
+// ready for mergeRuns.
+func heapRuns(heaps []imgDesc) []imgRun {
    var out []imgRun
-   for _, r := range runs {
+   for _, h := range heaps {
+      if h.ln != 0 {
+         out = append(out, imgRun{h.rva, h.ln})
+      }
+   }
+   return out
+}
+
+// mergeRuns sorts and coalesces overlapping OR touching ranges, so carveRuns can
+// binary-search them and the patcher can issue one VirtualProtect per merged run.
+//
+// Touching counts as overlapping because every run is written from the same source
+// image: adjacent runs are equivalent to their union, and merging turns thousands of
+// protection flips into a few dozen.
+func mergeRuns(ivs []imgRun) []imgRun {
+   slices.SortFunc(ivs, func(a, b imgRun) int { return cmp.Compare(a.start, b.start) })
+
+   var out []imgRun
+   for _, p := range ivs {
       if n := len(out); n > 0 {
-         end := uint64(out[n-1].start) + uint64(out[n-1].length)
-         if uint64(r.start) <= end {
-            hi := max(end, uint64(r.start)+uint64(r.length))
-            out[n-1].length = uint32(hi - uint64(out[n-1].start))
+         old := &out[n-1]
+         if end := uint64(old.start) + uint64(old.length); uint64(p.start) <= end {
+            old.length = uint32(max(end, uint64(p.start)+uint64(p.length)) - uint64(old.start))
             continue
          }
       }
-      out = append(out, r)
+      out = append(out, p)
    }
    return out
 }

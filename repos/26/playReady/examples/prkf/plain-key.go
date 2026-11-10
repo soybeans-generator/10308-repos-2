@@ -116,13 +116,10 @@ func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, 
       return nil, false
    }
 
+   // High nibble first: even i shifts by 4, odd i by 0.
    var ns, pl [64]byte
    for i := range ns {
-      sh := uint(0)
-      if i%2 == 0 {
-         sh = 4
-      }
-      ns[i] = mut[i>>1] >> sh & 0xF
+      ns[i] = mut[i>>1] >> (4 - uint(i%2)*4) & 0xF
    }
    for i := range pl {
       v, ok := mapt[int(img[c+i*16+int(ns[i])])]
@@ -292,38 +289,36 @@ func pubMatches(d, raw []byte) bool {
    return got != nil && want != nil && bytes.Equal(got, want)
 }
 
-// dpInputs is the profile plus the family tables -6 needs. The image, census and patch
-// plan come from pfImage, which is the same load a trial child does.
+// dpInputs is the profile plus the family tables -6 needs. The image, census, patch
+// plan and parsed profile all come from pfImage, which is the same load a trial child
+// does; prof is promoted from it rather than held a second time.
 type dpInputs struct {
    *pfImage
-   prof    *dllProfile
    fams    []int
    cluster map[int]uint32
    mapt    map[int]map[int]int
 }
 
-// dpLoadInputs reads the profile and the image through pfPrep, then the validated map
-// through pfRequire. It does NOT call scanDescs: the census in the profile is that
-// scan's result.
+// dpLoadInputs validates the profile pfPrep already parsed and builds the per-family
+// tables. It does NOT read dllprof.json a second time, and does NOT call scanDescs: the
+// census in the profile is that scan's result.
 func dpLoadInputs() (*dpInputs, error) {
    pi, err := pfPrep()
    if err != nil {
       return nil, err
    }
-   prof, err := pfRequire(pi.sha)
-   if err != nil {
+   if err := pfValidate(pi.prof, pi.sha); err != nil {
       return nil, err
    }
 
    in := &dpInputs{
       pfImage: pi,
-      prof:    prof,
-      cluster: make(map[int]uint32, len(prof.Map)),
-      mapt:    make(map[int]map[int]int, len(prof.Map)),
+      cluster: make(map[int]uint32, len(pi.prof.Map)),
+      mapt:    make(map[int]map[int]int, len(pi.prof.Map)),
    }
-   // pfRequire has already validated every key and value, so the Atoi results cannot
+   // pfValidate has already validated every key and value, so the Atoi results cannot
    // fail and the range checks are not repeated.
-   for k, pm := range prof.Map {
+   for k, pm := range pi.prof.Map {
       v, _ := strconv.Atoi(k)
       m := make(map[int]int, len(pm.Map))
       for mk, mv := range pm.Map {

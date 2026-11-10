@@ -58,31 +58,34 @@ import (
    "filippo.io/nistec"
 )
 
+// dmFams is every routine family the consumer dispatches on: key[0x40] % 3. It is one
+// value read by both the sweep and the loop that consumes its rows, so the count cannot
+// drift between them.
+var dmFams = []int{0, 1, 2}
+
 // =============================================================================
 // the oracle
 // =============================================================================
+
+// moSentinel is the plaintext every oracle licence encrypts: "HELLO MICROSOFT!" || 0^16.
+// Defined once because two things must agree on it byte for byte - the X coordinate
+// the oracle puts on the curve, and the value -3 XORs the shared output with to
+// recover the magic.
+var moSentinel = append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
 
 // buildOracle writes the 15 key+licence pairs into oracleDir. Called by -3 when the
 // directory is missing. Its stdout goes straight to the terminal and is not folded
 // into derive_map.txt: the build is a one-time setup event.
 func buildOracle() int {
-   sent := append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
-   if len(sent) != 32 {
-      return moFail("sentinel is %d bytes, expected 32", len(sent))
-   }
-
    // 0x02||X is the compressed SEC 1 form, and the 0x02 prefix asks for the even
    // root, so the Y below is stable across runs. SetBytes is the whole check: it
    // decompresses the point and rejects an X that is not on the curve.
-   m, err := nistec.NewP256Point().SetBytes(append([]byte{0x02}, sent...))
+   m, err := nistec.NewP256Point().SetBytes(append([]byte{0x02}, moSentinel...))
    if err != nil {
       return moFail("'HELLO MICROSOFT!' || 0^16 is not an x-coordinate on P-256: %v", err)
    }
    mb := m.Bytes() // 0x04 || X || Y
 
-   if err := os.MkdirAll(outDir, 0o755); err != nil {
-      return moFail("create %s: %v", outDir, err)
-   }
    if err := os.MkdirAll(oracleDir, 0o755); err != nil {
       return moFail("create %s: %v", oracleDir, err)
    }
@@ -243,10 +246,10 @@ func dmDeriveMap() (code int) {
    // The child decides which set is live and then sweeps it over 15 licences. Nothing
    // about that decision needs the driver, so the whole sweep is one process and one
    // image patch.
-   logf("sweeping 3 families in one child")
+   logf("sweeping %d families in one child", len(dmFams))
    logf("")
 
-   r := dmSweepAll(h.descVA, []int{0, 1, 2}, SETS, logf)
+   r := dmSweepAll(h.descVA, dmFams, SETS, logf)
    for _, m := range r.meta {
       logf("  %s", m)
    }
@@ -259,9 +262,8 @@ func dmDeriveMap() (code int) {
    logf("")
 
    pmaps := map[string]*profileMap{}
-   var live []int
 
-   for v := 0; v < 3; v++ {
+   for _, v := range dmFams {
       fm := r.fams[v]
       if fm == nil {
          logf("family %d  no rows returned", v)
@@ -286,10 +288,9 @@ func dmDeriveMap() (code int) {
          logf("")
          continue
       }
-      sent := append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
-      MAGIC := make([]byte, min(len(mh), len(sent)))
+      MAGIC := make([]byte, min(len(mh), len(moSentinel)))
       for i := range MAGIC {
-         MAGIC[i] = mh[i] ^ sent[i]
+         MAGIC[i] = mh[i] ^ moSentinel[i]
       }
 
       switch {
@@ -316,13 +317,12 @@ func dmDeriveMap() (code int) {
          Map:      jm,
          Consumer: h.descVA,
       }
-      live = append(live, v)
    }
 
    if len(pmaps) == 0 {
       return fail("no routine family produced a live set")
    }
-   logf("families with a permutation: %v", live)
+   logf("families with a permutation: %d of %d", len(pmaps), len(dmFams))
    logf("")
 
    // pfLoad, not a fresh profile: -3 fills in one section and must not disturb a

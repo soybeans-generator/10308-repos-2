@@ -323,9 +323,9 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
    if _, err := rand.Read(fill); err != nil {
       return nil, err
    }
-   keyBuf := append(make([]byte, 0, keyLen), enc...) // the routine gets its own copy
-   status := make([]byte, 0x10)                      // zero-filled
-   out := append(make([]byte, 0, keyLen), fill...)
+   keyBuf := slices.Clone(enc)  // the routine gets its own copy
+   status := make([]byte, 0x10) // zero-filled
+   out := slices.Clone(fill)
 
    // out must stay live until the result is read - its address is stored as a uintptr -
    // and it is, by the comparison below.
