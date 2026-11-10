@@ -1,11 +1,10 @@
-// umber.js marker preserve
 'use strict';
 
 // New record shape:
 //   A: [ unix timestamp, release year ]
 //   B: [ artist, title, url, image? ]
-const D = 0; // row.A: timestamp
-const Y = 1; // row.A: year
+const STAMP = 0;  // row.A: unix timestamp
+const YEAR = 1;   // row.A: year
 const ARTIST = 0; // row.B: artist
 const TITLE = 1;  // row.B: title
 const HREF = 2;   // row.B: url
@@ -73,10 +72,10 @@ function build(row) {
    title.textContent = label(row);
 
    const release = clone.querySelector('.release');
-   release.textContent = row.A[Y].toString(10);
+   release.textContent = row.A[YEAR].toString(10);
 
    const posted = clone.querySelector('.post');
-   posted.textContent = date(row.A[D]);
+   posted.textContent = date(row.A[STAMP]);
 
    const td_view = clone.querySelector('td.view');
    const th_view = clone.querySelector('th.view');
@@ -102,21 +101,21 @@ async function main() {
    const response = await fetch('/umber/umber.json');
    let records = await response.json();
 
-   // `d` is measured from the oldest D in the whole JSON, so fix that
+   // `d` is measured from the oldest STAMP in the whole JSON, so fix that
    // first, before any `?t=` filtering changes the list
-   const oldest = records.reduce((min, row) => Math.min(min, row.A[D]), Infinity);
+   const oldest = records.reduce((min, row) => Math.min(min, row.A[STAMP]), Infinity);
 
    if (query.has('t')) {
       const needle = query.get('t').toLowerCase();
       records = records.filter(row => label(row).toLowerCase().includes(needle));
    }
 
-   // `d` is now the difference between the first D on the page and the
-   // oldest D in the JSON, i.e. records[start].D - oldest
+   // `d` is now the difference between the first STAMP on the page and the
+   // oldest STAMP in the JSON, i.e. records[start].A[STAMP] - oldest
    const offset = query.get('d');
    const start = offset === null
       ? 0
-      : records.findIndex(row => row.A[D] <= oldest + Number(offset));
+      : records.findIndex(row => row.A[STAMP] <= oldest + Number(offset));
 
    if (start === -1) {
       return;
@@ -126,11 +125,11 @@ async function main() {
    document.getElementById('figures').append(...chunk.map(build));
 
    // the value for the page whose first row is `records[index]`
-   const stamp = index => String(records[index].A[D] - oldest);
+   const offsetOf = index => String(records[index].A[STAMP] - oldest);
 
    const older = document.getElementById('older');
    if (start + limit < records.length) {
-      query.set('d', stamp(start + limit));
+      query.set('d', offsetOf(start + limit));
       older.href = '?' + query.toString();
    } else {
       older.remove();
@@ -142,7 +141,7 @@ async function main() {
       if (target === 0) {
          query.delete('d'); // the natural default: start at the newest page
       } else {
-         query.set('d', stamp(target));
+         query.set('d', offsetOf(target));
       }
       newer.href = '?' + query.toString();
    } else {
@@ -159,4 +158,3 @@ document.querySelector('form').onsubmit = function() {
 
 const query = new URLSearchParams(location.search);
 main();
-// umber.js marker preserve
