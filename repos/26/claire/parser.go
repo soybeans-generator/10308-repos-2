@@ -4,38 +4,31 @@ package claire
 import (
    "fmt"
    "go/ast"
+   "go/build"
    "go/doc"
    "go/parser"
    "go/token"
-   "html/template"
    "log"
    "os"
    "path/filepath"
-   "strings"
 )
 
+// parseGoFiles parses the buildable, non-test Go files in dir. go/build
+// resolves build constraints (//go:build lines, GOOS/GOARCH suffixes, cgo) and
+// rejects a directory that holds more than one package name.
 func parseGoFiles(fset *token.FileSet, dir string) ([]*ast.File, error) {
-   entries, err := os.ReadDir(dir)
+   pkg, err := build.ImportDir(dir, 0)
    if err != nil {
       return nil, err
    }
-   var files []*ast.File
-   var packageName string
-   for _, entry := range entries {
-      name := entry.Name()
-      // Ignore directories, non-Go files, and test files
-      if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-         continue
-      }
-      path := filepath.Join(dir, name)
-      file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+   names := make([]string, 0, len(pkg.GoFiles)+len(pkg.CgoFiles))
+   names = append(names, pkg.GoFiles...)
+   names = append(names, pkg.CgoFiles...)
+   files := make([]*ast.File, 0, len(names))
+   for _, name := range names {
+      file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ParseComments)
       if err != nil {
          return nil, err
-      }
-      if packageName == "" {
-         packageName = file.Name.Name
-      } else if file.Name.Name != packageName {
-         return nil, fmt.Errorf("multiple package names found in directory: %s and %s", packageName, file.Name.Name)
       }
       files = append(files, file)
    }
@@ -65,14 +58,11 @@ func ParsePackageDoc(inputPath string) (*PackageDoc, error) {
    if err != nil {
       return nil, err
    }
-   if len(files) == 0 {
-      return nil, fmt.Errorf("no Go source files found in directory: %s", inputPath)
-   }
    docPkg, err := doc.NewFromFiles(fset, files, "./")
    if err != nil {
       return nil, fmt.Errorf("failed to create doc package: %w", err)
    }
-   typeNames := make(map[string]struct{})
+   typeNames := make(map[string]struct{}, len(docPkg.Types))
    for _, t := range docPkg.Types {
       typeNames[t.Name] = struct{}{}
    }
@@ -83,14 +73,10 @@ func ParsePackageDoc(inputPath string) (*PackageDoc, error) {
    }
 
    // -- Helpers to reduce boilerplate --
-   process := func(decl ast.Decl) (template.HTML, error) {
-      return formatAndHighlight(decl, fset, typeNames)
-   }
-
    processFuncs := func(funcs []*doc.Func) ([]FuncDoc, error) {
       var docs []FuncDoc
       for _, f := range funcs {
-         sig, err := process(f.Decl)
+         sig, err := formatAndHighlight(f.Decl, fset, typeNames)
          if err != nil {
             return nil, err
          }
@@ -102,7 +88,7 @@ func ParsePackageDoc(inputPath string) (*PackageDoc, error) {
    processValues := func(values []*doc.Value) ([]VarDoc, error) {
       var docs []VarDoc
       for _, v := range values {
-         def, err := process(v.Decl)
+         def, err := formatAndHighlight(v.Decl, fset, typeNames)
          if err != nil {
             return nil, err
          }
@@ -117,7 +103,7 @@ func ParsePackageDoc(inputPath string) (*PackageDoc, error) {
    }
 
    for _, t := range docPkg.Types {
-      def, err := process(t.Decl)
+      def, err := formatAndHighlight(t.Decl, fset, typeNames)
       if err != nil {
          return nil, err
       }
@@ -162,12 +148,7 @@ func (p *PackageDoc) IsEmpty() bool {
 
 // Render generates the HTML documentation file using the embedded template.
 func (p *PackageDoc) Render(outputPath string) error {
-   // Parse the template directly from the embedded string variable.
-   tmpl, err := template.New("package").Parse(packageTemplateFile)
-   if err != nil {
-      return err
-   }
-   if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+   if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
       return err
    }
    log.Printf("Creating file: %s", outputPath)
@@ -176,7 +157,7 @@ func (p *PackageDoc) Render(outputPath string) error {
       return err
    }
    defer file.Close()
-   return tmpl.Execute(file, p)
+   return packageTemplate.Execute(file, p)
 }
 
 // parser.go marker preserve

@@ -1,3 +1,17 @@
+{{define "values"}}
+    {{range .}}
+        <pre>{{.Definition}}</pre>
+        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+    {{end}}
+{{end}}
+
+{{define "funcs"}}
+    {{range .}}
+        <pre id="{{.Name}}">{{.Signature}}</pre>
+        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
+    {{end}}
+{{end}}
+
 <!DOCTYPE html>
 <html>
 <head>
@@ -47,26 +61,17 @@
 
     {{if .Constants}}
     <h2 id="constants">Constants</h2>
-    {{range .Constants}}
-        <pre>{{.Definition}}</pre>
-        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
-    {{end}}
+    {{template "values" .Constants}}
     {{end}}
 
     {{if .Variables}}
     <h2 id="variables">Variables</h2>
-    {{range .Variables}}
-        <pre>{{.Definition}}</pre>
-        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
-    {{end}}
+    {{template "values" .Variables}}
     {{end}}
 
     {{if .Functions}}
     <h2 id="functions">Functions</h2>
-    {{range .Functions}}
-        <pre id="{{.Name}}">{{.Signature}}</pre>
-        {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
-    {{end}}
+    {{template "funcs" .Functions}}
     {{end}}
 
     {{if .Types}}
@@ -79,26 +84,17 @@
 
         {{if .Constants}}
             <h4>Constants</h4>
-            {{range .Constants}}
-                <pre>{{.Definition}}</pre>
-                {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
-            {{end}}
+            {{template "values" .Constants}}
         {{end}}
 
         {{if .Variables}}
             <h4>Variables</h4>
-            {{range .Variables}}
-                <pre>{{.Definition}}</pre>
-                {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
-            {{end}}
+            {{template "values" .Variables}}
         {{end}}
 
         {{if .Functions}}
             <h4>Functions</h4>
-            {{range .Functions}}
-                <pre id="{{.Name}}">{{.Signature}}</pre>
-                {{if .Doc}}<div class="doc"><p>{{.Doc}}</p></div>{{end}}
-            {{end}}
+            {{template "funcs" .Functions}}
         {{end}}
 
         {{if .Methods}}

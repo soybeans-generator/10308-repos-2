@@ -45,8 +45,7 @@ func collectFromExpr(expr ast.Expr, fset *token.FileSet, typeNames map[string]st
    switch x := expr.(type) {
    case *ast.Ident:
       if _, isType := typeNames[x.Name]; isType {
-         file := fset.File(x.Pos())
-         if file != nil {
+         if file := fset.File(x.Pos()); file != nil {
             offsets[file.Offset(x.Pos())] = struct{}{}
          }
       }
@@ -115,29 +114,27 @@ func formatAndHighlight(node ast.Node, fset *token.FileSet, typeNames map[string
       return "", fmt.Errorf("failed to format node: %w", err)
    }
    sourceString := buf.String()
+   // A bare declaration is not a file, so reparse it inside a throwaway
+   // package to get positions the scanner can agree with.
    const prefix = "package p\n\n"
-   wrappedSource := prefix + sourceString
    fsetForHighlighting := token.NewFileSet()
-   astFile, err := parser.ParseFile(fsetForHighlighting, "snippet.go", wrappedSource, 0)
+   astFile, err := parser.ParseFile(fsetForHighlighting, "snippet.go", prefix+sourceString, 0)
    if err != nil || len(astFile.Decls) == 0 {
-      return syntaxHighlight(sourceString, token.NewFileSet(), nil)
+      return syntaxHighlight(sourceString, nil)
    }
-   newRootNode := astFile.Decls[0]
-   rawOffsets := collectTypeUsageOffsets(newRootNode, fsetForHighlighting, typeNames)
-   adjustedOffsets := make(map[int]struct{})
-   for offset := range rawOffsets {
-      adjustedOffset := offset - len(prefix)
-      if adjustedOffset >= 0 {
-         adjustedOffsets[adjustedOffset] = struct{}{}
+   offsets := make(map[int]struct{})
+   for offset := range collectTypeUsageOffsets(astFile.Decls[0], fsetForHighlighting, typeNames) {
+      if adjusted := offset - len(prefix); adjusted >= 0 {
+         offsets[adjusted] = struct{}{}
       }
    }
-   return syntaxHighlight(sourceString, fsetForHighlighting, adjustedOffsets)
+   return syntaxHighlight(sourceString, offsets)
 }
 
-func syntaxHighlight(source string, fset *token.FileSet, typeOffsets map[int]struct{}) (template.HTML, error) {
-   if fset == nil {
-      fset = token.NewFileSet()
-   }
+// syntaxHighlight escapes source and wraps tokens in spans. typeOffsets holds
+// byte offsets of identifiers that name a documented type; a nil map is valid.
+func syntaxHighlight(source string, typeOffsets map[int]struct{}) (template.HTML, error) {
+   fset := token.NewFileSet()
    file := fset.AddFile("", fset.Base(), len(source))
    var s scanner.Scanner
    s.Init(file, []byte(source), nil, scanner.ScanComments)
@@ -173,10 +170,8 @@ func syntaxHighlight(source string, fset *token.FileSet, typeOffsets map[int]str
       } else if tok == token.COMMENT {
          tokenHTML = fmt.Sprintf(`<span class="comment">%s</span>`, escapedToken)
       } else if tok == token.STRING {
-         // Intentionally unstyled: the class is emitted so downstream
-         // consumers can style string literals via their own CSS, but
-         // style.css deliberately ships no .string rule.
-         // Do not "fix" by adding one.
+         // Deliberately unstyled: the class is emitted so consumers can style
+         // string literals, but style.css ships no .string rule. Don't add one.
          tokenHTML = fmt.Sprintf(`<span class="string">%s</span>`, escapedToken)
       } else {
          tokenHTML = escapedToken

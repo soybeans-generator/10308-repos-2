@@ -16,21 +16,20 @@
     font-weight: bold;
 }
 
-/* 
-Shared style for 'up' and 'repository' links.
-1.25rem is larger than body text but smaller than the full H1 scaling.
-*/
-.meta-link {
-    font-size: 1.25rem;
+/* Shared style for the 'up' and 'repository' links. */
+.meta-link,
+.version-info {
     font-weight: normal;
     margin-left: 1em;
 }
 
+.meta-link {
+    font-size: 1.25rem;
+}
+
 .version-info {
     font-size: 0.8em;
-    font-weight: normal;
     color: #555;
-    margin-left: 1em;
 }
 
 body {
