@@ -67,10 +67,9 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
    }
    var obf []byte
    for _, r := range b1.res {
-      if r.kind != "RES" || r.h != st.K1 {
-         continue
+      if r.kind == "RES" && r.h == st.K1 {
+         obf, _ = hex.DecodeString([2]string{r.a, r.b}[st.O1])
       }
-      obf, _ = hex.DecodeString([2]string{r.a, r.b}[st.O1])
    }
    if len(obf) != 0x20 {
       return nil, fmt.Errorf("stage 1 (0x%06x, half %d) produced no output\n"+
@@ -84,10 +83,9 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
    }
    var mut []byte
    for _, r := range b2.res {
-      if r.kind != "RES" || r.i%2 != st.K2 {
-         continue
+      if r.kind == "RES" && r.i%2 == st.K2 {
+         mut, _ = hex.DecodeString([2]string{r.a, r.b}[st.O2])
       }
-      mut, _ = hex.DecodeString([2]string{r.a, r.b}[st.O2])
    }
    if len(mut) != 0x20 {
       return nil, fmt.Errorf("stage 2 (0x%06x, half %d) produced no output", st.S2, st.K2)
@@ -107,7 +105,10 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
 // mut is 32 bytes, so 64 nibbles, high nibble first. Nibble i selects one byte from
 // its own 16-byte row at the family's cluster - a value in 0..15 - and that value
 // indexes the 16-entry permutation. The packed form is rebuilt at the end.
-func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, bool) {
+//
+// An image byte above 0x0F means the cluster is not the table the profile says it is,
+// which is a wrong profile rather than a wrong scalar, so it fails instead of masking.
+func dpChain(img []byte, cluster uint32, mapt [16]int, mut []byte) ([]byte, bool) {
    if len(mut) < 0x20 {
       return nil, false
    }
@@ -116,17 +117,14 @@ func dpChain(img []byte, cluster uint32, mapt map[int]int, mut []byte) ([]byte, 
       return nil, false
    }
 
-   // High nibble first: even i shifts by 4, odd i by 0.
-   var ns, pl [64]byte
-   for i := range ns {
-      ns[i] = mut[i>>1] >> (4 - uint(i%2)*4) & 0xF
-   }
+   var pl [64]byte
    for i := range pl {
-      v, ok := mapt[int(img[c+i*16+int(ns[i])])]
-      if !ok {
+      nib := mut[i>>1] >> (4 - uint(i%2)*4) & 0xF // high nibble first
+      b := img[c+i*16+int(nib)]
+      if b > 15 {
          return nil, false
       }
-      pl[i] = byte(v)
+      pl[i] = byte(mapt[b])
    }
 
    out := make([]byte, 32)
@@ -296,7 +294,7 @@ type dpInputs struct {
    *pfImage
    fams    []int
    cluster map[int]uint32
-   mapt    map[int]map[int]int
+   mapt    map[int][16]int
 }
 
 // dpLoadInputs validates the profile pfPrep already parsed and builds the per-family
@@ -314,19 +312,14 @@ func dpLoadInputs() (*dpInputs, error) {
    in := &dpInputs{
       pfImage: pi,
       cluster: make(map[int]uint32, len(pi.prof.Map)),
-      mapt:    make(map[int]map[int]int, len(pi.prof.Map)),
+      mapt:    make(map[int][16]int, len(pi.prof.Map)),
    }
-   // pfValidate has already validated every key and value, so the Atoi results cannot
-   // fail and the range checks are not repeated.
+   // pfValidate has already checked every family key and every entry, so the Atoi
+   // result cannot fail and the map is known to be a permutation.
    for k, pm := range pi.prof.Map {
       v, _ := strconv.Atoi(k)
-      m := make(map[int]int, len(pm.Map))
-      for mk, mv := range pm.Map {
-         mi, _ := strconv.Atoi(mk)
-         m[mi] = mv
-      }
       in.cluster[v] = pm.Cluster
-      in.mapt[v] = m
+      in.mapt[v] = pm.Map
       in.fams = append(in.fams, v)
    }
    slices.Sort(in.fams)

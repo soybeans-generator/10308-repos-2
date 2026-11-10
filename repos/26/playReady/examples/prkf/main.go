@@ -335,14 +335,6 @@ func main() {
    }
 }
 
-// u32be reads a big-endian uint32 at off, reporting whether it fit.
-func u32be(buf []byte, off int) (uint32, bool) {
-   if off < 0 || off+4 > len(buf) {
-      return 0, false
-   }
-   return binary.BigEndian.Uint32(buf[off:]), true
-}
-
 type chain struct {
    base        int
    totalLength uint32
@@ -352,20 +344,19 @@ type chain struct {
    prefixOK    bool
 }
 
-// parseChain is a self-validating parse of a CHAI chain at base.
+// parseChain is a self-validating parse of a CHAI chain at base. One bounds check
+// covers the whole fixed header, so the three fields below are read directly; u32be
+// existed only to bound each of them separately.
 func parseChain(buf []byte, base int) (*chain, bool) {
    const chaiHdr = 20 // magic(4) version(4) total_length(4) flags(4) cert_count(4)
 
-   if base < 0 || base+4 > len(buf) || !bytes.Equal(buf[base:base+4], []byte("CHAI")) {
+   if base < 0 || base+chaiHdr > len(buf) || !bytes.Equal(buf[base:base+4], []byte("CHAI")) {
       return nil, false
    }
 
-   totalLength, okTL := u32be(buf, base+8)
-   flags, okFl := u32be(buf, base+12)
-   certCount, okCC := u32be(buf, base+16)
-   if !okTL || !okFl || !okCC {
-      return nil, false
-   }
+   totalLength := binary.BigEndian.Uint32(buf[base+8:])
+   flags := binary.BigEndian.Uint32(buf[base+12:])
+   certCount := binary.BigEndian.Uint32(buf[base+16:])
    if totalLength < chaiHdr || int(totalLength) > len(buf)-base {
       return nil, false
    }
@@ -388,9 +379,9 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       return nil, false
    }
 
-   if p, ok := u32be(buf, base-4); ok {
-      c.prefix = p
-      c.prefixOK = p == totalLength
+   if base >= 4 {
+      c.prefix = binary.BigEndian.Uint32(buf[base-4:])
+      c.prefixOK = c.prefix == totalLength
    }
    return c, true
 }

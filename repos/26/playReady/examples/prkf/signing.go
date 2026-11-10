@@ -327,14 +327,11 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
    status := make([]byte, 0x10) // zero-filled
    out := slices.Clone(fill)
 
-   // out must stay live until the result is read - its address is stored as a uintptr -
-   // and it is, by the comparison below.
-   args := newWbArgs(uint64(base)+uint64(rec.DescVA), status, keyBuf, out, keyLen)
-   st := callWarbird(args)
+   st := op3Call(base)(rec.DescVA, 0x34, keyLen, status, keyBuf, out, nil)
 
-   if st32 := uint32(st); st32 != 0 {
-      msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st32)
-      if st32 == 0xC0000095 {
+   if st != 0 {
+      msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st)
+      if st == 0xC0000095 {
          msg += " (INTEGER_OVERFLOW: desc_va is wrong for this build)"
       }
       return nil, errors.New(msg)
@@ -364,7 +361,7 @@ func isFile(p string) bool {
 // runOne probes one descriptor and prints its RESULT line. A probe that cannot be set
 // up still prints a line, because the parent would otherwise retry this descriptor
 // forever.
-func runOne(base uintptr, descVA uint32) {
+func runOne(op3 op3Func, descVA uint32) {
    trace("probe %#x begin", descVA)
 
    // Two distinct 32-byte inputs: the routine must map them to distinct outputs, which
@@ -383,17 +380,17 @@ func runOne(base uintptr, descVA uint32) {
       fmt.Printf("RESULT %#x NO_OUTPUT exit=setup:%v\n", descVA, err)
    }
 
-   a, err := probe(base, descVA, "A", inputA, keyLen)
+   a, err := probe(op3, descVA, "A", inputA, keyLen)
    if err != nil {
       fail("A", err)
       return
    }
-   b, err := probe(base, descVA, "B", inputB, keyLen)
+   b, err := probe(op3, descVA, "B", inputB, keyLen)
    if err != nil {
       fail("B", err)
       return
    }
-   c, err := probe(base, descVA, "C", inputA, keyLen-1) // one byte short - must be rejected
+   c, err := probe(op3, descVA, "C", inputA, keyLen-1) // one byte short - must be rejected
    if err != nil {
       fail("C", err)
       return
@@ -441,8 +438,9 @@ func runProbes(descs []uint32) int {
    }
    trace("dll loaded base=%#x", base)
 
+   op3 := op3Call(base)
    for _, d := range descs {
-      runOne(base, d)
+      runOne(op3, d)
    }
    trace("done")
    return 0
@@ -517,7 +515,7 @@ type probeResult struct {
 
 // probe performs one WB heap-exec call. A failure to draw the random fill is returned
 // rather than exited on, so the caller decides what to print.
-func probe(base uintptr, descVA uint32, tag string, data []byte, size uint32) (*probeResult, error) {
+func probe(op3 op3Func, descVA uint32, tag string, data []byte, size uint32) (*probeResult, error) {
    trace("probe %#x %s begin size=%#x", descVA, tag, size)
 
    fill := make([]byte, keyLen)
@@ -530,14 +528,11 @@ func probe(base uintptr, descVA uint32, tag string, data []byte, size uint32) (*
    out := make([]byte, keyLen)
    copy(out, fill)
 
-   args := newWbArgs(uint64(base)+uint64(descVA), status, keyBuf, out, size)
-   r1 := callWarbird(args)
-
-   // Reading out here is also what keeps its backing array alive across the call.
-   trace("probe %#x %s returned st=%#010x sv=%x", descVA, tag, uint32(r1), status[:4])
+   r1 := op3(descVA, 0x34, size, status, keyBuf, out, nil)
+   trace("probe %#x %s returned st=%#010x sv=%x", descVA, tag, r1, status[:4])
 
    return &probeResult{
-      ntstatus: uint32(r1),
+      ntstatus: r1,
       status:   status[:4], // per-call buffer, never reused, so no copy
       out:      out,
       fill:     fill,

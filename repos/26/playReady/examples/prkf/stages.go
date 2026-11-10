@@ -33,18 +33,18 @@
 // The caps bound the walk. On the recorded build the two stages sit inside the first
 // seven hops. Hitting a cap is reported as TRUNCATED.
 //
-// USAGE  prkf -6 discovers, caches and applies. Its children are selected by trialEnv
-// and take no arguments (see childMode in child.go):
+// USAGE  prkf -6 discovers, caches and applies. Its children are selected by childEnv
+// and take no arguments (see childMode in child.go). The payload is one JSON childSpec,
+// and these are the two modes -6 uses:
 //
-//   p1;<desc>,...                      every descriptor as stage 1, both halves
-//   p2;<start>;<obf>,...;<desc>,...    every pair as stage 2, both halves
+//   {"mode":"p1","descs":[...]}                          every descriptor as stage 1
+//   {"mode":"p2","start":N,"obfs":[...],"descs":[...]}    every pair as stage 2
 package main
 
 import (
    "bytes"
    "encoding/hex"
    "fmt"
-   "os"
    "slices"
    "strconv"
    "strings"
@@ -54,61 +54,6 @@ import (
 // dpPattern is the size-check signature: the consumer's own test, and the anchor both
 // the walk here and -3's census of the consumer are built on.
 var dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
-
-// dpDescList parses a list of descriptor addresses, each in any base. The child
-// payloads are built from the same formatting, so this is also what validates them on
-// the way back in.
-func dpDescList(xs []string) ([]uint32, bool) {
-   out := make([]uint32, 0, len(xs))
-   for _, x := range xs {
-      v, err := strconv.ParseUint(x, 0, 32)
-      if err != nil {
-         return nil, false
-      }
-      out = append(out, uint32(v))
-   }
-   return out, len(out) > 0
-}
-
-// --- stage entry point ------------------------------------------------------
-
-// dpTrialChild dispatches the two trial modes. spec is the value of trialEnv,
-// ';'-separated, and its stdout is parsed by the parent, so a malformed spec is exit
-// code 2 with the shape on stderr.
-func dpTrialChild(spec string) int {
-   f := strings.Split(spec, ";")
-   switch f[0] {
-   case "p1":
-      if len(f) != 2 {
-         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": want p1;<desc>,...")
-         return 2
-      }
-      descs, ok := dpDescList(strings.Split(f[1], ","))
-      if !ok {
-         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": bad descriptor list")
-         return 2
-      }
-      return dpWorkerP1(descs)
-   case "p2":
-      if len(f) != 4 {
-         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": want p2;<start>;<obf>,...;<desc>,...")
-         return 2
-      }
-      start, err := strconv.Atoi(f[1])
-      if err != nil || start < 0 {
-         fmt.Fprintf(os.Stderr, "prkf: "+trialEnv+": bad start %q\n", f[1])
-         return 2
-      }
-      descs, ok := dpDescList(strings.Split(f[3], ","))
-      if !ok {
-         fmt.Fprintln(os.Stderr, "prkf: "+trialEnv+": bad descriptor list")
-         return 2
-      }
-      return dpWorkerP2(start, strings.Split(f[2], ","), descs)
-   }
-   fmt.Fprintf(os.Stderr, "prkf: "+trialEnv+": unknown mode %q\n", f[0])
-   return 2
-}
 
 // isZeroHex reports whether a hex field is absent or all zero bytes. A stage that
 // writes nothing is not a stage: an all-zero buffer carries no information and would
@@ -398,20 +343,26 @@ type dpBatch struct {
 //   RES <i> <half> REJECT rc=.. st=..
 //
 // Only lines carrying the phase prefix are read, which is also why a FAULT line -
-// printed unprefixed, by the child's own handler - is not a row.
+// printed unprefixed, by the child's own handler - is not a row, and why a descriptor
+// that printf'd "RES ..." of its own cannot be mistaken for one.
 func dpParse(p procOut, pre string) dpBatch {
    var r dpBatch
    if p.err != nil {
       r.loadfail = "LOADFAIL " + p.err.Error()
       return r
    }
+   malformed := func(x string) dpBatch {
+      r.loadfail = "LOADFAIL malformed row: " + x
+      return r
+   }
+
    for _, ln := range strings.Split(string(p.stdout), "\n") {
       x := strings.TrimSuffix(ln, "\r")
       if !strings.HasPrefix(x, pre) {
          continue
       }
       f := strings.Fields(x[len(pre):])
-      if len(f) < 2 {
+      if len(f) == 0 {
          continue
       }
       switch f[0] {
@@ -419,24 +370,22 @@ func dpParse(p procOut, pre string) dpBatch {
          r.loadfail = x
       case "RES":
          if len(f) < 4 {
-            r.loadfail = "LOADFAIL malformed row: " + x
-            return r
+            return malformed(x)
          }
          i, e1 := strconv.Atoi(f[1])
          h, e2 := strconv.Atoi(f[2])
          if e1 != nil || e2 != nil {
-            r.loadfail = "LOADFAIL malformed row: " + x
-            return r
+            return malformed(x)
          }
+         row := dpRow{i: i, h: h, kind: "RES"}
          if f[3] == "REJECT" {
-            r.res = append(r.res, dpRow{i: i, h: h, kind: "REJECT"})
-            continue
+            row.kind = "REJECT"
+         } else if len(f) >= 5 {
+            row.a, row.b = f[3], f[4]
+         } else {
+            return malformed(x)
          }
-         if len(f) < 5 {
-            r.loadfail = "LOADFAIL malformed row: " + x
-            return r
-         }
-         r.res = append(r.res, dpRow{i: i, h: h, kind: "RES", a: f[3], b: f[4]})
+         r.res = append(r.res, row)
       }
    }
    return r
@@ -444,28 +393,21 @@ func dpParse(p procOut, pre string) dpBatch {
 
 // dpRunP1 spawns one stage-1 probe child and parses its rows.
 func dpRunP1(descs []uint32) dpBatch {
-   ds := make([]string, len(descs))
-   for i, d := range descs {
-      ds[i] = fmt.Sprintf("0x%x", d)
-   }
-   return dpParse(runCollect(trialEnv+"=p1;"+strings.Join(ds, ","), 300*time.Second), "S1 ")
+   return dpParse(runCollect(childSpec{Mode: "p1", Descs: descs}, 300*time.Second), "S1 ")
 }
 
 // dpRunP2 spawns one stage-2 probe child and parses its rows.
 func dpRunP2(start int, obfs []dpObf, descs []uint32) dpBatch {
-   os := make([]string, len(obfs))
+   vals := make([]string, len(obfs))
    for i, o := range obfs {
-      os[i] = o.v
+      vals[i] = o.v
    }
-   ds := make([]string, len(descs))
-   for i, d := range descs {
-      ds[i] = fmt.Sprintf("0x%x", d)
-   }
-   spec := strings.Join([]string{
-      "p2", strconv.Itoa(start),
-      strings.Join(os, ","), strings.Join(ds, ","),
-   }, ";")
-   return dpParse(runCollect(trialEnv+"="+spec, 300*time.Second), "MX ")
+   return dpParse(runCollect(childSpec{
+      Mode:  "p2",
+      Start: start,
+      Obfs:  vals,
+      Descs: descs,
+   }, 300*time.Second), "MX ")
 }
 
 // dpObf is one stage-1 output: the candidate, key half and buffer that produced it, and

@@ -188,10 +188,13 @@ func stageDecryptImg() (code int) {
    // descriptor for (rva, size) from this block's own crypto params, writes it over
    // the sacrificial slot, restores the slot's protection (the kernel rejects a
    // descriptor on a writable page with 0xc000000d), decrypts, reads back and frees.
-   decryptBlock := func(h imgDesc) (rc uint32, got []byte, protFailed bool, err error) {
+   //
+   // A failed patch is reported as rc != 0 with no bytes: the call is skipped, and the
+   // block belongs with the ones that failed rather than the ones that did not change.
+   decryptBlock := func(h imgDesc) (got []byte, rc uint32, err error) {
       lib, err := wbLoad(dllPath)
       if err != nil {
-         return 0, nil, false, fmt.Errorf("LoadLibraryW failed at heap block 0x%x: %w", h.rva, err)
+         return nil, 0, fmt.Errorf("LoadLibraryW failed at heap block 0x%x: %w", h.rva, err)
       }
       defer func() {
          if ferr := wbFree(lib); ferr != nil {
@@ -203,12 +206,11 @@ func stageDecryptImg() (code int) {
       hdr := diReadMem(sac, 0x40)
       params := f[int(h.off)+0x40 : int(h.off)+0xF0]
       if !wbPatch(lib, slot, diMakeDesc(hdr, params, h.rva, h.ln)) {
-         return 0, nil, true, nil
+         return nil, ^uint32(0), nil
       }
 
       rc = diCall(lib, sac, uintptr(relocs), uintptr(num))
-      got = diReadMem(lib+uintptr(h.rva), int(h.ln))
-      return rc, got, false, nil
+      return diReadMem(lib+uintptr(h.rva), int(h.ln)), rc, nil
    }
 
    done, same, errCount := 0, 0, 0
@@ -220,27 +222,23 @@ func stageDecryptImg() (code int) {
       }
       before := append([]byte(nil), img[h.rva:h.rva+h.ln]...)
 
-      rc, got, protFailed, err := decryptBlock(h)
+      got, rc, err := decryptBlock(h)
       if err != nil {
          return fail("%v", err)
       }
-      if protFailed {
-         errCount++
-         continue
-      }
 
       switch {
-      case rc == 0 && len(got) == int(h.ln) && !bytes.Equal(got, before):
+      case rc != 0:
+         errCount++
+      case !bytes.Equal(got, before):
          copy(img[h.rva:], got)
          done++
-      case rc == 0:
+      default:
          // was already plaintext (e.g. .data entries) - not an error
          same++
          if same <= 12 {
             logf("  unchanged 0x%06x+0x%x owner 0x%x", h.rva, h.ln, h.va)
          }
-      default:
-         errCount++
       }
 
       if (i+1)%200 == 0 {
@@ -267,7 +265,7 @@ func stageDecryptImg() (code int) {
    cen := &profileCensus{}
    for _, d := range segs {
       for _, sp := range segSpans(f, d, sizeImg) {
-         cen.Spans = append(cen.Spans, [2]uint32{sp.rva, sp.size})
+         cen.Spans = append(cen.Spans, [2]uint32{sp.start, sp.length})
       }
    }
    for _, h := range heaps {
@@ -373,9 +371,8 @@ func (d imgDesc) heap() bool {
 }
 
 // imgRun is a half-open RVA range. It serves three jobs with one type: one heap-exec
-// block, a merged run of them, and a patchable run carved out of a span. The two
-// earlier types for this were the same struct twice over, which meant a conversion
-// function whose only content was field renaming.
+// block, a merged run of them, and a segment span to patch. The two earlier types for
+// this were the same struct twice over under different field names.
 type imgRun struct{ start, length uint32 }
 
 // carveRuns returns [r, r+s) minus every interval, as the runs that remain.
@@ -418,18 +415,6 @@ func carveRuns(merged []imgRun, r, s uint32) []imgRun {
    return out
 }
 
-// heapRuns turns heap-exec descriptors into the RVA ranges the kernel decrypts itself,
-// ready for mergeRuns.
-func heapRuns(heaps []imgDesc) []imgRun {
-   var out []imgRun
-   for _, h := range heaps {
-      if h.ln != 0 {
-         out = append(out, imgRun{h.rva, h.ln})
-      }
-   }
-   return out
-}
-
 // mergeRuns sorts and coalesces overlapping OR touching ranges, so carveRuns can
 // binary-search them and the patcher can issue one VirtualProtect per merged run.
 //
@@ -449,6 +434,27 @@ func mergeRuns(ivs []imgRun) []imgRun {
          }
       }
       out = append(out, p)
+   }
+   return out
+}
+
+// segSpans returns the RVA ranges a segment descriptor lists. Each entry is 0xC bytes
+// from +0xF4: flags, rva, size. Entries reaching outside the image are dropped.
+//
+// -2 must not dedupe: its descriptors list overlapping spans, and deduping by RVA
+// loses the later, larger ones.
+func segSpans(fb []byte, d imgDesc, sizeImg uint32) []imgRun {
+   if int(d.off)+int(d.size) > len(fb) {
+      return nil
+   }
+   b := fb[d.off : d.off+d.size]
+
+   var out []imgRun
+   for o := 0xF4; o+0xC <= len(b); o += 0xC {
+      rva, size := le32(b, o+4), le32(b, o+8)
+      if rva >= 0x1000 && size >= 8 && uint64(rva)+uint64(size) <= uint64(sizeImg) {
+         out = append(out, imgRun{rva, size})
+      }
    }
    return out
 }
@@ -490,30 +496,6 @@ func peSections(fb []byte) (sizeImg uint32, secs []imgSection) {
       p += 40
    }
    return sizeImg, secs
-}
-
-// imgSpan is one RVA range listed by a segment descriptor.
-type imgSpan struct{ rva, size uint32 }
-
-// segSpans returns the RVA ranges a segment descriptor lists. Each entry is 0xC bytes
-// from +0xF4: flags, rva, size. Entries reaching outside the image are dropped.
-//
-// -2 must not dedupe: its descriptors list overlapping spans, and deduping by RVA
-// loses the later, larger ones.
-func segSpans(fb []byte, d imgDesc, sizeImg uint32) []imgSpan {
-   if int(d.off)+int(d.size) > len(fb) {
-      return nil
-   }
-   b := fb[d.off : d.off+d.size]
-
-   var out []imgSpan
-   for o := 0xF4; o+0xC <= len(b); o += 0xC {
-      rva, size := le32(b, o+4), le32(b, o+8)
-      if rva >= 0x1000 && size >= 8 && uint64(rva)+uint64(size) <= uint64(sizeImg) {
-         out = append(out, imgSpan{rva, size})
-      }
-   }
-   return out
 }
 
 // warbird.go end

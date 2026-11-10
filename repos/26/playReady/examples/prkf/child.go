@@ -12,6 +12,12 @@
 // selected by one environment variable and is passed no arguments at all, so no child
 // mode can appear in `prkf -h` and every step has an empty command line.
 //
+// THE PAYLOAD IS ONE JSON OBJECT. It was three ';'/',' mini-DSLs, each with its own
+// parser, its own error text, and no way to tell an empty list from a malformed one.
+// childSpec is decoded once in childMode, which is therefore the only validator, and
+// every spawn site passes a struct rather than formatting a string the child must then
+// re-parse.
+//
 // WHY A CHILD IS A SEPARATE PROCESS: a fault in a descriptor's code is a Windows SEH
 // exception raised inside the DLL, not a Go panic. recover() never runs and the whole
 // process dies, so one child per candidate confines a fault to that candidate.
@@ -45,15 +51,9 @@ import (
    "unsafe"
 )
 
-// Child modes. A child is this binary re-executed with one of these set and NO
-// arguments at all: the environment carries the mode because it is internal plumbing.
-//
-// Fields are ';'-separated and list items ','-separated.
-const (
-   probeEnv = "PRKF_PROBE_DESCS" // descriptor VAs, comma-separated                  -1
-   sweepEnv = "PRKF_SWEEP"       // <descRVA>;<families>;<sets>                      -3
-   trialEnv = "PRKF_TRIAL"       // p1;<desc>,... | p2;<start>;<obf>,...;<desc>,...  -6
-)
+// childEnv is the one variable a child is identified by. Its value is a JSON
+// childSpec; nothing else about the process differs from its parent.
+const childEnv = "PRKF_CHILD"
 
 // ------------------------------------------------------- the -3 sweep child
 
@@ -74,42 +74,103 @@ var (
 // themselves and each needs the same answer.
 var selfPath, selfErr = os.Executable()
 
+// childEnvFor renders spec as the one NAME=VALUE entry a spawn site passes.
+func childEnvFor(spec childSpec) (string, error) {
+   b, err := json.Marshal(spec)
+   if err != nil {
+      return "", fmt.Errorf("%s: %w", childEnv, err)
+   }
+   return childEnv + "=" + string(b), nil
+}
+
+// childEnvList is os.Environ with any inherited childEnv removed. syscall.Getenv on
+// Windows returns the FIRST match, so appending a payload to an environment that
+// already holds one shadows the new spec and the child silently repeats the old work.
+func childEnvList(entry string) []string {
+   env := os.Environ()
+   out := make([]string, 0, len(env)+1)
+   for _, e := range env {
+      if !strings.HasPrefix(e, childEnv+"=") {
+         out = append(out, e)
+      }
+   }
+   return append(out, entry)
+}
+
 // childMode reports whether this process was started as one of the re-executed
 // children, and runs it if so. Called from main before the FlagSet exists: a child
 // passes no arguments, so there is nothing for the FlagSet to parse.
 //
+// It is also the ONLY place a child payload is validated. Each mode names exactly the
+// fields it needs, so a malformed or half-populated spec fails here with one message
+// rather than in whichever worker happened to trip over it.
+//
 // An error means the payload was malformed, which is a spawn bug rather than a data
 // problem, so main exits 2 on it.
 func childMode() (code int, ok bool, err error) {
-   if s := os.Getenv(probeEnv); s != "" {
-      descs, valid := dpDescList(strings.Split(s, ","))
-      if !valid {
-         return 0, true, fmt.Errorf("%s=%q: not a descriptor list", probeEnv, s)
+   s := os.Getenv(childEnv)
+   if s == "" {
+      return 0, false, nil
+   }
+
+   var spec childSpec
+   if err := json.Unmarshal([]byte(s), &spec); err != nil {
+      return 0, true, fmt.Errorf("%s: %w", childEnv, err)
+   }
+
+   switch spec.Mode {
+   case "probe":
+      if len(spec.Descs) == 0 {
+         return 0, true, fmt.Errorf("%s: probe with no descriptors", childEnv)
       }
-      return runProbes(descs), true, nil
-   }
-   if s := os.Getenv(sweepEnv); s != "" {
-      f := strings.Split(s, ";")
-      if len(f) != 3 {
-         return 0, true, fmt.Errorf("%s=%q: want <descRVA>;<families>;<sets>", sweepEnv, s)
+      return runProbes(spec.Descs), true, nil
+
+   case "sweep":
+      // One descriptor, because a sweep drives one consumer. Families are indices into
+      // dmFams, so the range is checked against it and not against a literal 2 that
+      // could drift from the list.
+      if len(spec.Descs) != 1 {
+         return 0, true, fmt.Errorf("%s: sweep needs exactly one descriptor, got %d",
+            childEnv, len(spec.Descs))
       }
-      return dmWorker(f[0], f[1], f[2]), true, nil
+      if len(spec.Fams) == 0 || len(spec.Sets) == 0 {
+         return 0, true, fmt.Errorf("%s: sweep needs families and sets", childEnv)
+      }
+      for _, f := range spec.Fams {
+         if f < 0 || f >= len(dmFams) {
+            return 0, true, fmt.Errorf("%s: family %d is not one of %d",
+               childEnv, f, len(dmFams))
+         }
+      }
+      return dmWorker(spec.Descs[0], spec.Fams, spec.Sets), true, nil
+
+   case "p1":
+      if len(spec.Descs) == 0 {
+         return 0, true, fmt.Errorf("%s: p1 with no descriptors", childEnv)
+      }
+      return dpWorkerP1(spec.Descs), true, nil
+
+   case "p2":
+      if len(spec.Descs) == 0 || len(spec.Obfs) == 0 {
+         return 0, true, fmt.Errorf("%s: p2 needs descriptors and OBFs", childEnv)
+      }
+      if spec.Start < 0 {
+         return 0, true, fmt.Errorf("%s: p2 start %d is negative", childEnv, spec.Start)
+      }
+      return dpWorkerP2(spec.Start, spec.Obfs, spec.Descs), true, nil
    }
-   if s := os.Getenv(trialEnv); s != "" {
-      return dpTrialChild(s), true, nil
-   }
-   return 0, false, nil
+   return 0, true, fmt.Errorf("%s: unknown mode %q", childEnv, spec.Mode)
 }
 
 // dmCall runs the consumer on one blob with the given 0x41-byte key and returns
-// (ntstatus, status dword, 0x20-byte output). It is the one place the consumer's
-// argument block is written:
+// (ntstatus, status dword, 0x20-byte output). It is NOT op3Call: this consumer's
+// routine takes a blob, so its argument block is a different shape.
 //
 //   +0x00  op = 3
 //   +0x08  descriptor address
 //   +0x10  -> status dword
 //   +0x18  u32 0
-//   +0x1C  -> key       (unaligned: a uintptr, like wbArgs.Out)
+//   +0x1C  -> key       (unaligned: a uintptr, like the output pointer below)
 //   +0x24  u32 key size = 0x41
 //   +0x28  -> blob
 //   +0x30  -> output
@@ -171,36 +232,9 @@ func dmPrv(family int) []byte {
 // dmWorker is the sweep child. One image patch, then every family: find the live set
 // with one licence, sweep it with fifteen.
 //
-// Its three arguments arrive as the three fields of sweepEnv; nothing else calls it.
-func dmWorker(descArg, famsArg, setsArg string) int {
-   if descArg == "" || famsArg == "" || setsArg == "" {
-      fmt.Fprintln(os.Stderr, "prkf: "+sweepEnv+": want <descRVA>;<families>;<sets>")
-      return 2
-   }
-   desc, err := strconv.ParseUint(descArg, 0, 32)
-   if err != nil {
-      return dmLoadFail("bad descriptor %q", descArg)
-   }
-   var fams []int
-   for _, x := range strings.Split(famsArg, ",") {
-      n, err := strconv.Atoi(x)
-      if err != nil || n < 0 || n > 2 {
-         return dmLoadFail("bad family %q", x)
-      }
-      fams = append(fams, n)
-   }
-   var sets []uint32
-   for _, x := range strings.Split(setsArg, ",") {
-      n, err := strconv.ParseUint(x, 0, 32)
-      if err != nil {
-         return dmLoadFail("bad set %q", x)
-      }
-      sets = append(sets, uint32(n))
-   }
-   if len(fams) == 0 || len(sets) == 0 {
-      return dmLoadFail("empty family or set list")
-   }
-
+// Its arguments arrive decoded and already validated by childMode, so this body is the
+// work and nothing else.
+func dmWorker(desc uint32, fams []int, sets []uint32) int {
    // Every blob is read before the image is touched, so a missing licence fails in
    // milliseconds instead of after the span patch.
    blobs := make(map[int][]byte, 15)
@@ -260,7 +294,7 @@ func dmWorker(descArg, famsArg, setsArg string) int {
             if err := force(srva, byte(mm)); err != nil {
                return dmLoadFail("%v", err)
             }
-            rc, sd, res := dmCall(base, uint32(desc), prv, blobs[1])
+            rc, sd, res := dmCall(base, desc, prv, blobs[1])
             if !wbPatch(base, srva, orig) {
                return dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
             }
@@ -299,7 +333,7 @@ func dmWorker(descArg, famsArg, setsArg string) int {
             return dmLoadFail("%v", err)
          }
          for nn := 1; nn <= 15; nn++ {
-            rc, sd, res := dmCall(base, uint32(desc), prv, blobs[nn])
+            rc, sd, res := dmCall(base, desc, prv, blobs[nn])
             fmt.Printf("OUT %d %02x %02x rc=0x%08x st=%x %x\n", f, nn, mm, rc, sd, res)
          }
          if !wbPatch(base, srva, orig) {
@@ -348,7 +382,7 @@ func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, ou
    copy(b1, k1)
    copy(b2, k2) // nil k2 leaves this zero-filled
 
-   rc = op3(desc, ln, sb, b1, b2, size2)
+   rc = op3(desc, ln, 0x20, sb, b1, b2, size2)
    return b1[:0x20], b2[:0x20], rc, sb[:4]
 }
 
@@ -435,12 +469,18 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
       return out
    }
 
-   vas := make([]string, len(descs))
+   vas := make([]uint32, len(descs))
    for i, d := range descs {
-      vas[i] = fmt.Sprintf("%#x", d.descVA)
+      vas[i] = d.descVA
    }
+   entry, err := childEnvFor(childSpec{Mode: "probe", Descs: vas})
+   if err != nil {
+      w(fmt.Sprintf("  spawn: %v", err))
+      return out
+   }
+
    cmd := exec.Command(selfPath)
-   cmd.Env = append(os.Environ(), probeEnv+"="+strings.Join(vas, ","))
+   cmd.Env = childEnvList(entry)
 
    var stdout bytes.Buffer
    cmd.Stdout = &stdout
@@ -488,6 +528,41 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
    return out
 }
 
+// dpPrepChild loads what a trial needs and patches the image. It is the one place a
+// child pays its fixed cost, so both trial bodies call it and nothing else does.
+func dpPrepChild() (op3 op3Func, prv []byte, code int, err error) {
+   pi, err := pfPrep()
+   if err != nil {
+      return nil, nil, 5, err
+   }
+   if prv, err = dpPrv(); err != nil {
+      return nil, nil, 5, err
+   }
+   base, err := loadWarbird()
+   if err != nil {
+      return nil, nil, 4, err
+   }
+   pi.apply(base)
+
+   if !wbVEH(base) {
+      return nil, nil, 6, fmt.Errorf("AddVectoredExceptionHandler returned NULL")
+   }
+   return op3Call(base), prv, 0, nil
+}
+
+// childSpec is a child's whole payload. Descs is per-mode: descriptor VAs for "probe",
+// "p1" and "p2", and the single consumer descRVA for "sweep". The remaining fields are
+// read by the one mode that uses them and ignored by the rest, so a mode's requirements
+// are stated once, in childMode.
+type childSpec struct {
+   Mode  string   `json:"mode"`            // probe | sweep | p1 | p2
+   Descs []uint32 `json:"descs,omitempty"` // probe, p1, p2; sweep uses the one element
+   Fams  []int    `json:"fams,omitempty"`  // sweep
+   Sets  []uint32 `json:"sets,omitempty"`  // sweep
+   Obfs  []string `json:"obfs,omitempty"`  // p2
+   Start int      `json:"start,omitempty"` // p2
+}
+
 // dmFam is one family's rows from a sweep child. nLive is 1 when exactly one set
 // answered 16 distinct outputs; liveRVA is that set.
 type dmFam struct {
@@ -507,23 +582,22 @@ type dmResult struct {
 
 // dmSweep spawns one sweep child for the given families and parses its rows.
 func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
-   fs := make([]string, len(fams))
-   for i, x := range fams {
-      fs[i] = strconv.Itoa(x)
-   }
-   rs := make([]string, len(sets))
-   for i, x := range sets {
-      rs[i] = fmt.Sprintf("0x%x", x)
-   }
-   p := runCollect(sweepEnv+"=0x"+strconv.FormatUint(uint64(descRVA), 16)+";"+
-      strings.Join(fs, ",")+";"+strings.Join(rs, ","), 30*time.Minute)
+   p := runCollect(childSpec{
+      Mode:  "sweep",
+      Descs: []uint32{descRVA},
+      Fams:  fams,
+      Sets:  sets,
+   }, 30*time.Minute)
 
    r := dmResult{fams: map[int]*dmFam{}, rc: p.rc}
    if p.err != nil {
       r.loadfail = "LOADFAIL " + p.err.Error()
       return r
    }
-
+   bad := func(ln string) dmResult {
+      r.loadfail = "LOADFAIL malformed row: " + ln
+      return r
+   }
    fam := func(i int) *dmFam {
       if r.fams[i] == nil {
          r.fams[i] = &dmFam{outs: map[int]map[int]string{}}
@@ -537,55 +611,52 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
          continue
       }
       switch f[0] {
-      case "PATCHED":
+      case "PATCHED", "PROBE":
+         // The only rows not consumed as results. PROBE is the per-set evidence behind
+         // the live-set verdict, so it belongs in the log rather than being computed and
+         // dropped.
          r.meta = append(r.meta, ln)
+
       case "LOADFAIL":
          r.loadfail = ln
       case "FAULT":
          r.fault = ln
+
       case "LIVE":
          if len(f) < 4 {
-            r.loadfail = "LOADFAIL malformed LIVE row: " + ln
-            return r
+            return bad(ln)
          }
          v, e1 := strconv.Atoi(f[1])
-         _, e2 := strconv.Atoi(f[2]) // set index: validated, not retained
-         rva, e3 := strconv.ParseUint(f[3], 0, 32)
-         if e1 != nil || e2 != nil || e3 != nil {
-            r.loadfail = "LOADFAIL malformed LIVE row: " + ln
-            return r
+         rva, e2 := strconv.ParseUint(f[3], 0, 32) // f[2] is the set index, not retained
+         if e1 != nil || e2 != nil {
+            return bad(ln)
          }
          fm := fam(v)
          fm.liveRVA, fm.nLive = uint32(rva), 1
+
       case "NOLIVE":
          if len(f) < 3 {
-            r.loadfail = "LOADFAIL malformed NOLIVE row: " + ln
-            return r
+            return bad(ln)
          }
          v, e1 := strconv.Atoi(f[1])
          n, e2 := strconv.Atoi(f[2])
          if e1 != nil || e2 != nil {
-            r.loadfail = "LOADFAIL malformed NOLIVE row: " + ln
-            return r
+            return bad(ln)
          }
          fm := fam(v)
          fm.nLive, fm.liveRVA = n, 0
+
       case "OUT":
-         if len(f) < 6 {
-            r.loadfail = "LOADFAIL malformed OUT row: " + ln
-            return r
+         // OUT <family> <licence> <forced> rc=.. st=.. <value>
+         if len(f) < 7 {
+            return bad(ln)
          }
          v, e1 := strconv.Atoi(f[1])
-         nn, e2 := strconv.ParseInt(f[2], 16, 64)
-         mm, e3 := strconv.ParseInt(f[3], 16, 64)
-         if e1 != nil || e2 != nil || e3 != nil {
-            r.loadfail = "LOADFAIL malformed OUT row: " + ln
-            return r
-         }
-         val, ok := dmOut(f[len(f)-1])
-         if !ok {
-            r.loadfail = "LOADFAIL OUT value is not 32 hex bytes: " + ln
-            return r
+         nn, e2 := strconv.ParseUint(f[2], 16, 8)
+         mm, e3 := strconv.ParseUint(f[3], 16, 8)
+         val, ok := dmOut(f[6])
+         if e1 != nil || e2 != nil || e3 != nil || !ok {
+            return bad(ln)
          }
          fm := fam(v)
          if fm.outs[int(nn)] == nil {
@@ -627,58 +698,6 @@ func dmSweepAll(descRVA uint32, fams []int, sets []uint32, logf func(string, ...
    return r
 }
 
-// op3Func is one op=3 call: descriptor RVA, argument-block length, status buffer, key
-// buffer, output buffer, and the optional second size dword.
-type op3Func func(descRVA, ln uint32, status, kb, out []byte, size2 *uint32) uint32
-
-// dpOp3 issues one WbHeapExecuteCall. It returns a closure over `base`, because a plain
-// function would need nine parameters to say the same thing.
-//
-// It is not newWbArgs: the trial path passes a variable args length and writes a second
-// size dword at +0x2C, which is wbArgs's blank padding and therefore unaddressable from
-// Go.
-//
-// No runtime.KeepAlive is needed: syscall.(*LazyProc).Call is declared
-// //go:uintptrescapes.
-func dpOp3(base uintptr) op3Func {
-   return func(descRVA, ln uint32, status, kb, out []byte, size2 *uint32) uint32 {
-      var a [0x40]byte
-      binary.LittleEndian.PutUint64(a[0x00:], 3)
-      binary.LittleEndian.PutUint64(a[0x08:], uint64(base)+uint64(descRVA))
-      binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&status[0]))))
-      binary.LittleEndian.PutUint64(a[0x18:], uint64(uintptr(unsafe.Pointer(&kb[0]))))
-      binary.LittleEndian.PutUint32(a[0x20:], 0x20)
-      binary.LittleEndian.PutUint64(a[0x24:], uint64(uintptr(unsafe.Pointer(&out[0]))))
-      if size2 != nil {
-         binary.LittleEndian.PutUint32(a[0x2C:], *size2)
-      }
-      r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), uintptr(ln), 0)
-      return uint32(r)
-   }
-}
-
-// dpPrepChild loads what a trial needs and patches the image. It is the one place a
-// child pays its fixed cost, so both trial bodies call it and nothing else does.
-func dpPrepChild() (op3 op3Func, prv []byte, code int, err error) {
-   pi, err := pfPrep()
-   if err != nil {
-      return nil, nil, 5, err
-   }
-   if prv, err = dpPrv(); err != nil {
-      return nil, nil, 5, err
-   }
-   base, err := loadWarbird()
-   if err != nil {
-      return nil, nil, 4, err
-   }
-   pi.apply(base)
-
-   if !wbVEH(base) {
-      return nil, nil, 6, fmt.Errorf("AddVectoredExceptionHandler returned NULL")
-   }
-   return dpOp3(base), prv, 0, nil
-}
-
 // ------------------------------------------------------------- the trial prep
 
 // pfImage is everything a trial child or a -3 sweep needs: the decrypted image, the
@@ -694,7 +713,7 @@ type pfImage struct {
    size   uint32
    img    []byte
    heaps  []imgDesc
-   spans  []imgSpan
+   spans  []imgRun
    merged []imgRun
    prof   *dllProfile
 }
@@ -725,12 +744,16 @@ func pfPrep() (*pfImage, error) {
    }
 
    for _, h := range p.Census.Heaps {
-      pi.heaps = append(pi.heaps, imgDesc{va: h[0], descVA: h[1], rva: h[2], ln: h[3]})
+      d := imgDesc{va: h[0], descVA: h[1], rva: h[2], ln: h[3]}
+      pi.heaps = append(pi.heaps, d)
+      if d.ln != 0 {
+         pi.merged = append(pi.merged, imgRun{d.rva, d.ln})
+      }
    }
    for _, s := range p.Census.Spans {
-      pi.spans = append(pi.spans, imgSpan{rva: s[0], size: s[1]})
+      pi.spans = append(pi.spans, imgRun{s[0], s[1]})
    }
-   pi.merged = mergeRuns(heapRuns(pi.heaps))
+   pi.merged = mergeRuns(pi.merged)
    return pi, nil
 }
 
@@ -744,10 +767,10 @@ func pfPrep() (*pfImage, error) {
 func (p *pfImage) apply(base uintptr) (patched, skipped int) {
    var runs []imgRun
    for _, s := range p.spans {
-      if uint64(s.rva)+uint64(s.size) > uint64(len(p.img)) {
+      if uint64(s.start)+uint64(s.length) > uint64(len(p.img)) {
          continue
       }
-      r := carveRuns(p.merged, s.rva, s.size)
+      r := carveRuns(p.merged, s.start, s.length)
       if len(r) == 0 {
          skipped++
          continue
@@ -777,20 +800,26 @@ type procOut struct {
 }
 
 // runCollect spawns this binary as a child under a deadline and returns its stdout. The
-// child is identified by env alone and is passed no arguments.
+// child is identified by env alone and is passed no arguments; spec is encoded here, so
+// no caller ever formats a payload and no child ever re-parses a hand-built string.
 //
 // A non-zero exit is reported as rc, not as an error: every child signals failure that
 // way on purpose, and the caller parses stdout for the reason. err is non-nil only when
-// the process could not be started.
-func runCollect(env string, timeout time.Duration) procOut {
+// the process could not be started or the spec could not be encoded.
+func runCollect(spec childSpec, timeout time.Duration) procOut {
    if selfErr != nil {
       return procOut{rc: -1, err: selfErr}
    }
+   entry, err := childEnvFor(spec)
+   if err != nil {
+      return procOut{rc: -1, err: err}
+   }
+
    ctx, cancel := context.WithTimeout(context.Background(), timeout)
    defer cancel()
 
    cmd := exec.CommandContext(ctx, selfPath)
-   cmd.Env = append(os.Environ(), env)
+   cmd.Env = childEnvList(entry)
    var so bytes.Buffer
    cmd.Stdout = &so
    runErr := cmd.Run()

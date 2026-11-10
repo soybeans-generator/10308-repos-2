@@ -52,7 +52,6 @@ import (
    "fmt"
    "os"
    "path/filepath"
-   "strconv"
    "strings"
 
    "filippo.io/nistec"
@@ -283,12 +282,12 @@ func dmDeriveMap() (code int) {
          continue
       }
       mh, herr := hex.DecodeString(shared)
-      if herr != nil {
-         logf("          shared value is not hex: %q", shared)
+      if herr != nil || len(mh) != len(moSentinel) {
+         logf("          shared value is not %d hex bytes: %q", len(moSentinel), shared)
          logf("")
          continue
       }
-      MAGIC := make([]byte, min(len(mh), len(moSentinel)))
+      MAGIC := make([]byte, len(moSentinel))
       for i := range MAGIC {
          MAGIC[i] = mh[i] ^ moSentinel[i]
       }
@@ -307,14 +306,10 @@ func dmDeriveMap() (code int) {
       }
       logf("")
 
-      jm := make(map[string]int, len(MAP))
-      for k, x := range MAP {
-         jm[strconv.Itoa(k)] = x
-      }
       pmaps[vkey(v)] = &profileMap{
          Cluster:  fm.liveRVA,
          Magic:    hex.EncodeToString(MAGIC),
-         Map:      jm,
+         Map:      MAP,
          Consumer: h.descVA,
       }
    }
@@ -388,9 +383,16 @@ func dmHx(s string) []byte {
 // licence agrees on is the sentinel output, SENT XOR magic; the forced nibble that
 // produced it is the pre-image of that licence's real nibble, so reading the hits out
 // in licence order gives MAP inverted, which is what stage 4 wants.
-func dmPerm(fm *dmFam) (map[int]int, string, error) {
+//
+// It returns the permutation directly rather than a map: -1 marks "not yet claimed",
+// which is also how the single leftover is found.
+func dmPerm(fm *dmFam) ([16]int, string, error) {
+   var MAP [16]int
+   for i := range MAP {
+      MAP[i] = -1
+   }
    if len(fm.outs) < 15 {
-      return nil, "", fmt.Errorf("sweep incomplete (%d of 15 licences)", len(fm.outs))
+      return MAP, "", fmt.Errorf("sweep incomplete (%d of 15 licences)", len(fm.outs))
    }
 
    cnt := map[string]int{}
@@ -410,12 +412,11 @@ func dmPerm(fm *dmFam) (map[int]int, string, error) {
       }
    }
    if len(shared) != 1 {
-      return nil, "", fmt.Errorf("%d values shared by all %d licences, expected 1",
+      return MAP, "", fmt.Errorf("%d values shared by all %d licences, expected 1",
          len(shared), len(fm.outs))
    }
    magic := shared[0]
 
-   MAP := map[int]int{}
    for nn := 1; nn < 16; nn++ {
       var hits []int
       for mm, x := range fm.outs[nn] {
@@ -424,24 +425,29 @@ func dmPerm(fm *dmFam) (map[int]int, string, error) {
          }
       }
       if len(hits) != 1 {
-         return nil, "", fmt.Errorf("nibble 0x%x: %d hits, expected 1", nn, len(hits))
+         return MAP, "", fmt.Errorf("nibble 0x%x: %d hits, expected 1", nn, len(hits))
       }
-      if p, used := MAP[hits[0]]; used {
-         return nil, "", fmt.Errorf("mapped 0x%x claimed by real 0x%x and 0x%x", hits[0], p, nn)
+      if p := MAP[hits[0]]; p >= 0 {
+         return MAP, "", fmt.Errorf("mapped 0x%x claimed by real 0x%x and 0x%x", hits[0], p, nn)
       }
       MAP[hits[0]] = nn
    }
 
-   var left []int
+   // Exactly one forced nibble is left: 0x00, which no licence exercises because
+   // scalar 0 is not a valid private key.
+   left := -1
    for m := 0; m < 16; m++ {
-      if _, ok := MAP[m]; !ok {
-         left = append(left, m)
+      if MAP[m] < 0 {
+         if left >= 0 {
+            return MAP, "", fmt.Errorf("expected one leftover, got 0x%x and 0x%x", left, m)
+         }
+         left = m
       }
    }
-   if len(left) != 1 {
-      return nil, "", fmt.Errorf("expected one leftover, got %#x", left)
+   if left < 0 {
+      return MAP, "", fmt.Errorf("expected one leftover, got none")
    }
-   MAP[left[0]] = 0
+   MAP[left] = 0
    return MAP, magic, nil
 }
 
