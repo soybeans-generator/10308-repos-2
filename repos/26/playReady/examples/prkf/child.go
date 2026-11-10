@@ -3,35 +3,31 @@
 
 // Every body this binary re-executes, and the process plumbing they share.
 //
-//   -6's trials      dpWorkerP1, dpWorkerP2
+//   -6's trials      dpWorker
 //   -3's sweep       dmWorker
 //   trial prep       pfImage, pfPrep, apply
 //   spawn helpers    runCollect, probeBatch, dmSweep
 //
-// A CHILD IS IDENTIFIED BY ITS ENVIRONMENT, NOT BY ITS ARGUMENTS. Every body here is
-// selected by one environment variable and is passed no arguments at all, so no child
-// mode can appear in `prkf -h` and every step has an empty command line.
-//
-// THE PAYLOAD IS ONE JSON OBJECT. It was three ';'/',' mini-DSLs, each with its own
-// parser, its own error text, and no way to tell an empty list from a malformed one.
-// childSpec is decoded once in childMode, which is therefore the only validator, and
-// every spawn site passes a struct rather than formatting a string the child must then
-// re-parse.
+// A CHILD IS IDENTIFIED BY ITS ENVIRONMENT, NOT BY ITS ARGUMENTS: one variable, one JSON
+// childSpec, decoded and validated once in childMode. No child mode appears in `prkf -h`
+// and every step has an empty command line.
 //
 // WHY A CHILD IS A SEPARATE PROCESS: a fault in a descriptor's code is a Windows SEH
 // exception raised inside the DLL, not a Go panic. recover() never runs and the whole
 // process dies, so one child per candidate confines a fault to that candidate.
 //
-// WHAT A TRIAL REPORTS: op=3 gets a 0x20-byte key and two 0x20-byte buffers, and a
-// routine may write to either or both. Nothing states which, so every row carries BOTH
-// buffers and the parent decides. Row format, both phases:
+// A TRIAL ROW, both phases, one shape - the two buffers in call order, key then output:
 //
-//   RES <i> <half> <a> <b>             two 0x20-byte buffers, hex
-//   RES <i> <half> REJECT rc=.. st=..  the routine refused
+//   RES <i> <a> <b>              two 0x20-byte buffers, hex; the half is i % 2
+//   RES <i> REJECT rc=.. st=..   the routine refused
 //
-// EXIT CODES: nothing here calls os.Exit. Children return their code: 0 after their
-// rows, 2 for a bad payload, 4 when the module cannot be loaded, 5 on bad input or a
-// recovered panic, 6 when no fault handler could be installed.
+// A buffer field is exactly 0x40 hex characters (isHex32), checked at the parser and not
+// at each use: hex.DecodeString returns the bytes it did decode alongside its error, so a
+// 66-character field with one bad trailing byte yields a well-formed 0x20 bytes.
+//
+// EXIT CODES: nothing here calls os.Exit. 0 after the rows, 2 for a bad payload, 4 when
+// the module cannot be loaded, 5 on bad input or a recovered panic, 6 when no fault
+// handler could be installed.
 package main
 
 import (
@@ -42,6 +38,7 @@ import (
    "encoding/hex"
    "encoding/json"
    "fmt"
+   "io"
    "os"
    "os/exec"
    "path/filepath"
@@ -51,8 +48,8 @@ import (
    "unsafe"
 )
 
-// childEnv is the one variable a child is identified by. Its value is a JSON
-// childSpec; nothing else about the process differs from its parent.
+// childEnv is the one variable a child is identified by. Its value is a JSON childSpec;
+// nothing else about the process differs from its parent.
 const childEnv = "PRKF_CHILD"
 
 // ------------------------------------------------------- the -3 sweep child
@@ -84,8 +81,8 @@ func childEnvFor(spec childSpec) (string, error) {
 }
 
 // childEnvList is os.Environ with any inherited childEnv removed. syscall.Getenv on
-// Windows returns the FIRST match, so appending a payload to an environment that
-// already holds one shadows the new spec and the child silently repeats the old work.
+// Windows returns the FIRST match, so appending a payload to an environment that already
+// holds one shadows the new spec and the child silently repeats the old work.
 func childEnvList(entry string) []string {
    env := os.Environ()
    out := make([]string, 0, len(env)+1)
@@ -97,16 +94,13 @@ func childEnvList(entry string) []string {
    return append(out, entry)
 }
 
-// childMode reports whether this process was started as one of the re-executed
-// children, and runs it if so. Called from main before the FlagSet exists: a child
-// passes no arguments, so there is nothing for the FlagSet to parse.
+// childMode reports whether this process was started as one of the re-executed children,
+// and runs it if so. Called from main before the FlagSet exists: a child passes no
+// arguments, so there is nothing for the FlagSet to parse.
 //
 // It is also the ONLY place a child payload is validated. Each mode names exactly the
-// fields it needs, so a malformed or half-populated spec fails here with one message
-// rather than in whichever worker happened to trip over it.
-//
-// An error means the payload was malformed, which is a spawn bug rather than a data
-// problem, so main exits 2 on it.
+// fields it needs, so a malformed spec fails here with one message rather than in
+// whichever worker happened to trip over it. An error means a spawn bug, so main exits 2.
 func childMode() (code int, ok bool, err error) {
    s := os.Getenv(childEnv)
    if s == "" {
@@ -127,8 +121,7 @@ func childMode() (code int, ok bool, err error) {
 
    case "sweep":
       // One descriptor, because a sweep drives one consumer. Families are indices into
-      // dmFams, so the range is checked against it and not against a literal 2 that
-      // could drift from the list.
+      // dmFams, so the range is checked against it and not against a literal.
       if len(spec.Descs) != 1 {
          return 0, true, fmt.Errorf("%s: sweep needs exactly one descriptor, got %d",
             childEnv, len(spec.Descs))
@@ -145,26 +138,34 @@ func childMode() (code int, ok bool, err error) {
       return dmWorker(spec.Descs[0], spec.Fams, spec.Sets), true, nil
 
    case "p1":
+      // Phase 1 is phase 2 with one empty OBF, and the empty value is what selects the
+      // phase-1 argument shape, so exactly one is required and it must be empty.
       if len(spec.Descs) == 0 {
          return 0, true, fmt.Errorf("%s: p1 with no descriptors", childEnv)
       }
-      return dpWorkerP1(spec.Descs), true, nil
+      if len(spec.Obfs) != 1 || spec.Obfs[0] != "" {
+         return 0, true, fmt.Errorf("%s: p1 needs exactly one empty OBF slot, got %d",
+            childEnv, len(spec.Obfs))
+      }
+      return dpWorker(spec.Mode, 0, spec.Obfs, spec.Descs), true, nil
 
    case "p2":
+      // One OBF per candidate, so any non-empty list will not do: the worker indexes
+      // obfs[oi] for every (descriptor, OBF, half) triple.
       if len(spec.Descs) == 0 || len(spec.Obfs) == 0 {
          return 0, true, fmt.Errorf("%s: p2 needs descriptors and OBFs", childEnv)
       }
       if spec.Start < 0 {
          return 0, true, fmt.Errorf("%s: p2 start %d is negative", childEnv, spec.Start)
       }
-      return dpWorkerP2(spec.Start, spec.Obfs, spec.Descs), true, nil
+      return dpWorker(spec.Mode, spec.Start, spec.Obfs, spec.Descs), true, nil
    }
    return 0, true, fmt.Errorf("%s: unknown mode %q", childEnv, spec.Mode)
 }
 
 // dmCall runs the consumer on one blob with the given 0x41-byte key and returns
-// (ntstatus, status dword, 0x20-byte output). It is NOT op3Call: this consumer's
-// routine takes a blob, so its argument block is a different shape.
+// (ntstatus, status dword, 0x20-byte output). It is NOT op3Call: this consumer's routine
+// takes a blob, so its argument block is a different shape.
 //
 //   +0x00  op = 3
 //   +0x08  descriptor address
@@ -200,22 +201,8 @@ func dmLoadFail(f string, a ...any) int {
    return 4
 }
 
-// dmOut validates the field a child prints for one result: exactly 32 bytes of hex.
-// Checking here rather than at the point of use means a format regression is reported
-// against the row that caused it.
-func dmOut(s string) (string, bool) {
-   if len(s) != 0x40 {
-      return "", false
-   }
-   if _, err := hex.DecodeString(s); err != nil {
-      return "", false
-   }
-   return s, true
-}
-
-// dmPrv is a synthetic 0x41-byte key component. Deterministic and free of structure the
-// routine could special-case: the first 0x40 bytes are a fixed non-repeating pattern,
-// and byte 0x40 - the family selector - is the family.
+// dmPrv is a synthetic 0x41-byte key component: the first 0x40 bytes a fixed
+// non-repeating pattern, byte 0x40 the family selector.
 //
 // Only -3 uses it. -6 drives the real key, because the stage routines reject material
 // that is not real; forcing the table here collapses whatever this key derives, so its
@@ -231,9 +218,6 @@ func dmPrv(family int) []byte {
 
 // dmWorker is the sweep child. One image patch, then every family: find the live set
 // with one licence, sweep it with fifteen.
-//
-// Its arguments arrive decoded and already validated by childMode, so this body is the
-// work and nothing else.
 func dmWorker(desc uint32, fams []int, sets []uint32) int {
    // Every blob is read before the image is touched, so a missing licence fails in
    // milliseconds instead of after the span patch.
@@ -264,18 +248,13 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
       return dmLoadFail("AddVectoredExceptionHandler returned NULL")
    }
 
-   // A failed patch does not merely skip work: the forced nibble is not forced, so
-   // every row for that set is garbage. It is fatal.
+   // A failed patch does not merely skip work: the forced nibble is not forced, so every
+   // row for that set is garbage. It is fatal.
    force := func(rva uint32, v byte) error {
       if !wbPatch(base, rva, bytes.Repeat([]byte{v}, dmCLEN)) {
          return fmt.Errorf("patch set 0x%x: VirtualProtect failed", rva)
       }
       return nil
-   }
-   readSet := func(rva uint32) []byte {
-      o := make([]byte, dmCLEN)
-      copy(o, unsafe.Slice((*byte)(wbMemAt(base+uintptr(rva))), dmCLEN))
-      return o
    }
 
    for _, f := range fams {
@@ -285,9 +264,12 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
       // One licence is enough: forcing 16 different nibbles through a table the routine
       // actually reads gives 16 different scalars, hence 16 different outputs. A set it
       // never reads gives the same output 16 times.
+      //
+      // Each force overwrites all of dmCLEN, so a set is restored once and not once per
+      // forced nibble: only the last force needs undoing.
       liveIdx, nLive := -1, 0
       for i, srva := range sets {
-         orig := readSet(srva)
+         orig := diReadMem(base+uintptr(srva), dmCLEN)
          seen := map[string]bool{}
          ok := true
          for mm := 0; mm < 16; mm++ {
@@ -295,14 +277,14 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
                return dmLoadFail("%v", err)
             }
             rc, sd, res := dmCall(base, desc, prv, blobs[1])
-            if !wbPatch(base, srva, orig) {
-               return dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
-            }
             if rc != 0 || !statusOK(sd) {
                ok = false
                break
             }
             seen[hex.EncodeToString(res)] = true
+         }
+         if !wbPatch(base, srva, orig) {
+            return dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
          }
          d := len(seen)
          if !ok {
@@ -327,7 +309,7 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
       // ---- phase 2: the full permutation ---------------------------------
       // Forced nibble outer, licence inner: one protection flip per forced value instead
       // of one per call.
-      orig := readSet(srva)
+      orig := diReadMem(base+uintptr(srva), dmCLEN)
       for mm := 0; mm < 16; mm++ {
          if err := force(srva, byte(mm)); err != nil {
             return dmLoadFail("%v", err)
@@ -369,12 +351,8 @@ func dpPrv() ([]byte, error) {
    return prv, nil
 }
 
-// dpTrial runs one op=3 trial. k1 goes in the key buffer, k2 in the output buffer, and
-// ln / size2 are the only things that differ between the two stages: stage 1 is 0x2C
-// bytes with no second size, stage 2 is 0x30 bytes with a 0x20 there.
-//
-// Both buffers come back because which one a routine treats as its output is not
-// established; the caller picks with its recorded O index.
+// dpTrial runs one op=3 trial. k1 goes in the key buffer, k2 in the output buffer; ln
+// and size2 are the only things that differ between the phases.
 func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, out []byte, rc uint32, st []byte) {
    sb := make([]byte, 0x40)
    b1 := make([]byte, 0x40)
@@ -386,40 +364,19 @@ func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, ou
    return b1[:0x20], b2[:0x20], rc, sb[:4]
 }
 
-// dpWorkerP1 is the stage-1 probe: every candidate, both key halves, both buffers.
-func dpWorkerP1(descs []uint32) (code int) {
-   say := func(f string, a ...any) { fmt.Printf("S1 "+f+"\n", a...) }
-   defer func() {
-      if r := recover(); r != nil {
-         say("ERR %v", r)
-         code = 5
-      }
-   }()
-
-   op3, prv, code, err := dpPrepChild()
-   if err != nil {
-      say("ERR %v", err)
-      return code
+// dpWorker is the trial body for both phases, because they differ in three constants and
+// nothing else: phase 1 is 0x2C bytes with no second size, key half in the key buffer and
+// a zeroed output; phase 2 is 0x30 with a 0x20 there, OBF in the key buffer and the key
+// half in the output buffer. Phase 1 is therefore phase 2 with a single empty OBF.
+//
+// The index is flattened as (di*len(obfs)+oi)*2+h, so the half is always i%2 and a resume
+// point is one integer.
+func dpWorker(mode string, start int, obfs []string, descs []uint32) (code int) {
+   pre := "S1 "
+   if mode == "p2" {
+      pre = "MX "
    }
-
-   for i, d := range descs {
-      for h := 0; h < 2; h++ {
-         kb, out, rc, sd := dpTrial(op3, d, 0x2C, dpHalf(prv, h), nil, nil)
-         if rc != 0 || !statusOK(sd) {
-            say("RES %d %d REJECT rc=0x%08x st=%s", i, h, rc, hex.EncodeToString(sd))
-            continue
-         }
-         say("RES %d %d %s %s", i, h, hex.EncodeToString(out), hex.EncodeToString(kb))
-      }
-   }
-   return 0
-}
-
-// dpWorkerP2 is the stage-2 probe: every (candidate, OBF, key half) from `start`
-// onwards. The index is flattened as (di*len(obfs)+oi)*2+h, so a resume point is one
-// integer.
-func dpWorkerP2(start int, obfs []string, descs []uint32) (code int) {
-   say := func(f string, a ...any) { fmt.Printf("MX "+f+"\n", a...) }
+   say := func(f string, a ...any) { fmt.Printf(pre+f+"\n", a...) }
    defer func() {
       if r := recover(); r != nil {
          say("ERR %v", r)
@@ -434,38 +391,54 @@ func dpWorkerP2(start int, obfs []string, descs []uint32) (code int) {
    }
 
    sz := uint32(0x20)
+   ln, szp := uint32(0x2C), (*uint32)(nil)
+   if mode == "p2" {
+      ln, szp = 0x30, &sz
+   }
+
    n := len(obfs)
    for idx := start; idx < len(descs)*n*2; idx++ {
-      di := idx / (n * 2)
-      oi, h := (idx%(n*2))/2, idx%2
-      obf, err := hex.DecodeString(obfs[oi])
-      if err != nil || len(obf) != 0x20 {
-         say("ERR bad obf %q", obfs[oi])
-         return 5
+      di, oi, h := idx/(n*2), idx%(n*2)/2, idx%2
+      k1, k2 := dpHalf(prv, h), []byte(nil)
+      if obfs[oi] != "" {
+         var derr error
+         if k1, derr = hex.DecodeString(obfs[oi]); derr != nil || len(k1) != 0x20 {
+            say("ERR bad obf %q", obfs[oi])
+            return 5
+         }
+         k2 = dpHalf(prv, h)
       }
-      kb, out, rc, st := dpTrial(op3, descs[di], 0x30, obf, dpHalf(prv, h), &sz)
+      kb, out, rc, st := dpTrial(op3, descs[di], ln, k1, k2, szp)
       if rc != 0 || !statusOK(st) {
-         say("RES %d %d REJECT rc=0x%08x st=%s", idx, h, rc, hex.EncodeToString(st))
+         say("RES %d REJECT rc=0x%08x st=%s", idx, rc, hex.EncodeToString(st))
          continue
       }
-      say("RES %d %d %s %s", idx, h, hex.EncodeToString(kb), hex.EncodeToString(out))
+      say("RES %d %s %s", idx, hex.EncodeToString(kb), hex.EncodeToString(out))
    }
    return 0
 }
 
+// isHex32 reports whether s is exactly 0x20 bytes of hex, the shape of every buffer a
+// child prints. Length alone is not the test: hex.DecodeString returns the bytes it did
+// decode alongside its error, so a 66-character field with a bad final byte yields a
+// well-formed 0x20 bytes plus an error.
+func isHex32(s string) bool {
+   if len(s) != 0x40 {
+      return false
+   }
+   _, err := hex.DecodeString(s)
+   return err == nil
+}
+
 // probeBatch re-executes this binary as a probe child for a list of descriptors and
-// returns the RESULT line each one produced, keyed by descriptor VA. A descriptor with
-// no line faulted or was never reached, and the caller recovers it.
+// returns the RESULT line each one produced, keyed by descriptor VA. A descriptor with no
+// line faulted or was never reached, and the caller recovers it.
 //
-// stderr is streamed into w as it arrives rather than buffered: a child that hangs never
-// exits, and the last trace line is the only evidence of where.
+// No deadline, and stderr is streamed into w: a hung chunk never exits, so its last trace
+// line is the only evidence of where it stopped, and a timeout would hide that.
 func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
    out := map[uint32]string{}
    if len(descs) == 0 {
-      return out
-   }
-   if selfErr != nil {
-      w(fmt.Sprintf("  spawn: %v", selfErr))
       return out
    }
 
@@ -473,46 +446,17 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
    for i, d := range descs {
       vas[i] = d.descVA
    }
-   entry, err := childEnvFor(childSpec{Mode: "probe", Descs: vas})
-   if err != nil {
-      w(fmt.Sprintf("  spawn: %v", err))
+
+   p := runCollect(childSpec{Mode: "probe", Descs: vas}, 0, w)
+   if p.err != nil {
+      w("  spawn: " + p.err.Error())
       return out
    }
-
-   cmd := exec.Command(selfPath)
-   cmd.Env = childEnvList(entry)
-
-   var stdout bytes.Buffer
-   cmd.Stdout = &stdout
-
-   er, err := cmd.StderrPipe()
-   if err != nil {
-      w(fmt.Sprintf("  stderr pipe: %v", err))
-      return out
-   }
-   if err := cmd.Start(); err != nil {
-      w(fmt.Sprintf("  start: %v", err))
-      return out
+   if p.rc != 0 {
+      w(fmt.Sprintf("  exit: %d", p.rc))
    }
 
-   sc := bufio.NewScanner(er)
-   sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-   for sc.Scan() {
-      w("  " + sc.Text())
-   }
-   // sc.Err is the only signal that the trace ended early. Dropped, it would make a
-   // truncated trace indistinguishable from a complete one.
-   if serr := sc.Err(); serr != nil {
-      w(fmt.Sprintf("  TRACE TRUNCATED: %v", serr))
-   }
-
-   // Reading to EOF before Wait is the documented pattern: Wait closes the pipe, so
-   // every trace line is in the log before the rows are read.
-   if err := cmd.Wait(); err != nil {
-      w(fmt.Sprintf("  exit: %v", err))
-   }
-
-   for _, l := range strings.Split(stdout.String(), "\n") {
+   for _, l := range strings.Split(string(p.stdout), "\n") {
       l = strings.TrimRight(l, "\r")
       if !strings.HasPrefix(l, "RESULT ") {
          continue
@@ -528,8 +472,8 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
    return out
 }
 
-// dpPrepChild loads what a trial needs and patches the image. It is the one place a
-// child pays its fixed cost, so both trial bodies call it and nothing else does.
+// dpPrepChild loads what a trial needs and patches the image. It is the one place a child
+// pays its fixed cost, so both phases call it and nothing else does.
 func dpPrepChild() (op3 op3Func, prv []byte, code int, err error) {
    pi, err := pfPrep()
    if err != nil {
@@ -552,19 +496,21 @@ func dpPrepChild() (op3 op3Func, prv []byte, code int, err error) {
 
 // childSpec is a child's whole payload. Descs is per-mode: descriptor VAs for "probe",
 // "p1" and "p2", and the single consumer descRVA for "sweep". The remaining fields are
-// read by the one mode that uses them and ignored by the rest, so a mode's requirements
-// are stated once, in childMode.
+// read by the one mode that uses them and ignored by the rest.
+//
+// Obfs is a single "" for "p1", where the empty value selects the phase-1 argument shape,
+// and the full OBF list for "p2".
 type childSpec struct {
    Mode  string   `json:"mode"`            // probe | sweep | p1 | p2
    Descs []uint32 `json:"descs,omitempty"` // probe, p1, p2; sweep uses the one element
    Fams  []int    `json:"fams,omitempty"`  // sweep
    Sets  []uint32 `json:"sets,omitempty"`  // sweep
-   Obfs  []string `json:"obfs,omitempty"`  // p2
+   Obfs  []string `json:"obfs,omitempty"`  // p1, p2
    Start int      `json:"start,omitempty"` // p2
 }
 
-// dmFam is one family's rows from a sweep child. nLive is 1 when exactly one set
-// answered 16 distinct outputs; liveRVA is that set.
+// dmFam is one family's rows from a sweep child. nLive is 1 when exactly one set answered
+// 16 distinct outputs; liveRVA is that set.
 type dmFam struct {
    nLive   int
    liveRVA uint32
@@ -587,7 +533,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
       Descs: []uint32{descRVA},
       Fams:  fams,
       Sets:  sets,
-   }, 30*time.Minute)
+   }, 30*time.Minute, nil)
 
    r := dmResult{fams: map[int]*dmFam{}, rc: p.rc}
    if p.err != nil {
@@ -613,8 +559,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
       switch f[0] {
       case "PATCHED", "PROBE":
          // The only rows not consumed as results. PROBE is the per-set evidence behind
-         // the live-set verdict, so it belongs in the log rather than being computed and
-         // dropped.
+         // the live-set verdict, so it belongs in the log.
          r.meta = append(r.meta, ln)
 
       case "LOADFAIL":
@@ -648,21 +593,20 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
 
       case "OUT":
          // OUT <family> <licence> <forced> rc=.. st=.. <value>
-         if len(f) < 7 {
+         if len(f) < 7 || !isHex32(f[6]) {
             return bad(ln)
          }
          v, e1 := strconv.Atoi(f[1])
          nn, e2 := strconv.ParseUint(f[2], 16, 8)
          mm, e3 := strconv.ParseUint(f[3], 16, 8)
-         val, ok := dmOut(f[6])
-         if e1 != nil || e2 != nil || e3 != nil || !ok {
+         if e1 != nil || e2 != nil || e3 != nil {
             return bad(ln)
          }
          fm := fam(v)
          if fm.outs[int(nn)] == nil {
             fm.outs[int(nn)] = map[int]string{}
          }
-         fm.outs[int(nn)][int(mm)] = val
+         fm.outs[int(nn)][int(mm)] = f[6]
       }
    }
    return r
@@ -705,9 +649,8 @@ func dmSweepAll(descRVA uint32, fams []int, sets []uint32, logf func(string, ...
 // include the module: a child used to read the DLL and re-run scanDescs, which hashes
 // several gigabytes.
 //
-// prof is the parse pfPrep already performed. Carrying it is what stops the BLA-phase
-// steps reading and unmarshalling dllprof.json a second time just to reach Map and
-// Stages.
+// prof is the parse pfPrep already performed, carried so the BLA-phase steps do not read
+// and unmarshal dllprof.json a second time just to reach Map and Stages.
 type pfImage struct {
    sha    string
    size   uint32
@@ -719,8 +662,8 @@ type pfImage struct {
 }
 
 // pfPrep loads the census and the image. The size check is what proves the image on disk
-// came from this build: the image's own hash changes every run, because LoadLibraryW
-// bakes the load base into relocated fields, but SizeOfImage is a per-build constant.
+// came from this build: the image's own hash changes every run, because LoadLibraryW bakes
+// the load base into relocated fields, but SizeOfImage is a per-build constant.
 func pfPrep() (*pfImage, error) {
    raw, err := os.ReadFile(profilePath)
    if err != nil {
@@ -757,13 +700,13 @@ func pfPrep() (*pfImage, error) {
    return pi, nil
 }
 
-// apply patches the segment plaintext into the loaded image, carving around the
-// heap-exec blocks the kernel decrypts itself.
+// apply patches the segment plaintext into the loaded image, carving around the heap-exec
+// blocks the kernel decrypts itself.
 //
-// Every span is written, not just the ones that differ from the file: writing the
-// image's own bytes over an unencrypted span is a no-op, and skipping the comparison is
-// what lets a child avoid reading the module at all. The runs are coalesced first, so
-// the protection flips number in the dozens.
+// Every span is written, not just the ones that differ from the file: writing the image's
+// own bytes over an unencrypted span is a no-op, and skipping the comparison is what lets
+// a child avoid reading the module at all. The runs are coalesced first, so the protection
+// flips number in the dozens.
 func (p *pfImage) apply(base uintptr) (patched, skipped int) {
    var runs []imgRun
    for _, s := range p.spans {
@@ -790,23 +733,27 @@ func (p *pfImage) apply(base uintptr) (patched, skipped int) {
 
 // ------------------------------------------------------------ spawn helpers
 
-// procOut is one collected child run. rc is -1 when the child produced no verdict: it
-// was killed by the deadline, or it could not be started at all, which is the one case
-// err reports.
+// procOut is one collected child run. rc is -1 when the child produced no verdict: it was
+// killed by the deadline, or it could not be started at all, which is the one case err
+// reports.
 type procOut struct {
    stdout []byte
    rc     int
    err    error
 }
 
-// runCollect spawns this binary as a child under a deadline and returns its stdout. The
-// child is identified by env alone and is passed no arguments; spec is encoded here, so
-// no caller ever formats a payload and no child ever re-parses a hand-built string.
+// runCollect spawns this binary as a child and returns its stdout. The child is identified
+// by env alone and is passed no arguments; spec is encoded here, so no caller ever formats
+// a payload and no child ever re-parses a hand-built string.
 //
-// A non-zero exit is reported as rc, not as an error: every child signals failure that
-// way on purpose, and the caller parses stdout for the reason. err is non-nil only when
-// the process could not be started or the spec could not be encoded.
-func runCollect(spec childSpec, timeout time.Duration) procOut {
+// A non-zero exit is reported as rc, not as an error: every child signals failure that way
+// on purpose, and the caller parses stdout for the reason. err is non-nil only when the
+// process could not be started or the spec could not be encoded.
+//
+// timeout > 0 bounds the run; -1's probe passes 0, because a deadline there would make a
+// hang indistinguishable from a fault. stream, when non-nil, receives each stderr line as
+// it arrives and before Wait, so a child that never exits still leaves its trace.
+func runCollect(spec childSpec, timeout time.Duration, stream func(string)) procOut {
    if selfErr != nil {
       return procOut{rc: -1, err: selfErr}
    }
@@ -815,14 +762,43 @@ func runCollect(spec childSpec, timeout time.Duration) procOut {
       return procOut{rc: -1, err: err}
    }
 
-   ctx, cancel := context.WithTimeout(context.Background(), timeout)
-   defer cancel()
+   ctx := context.Background()
+   if timeout > 0 {
+      var cancel context.CancelFunc
+      ctx, cancel = context.WithTimeout(ctx, timeout)
+      defer cancel()
+   }
 
    cmd := exec.CommandContext(ctx, selfPath)
    cmd.Env = childEnvList(entry)
    var so bytes.Buffer
    cmd.Stdout = &so
-   runErr := cmd.Run()
+
+   var er io.ReadCloser
+   if stream != nil {
+      if er, err = cmd.StderrPipe(); err != nil {
+         return procOut{rc: -1, err: err}
+      }
+   }
+   if err := cmd.Start(); err != nil {
+      return procOut{rc: -1, err: err}
+   }
+   if er != nil {
+      sc := bufio.NewScanner(er)
+      sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+      for sc.Scan() {
+         stream("  " + sc.Text())
+      }
+      // The scanner's error is the only signal that the trace ended early. Dropped, it
+      // would make a truncated trace indistinguishable from a complete one.
+      if serr := sc.Err(); serr != nil {
+         stream(fmt.Sprintf("  TRACE TRUNCATED: %v", serr))
+      }
+   }
+
+   // Reading stderr to EOF before Wait is the documented pattern: Wait closes the pipe, so
+   // every trace line is out of the child before the rows are read.
+   runErr := cmd.Wait()
 
    p := procOut{stdout: so.Bytes(), rc: -1}
    if ctx.Err() != nil {
