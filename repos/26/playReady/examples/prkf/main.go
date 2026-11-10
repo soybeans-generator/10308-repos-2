@@ -275,35 +275,49 @@ func main() {
       os.Exit(code)
    }
 
-   // One row per step: its flag, its usage line, its body. The selection loop is also
-   // the count, so the table cannot disagree with the accepted set.
-   steps := []struct {
-      on  *bool
-      run func() int
-   }{
-      {flag.Bool("1", false, "DLL:  locate the signing-key routine"), errStep(cmdFindSub)},
-      {flag.Bool("2", false, "DLL:  decrypt the Warbird image"), stageDecryptImg},
-      {flag.Bool("3", false, "DLL:  derive the nibble permutation"), dmDeriveMap},
-      {flag.Bool("4", false, "BLA:  carve the CHAI chain and the four key components"), errStep(cmdExtract)},
-      {flag.Bool("5", false, "BLA:  decrypt the signing key"), errStep(cmdDecrypt)},
-      {flag.Bool("6", false, "BLA:  derive the encryption key"), dpDerive},
-   }
-
+   var (
+      doFind    = flag.Bool("1", false, "DLL:  locate the signing-key routine")
+      doImg     = flag.Bool("2", false, "DLL:  decrypt the Warbird image")
+      doMap     = flag.Bool("3", false, "DLL:  derive the nibble permutation")
+      doExtract = flag.Bool("4", false, "BLA:  carve the CHAI chain and the four key components")
+      doDecrypt = flag.Bool("5", false, "BLA:  decrypt the signing key")
+      doPlain   = flag.Bool("6", false, "BLA:  derive the encryption key")
+   )
    flag.Parse()
 
    var run func() int
-   for _, s := range steps {
-      if !*s.on {
-         continue
-      }
-      if run != nil {
-         fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 through -6")
-         os.Exit(2)
-      }
-      run = s.run
+   n := 0
+   if *doFind {
+      n++
+      run = errStep(cmdFindSub)
    }
-   if run == nil {
+   if *doImg {
+      n++
+      run = stageDecryptImg
+   }
+   if *doMap {
+      n++
+      run = dmDeriveMap
+   }
+   if *doExtract {
+      n++
+      run = errStep(cmdExtract)
+   }
+   if *doDecrypt {
+      n++
+      run = errStep(cmdDecrypt)
+   }
+   if *doPlain {
+      n++
+      run = dpDerive
+   }
+
+   if n == 0 {
       flag.Usage()
+      os.Exit(2)
+   }
+   if n > 1 {
+      fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 through -6")
       os.Exit(2)
    }
 

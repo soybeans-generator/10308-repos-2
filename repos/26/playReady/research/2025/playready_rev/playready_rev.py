@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 PlayReady public key hash revocation checker.
 
