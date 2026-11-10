@@ -17,38 +17,23 @@ type MoofBox struct {
 func DecodeMoofBox(data []byte) (*MoofBox, error) {
    b := &MoofBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
-      case "traf":
-         traf, err := DecodeTrafBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Traf = traf
-      default:
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      if string(typ[:]) != "traf" {
          b.RawChildren = append(b.RawChildren, content)
+         return nil
       }
-      offset += boxSize
+      traf, decErr := DecodeTrafBox(content)
+      if decErr != nil {
+         return decErr
+      }
+      b.Traf = traf
+      return nil
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
@@ -63,8 +48,7 @@ type SencBox struct {
 func DecodeSencBox(data []byte) (*SencBox, error) {
    b := &SencBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
 
@@ -129,8 +113,7 @@ type TfhdBox struct {
 func DecodeTfhdBox(data []byte) (*TfhdBox, error) {
    b := &TfhdBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
 
@@ -187,50 +170,28 @@ type TrafBox struct {
 func DecodeTrafBox(data []byte) (*TrafBox, error) {
    b := &TrafBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
-
-   payload := data[8:b.Header.Size]
-   offset := 0
-   for offset < len(payload) {
-      header, err := DecodeBoxHeader(payload[offset:])
-      if err != nil {
-         break
-      }
-      boxSize := int(header.Size)
-      if boxSize == 0 {
-         boxSize = len(payload) - offset
-      }
-      if boxSize < 8 || offset+boxSize > len(payload) {
-         return nil, errors.New("invalid child box size")
-      }
-
-      content := payload[offset : offset+boxSize]
-      switch string(header.Type[:]) {
+   err = walkBoxes(boxPayload(data, b.Header), func(typ [4]byte, content []byte) error {
+      var decErr error
+      switch string(typ[:]) {
       case "tfhd":
-         tfhd, err := DecodeTfhdBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Tfhd = tfhd
+         b.Tfhd, decErr = DecodeTfhdBox(content)
       case "trun":
-         trun, err := DecodeTrunBox(content)
-         if err != nil {
-            return nil, err
+         var trun *TrunBox
+         if trun, decErr = DecodeTrunBox(content); decErr == nil {
+            b.Trun = append(b.Trun, trun)
          }
-         b.Trun = append(b.Trun, trun)
       case "senc":
-         senc, err := DecodeSencBox(content)
-         if err != nil {
-            return nil, err
-         }
-         b.Senc = senc
+         b.Senc, decErr = DecodeSencBox(content)
       default:
          b.RawChildren = append(b.RawChildren, content)
       }
-      offset += boxSize
+      return decErr
+   })
+   if err != nil {
+      return nil, err
    }
    return b, nil
 }
@@ -248,8 +209,7 @@ type TrunBox struct {
 func DecodeTrunBox(data []byte) (*TrunBox, error) {
    b := &TrunBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
 
@@ -367,11 +327,7 @@ func (r *Remuxer) processFragment(moof *MoofBox, mdat *MdatBox) error {
          if (trun.Flags & 0x000800) != 0 {
             remuxSample.CompositionTimeOffset = sample.CompositionTimeOffset
          }
-         if (currentFlags & 0x00010000) != 0 {
-            remuxSample.IsSync = false
-         } else {
-            remuxSample.IsSync = true
-         }
+         remuxSample.IsSync = (currentFlags & 0x00010000) == 0
          originalSize := int(remuxSample.Size)
          if mdatOffset+originalSize > len(mdat.Payload) {
             return errors.New("mdat payload too short for samples")

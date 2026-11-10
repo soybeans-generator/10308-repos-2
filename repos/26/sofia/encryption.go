@@ -20,20 +20,21 @@ func Decrypt(data []byte, sample *SencSample, block cipher.Block) {
    stream := cipher.NewCTR(block, iv)
    if len(sample.Subsamples) == 0 {
       stream.XORKeyStream(data, data)
-   } else {
-      offset := 0
-      for _, subsample := range sample.Subsamples {
-         offset += int(subsample.BytesOfClearData)
-         if subsample.BytesOfProtectedData > 0 {
-            end := offset + int(subsample.BytesOfProtectedData)
-            if end > len(data) {
-               end = len(data)
-            }
-            chunk := data[offset:end]
-            stream.XORKeyStream(chunk, chunk)
-            offset = end
-         }
+      return
+   }
+   offset := 0
+   for _, subsample := range sample.Subsamples {
+      offset += int(subsample.BytesOfClearData)
+      if subsample.BytesOfProtectedData == 0 {
+         continue
       }
+      end := offset + int(subsample.BytesOfProtectedData)
+      if end > len(data) {
+         end = len(data)
+      }
+      chunk := data[offset:end]
+      stream.XORKeyStream(chunk, chunk)
+      offset = end
    }
 }
 
@@ -63,8 +64,7 @@ type PsshBox struct {
 func DecodePsshBox(data []byte) (*PsshBox, error) {
    b := &PsshBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
 
@@ -121,8 +121,7 @@ type TencBox struct {
 func DecodeTencBox(data []byte) (*TencBox, error) {
    b := &TencBox{}
    var err error
-   b.Header, err = DecodeBoxHeader(data)
-   if err != nil {
+   if b.Header, err = DecodeBoxHeader(data); err != nil {
       return nil, err
    }
 
@@ -133,60 +132,46 @@ func DecodeTencBox(data []byte) (*TencBox, error) {
    versionAndFlags := p.Uint32()
    b.Version = byte(versionAndFlags >> 24)
    b.Flags = versionAndFlags & 0x00FFFFFF
-
-   if b.Version == 0 {
-      // Based on the error, the reserved field for this file is 2 bytes.
-      // Payload: reserved(2) + isProtected(1) + perSampleIVSize(1) + KID(16) = 20 bytes.
-      const requiredV0PayloadSize = 20
-      if len(data) < p.offset+requiredV0PayloadSize {
-         return nil, errors.New("tenc v0 box too short for required fields")
-      }
-
-      // Correctly skip the 2 reserved bytes.
-      _ = p.Bytes(2)
-
-      b.DefaultIsProtected = p.Byte()
-      b.DefaultPerSampleIVSize = p.Byte()
-      copy(b.DefaultKID[:], p.Bytes(16))
-
-      if b.DefaultIsProtected == 1 && b.DefaultPerSampleIVSize == 0 {
-         if p.offset < int(b.Header.Size) {
-            if len(data) < p.offset+1 {
-               return nil, errors.New("tenc box truncated before constant IV size")
-            }
-            b.DefaultConstantIVSize = p.Byte()
-            if len(data) < p.offset+int(b.DefaultConstantIVSize) {
-               return nil, errors.New("tenc box truncated, not enough data for constant IV")
-            }
-            b.DefaultConstantIV = p.Bytes(int(b.DefaultConstantIVSize))
-         }
-      }
+   if b.Version != 0 {
+      // For other versions, we do nothing and leave the fields as their zero-value.
+      return b, nil
    }
-   // For other versions, we do nothing and leave the fields as their zero-value.
+
+   // v0 payload: reserved(2) + isProtected(1) + perSampleIVSize(1) + KID(16).
+   if len(data) < p.offset+20 {
+      return nil, errors.New("tenc v0 box too short for required fields")
+   }
+   _ = p.Bytes(2) // reserved
+   b.DefaultIsProtected = p.Byte()
+   b.DefaultPerSampleIVSize = p.Byte()
+   copy(b.DefaultKID[:], p.Bytes(16))
+
+   if b.DefaultIsProtected == 1 && b.DefaultPerSampleIVSize == 0 && p.offset < boxEnd(data, b.Header) {
+      if len(data) < p.offset+1 {
+         return nil, errors.New("tenc box truncated before constant IV size")
+      }
+      b.DefaultConstantIVSize = p.Byte()
+      if len(data) < p.offset+int(b.DefaultConstantIVSize) {
+         return nil, errors.New("tenc box truncated, not enough data for constant IV")
+      }
+      b.DefaultConstantIV = p.Bytes(int(b.DefaultConstantIVSize))
+   }
    return b, nil
 }
 
 func (b *TencBox) Encode() []byte {
-   bodySize := 4 /* ver/flags */ + 2 /* reserved */ + 1 + 1 + 16 /* KID */
-   hasConstantIV := b.DefaultIsProtected == 1 && b.DefaultPerSampleIVSize == 0
-   if hasConstantIV {
-      bodySize += 1 + len(b.DefaultConstantIV)
-   }
-   total := uint32(8 + bodySize)
-   buffer := make([]byte, total)
-   w := writer{buf: buffer}
-   w.PutUint32(total)
-   w.PutBytes([]byte{'t', 'e', 'n', 'c'})
+   body := make([]byte, 24) // ver/flags(4) + reserved(2) + isProtected(1) + ivSize(1) + KID(16)
+   w := writer{buf: body}
    w.PutUint32(uint32(b.Version)<<24 | (b.Flags & 0x00FFFFFF))
    w.PutBytes([]byte{0, 0}) // 2 reserved bytes (matches v0 decode)
    w.PutByte(b.DefaultIsProtected)
    w.PutByte(b.DefaultPerSampleIVSize)
    w.PutBytes(b.DefaultKID[:])
-   if hasConstantIV {
-      w.PutByte(b.DefaultConstantIVSize)
-      w.PutBytes(b.DefaultConstantIV)
+   if b.DefaultIsProtected == 1 && b.DefaultPerSampleIVSize == 0 {
+      body = append(body, b.DefaultConstantIVSize)
+      body = append(body, b.DefaultConstantIV...)
    }
-   return buffer
+   return encodeBox(b.Header, body, nil)
 }
 
 // encryption.go marker preserve

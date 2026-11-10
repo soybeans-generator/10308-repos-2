@@ -6,6 +6,27 @@ import (
    "fmt"
 )
 
+// expandRuns calls set for each of the n samples described by the
+// run-length entries, and reports whether the entry counts cover exactly
+// n samples.
+func expandRuns[T any](entries []T, n int, count func(T) uint32, set func(int, T)) bool {
+   total := 0
+   for _, entry := range entries {
+      total += int(count(entry))
+   }
+   if total != n {
+      return false
+   }
+   index := 0
+   for _, entry := range entries {
+      for j := uint32(0); j < count(entry); j++ {
+         set(index, entry)
+         index++
+      }
+   }
+   return true
+}
+
 // This file is the two directions between remuxer state and the sample
 // tables of a moov: StateFromMoov recovers state from the tables a
 // previous Finish wrote, and the build functions in tables.go turn state
@@ -51,7 +72,7 @@ func StateFromMoov(moovData []byte) (*RemuxState, error) {
          chunkOffsets[i] = uint64(offset)
       }
    } else {
-      chunkOffsets = append([]uint64{}, stbl.Co64.Offsets...)
+      chunkOffsets = append(chunkOffsets, stbl.Co64.Offsets...)
    }
 
    // Expand the run-length stsc into one sample count per chunk.
@@ -77,29 +98,18 @@ func StateFromMoov(moovData []byte) (*RemuxState, error) {
    }
    samples := make([]*RemuxSample, count)
    for i := range samples {
-      samples[i] = &RemuxSample{IsSync: true}
-      if stbl.Stsz.SampleSize != 0 {
-         samples[i].Size = stbl.Stsz.SampleSize
-      } else {
+      samples[i] = &RemuxSample{IsSync: true, Size: stbl.Stsz.SampleSize}
+      if stbl.Stsz.SampleSize == 0 {
          samples[i].Size = stbl.Stsz.EntrySizes[i]
       }
    }
 
    // Durations, run-length expanded.
    if stbl.Stts != nil {
-      var total uint32
-      for _, entry := range stbl.Stts.Entries {
-         total += entry.SampleCount
-      }
-      if int(total) != count {
+      if !expandRuns(stbl.Stts.Entries, count,
+         func(e SttsEntry) uint32 { return e.SampleCount },
+         func(i int, e SttsEntry) { samples[i].Duration = e.SampleDuration }) {
          return nil, errors.New("stts does not cover every sample")
-      }
-      index := 0
-      for _, entry := range stbl.Stts.Entries {
-         for j := uint32(0); j < entry.SampleCount; j++ {
-            samples[index].Duration = entry.SampleDuration
-            index++
-         }
       }
    } else if count > 0 {
       return nil, errors.New("moov is missing sample durations")
@@ -120,19 +130,10 @@ func StateFromMoov(moovData []byte) (*RemuxState, error) {
 
    // Composition time offsets. An absent ctts means every offset is zero.
    if stbl.Ctts != nil {
-      var total uint32
-      for _, entry := range stbl.Ctts.Entries {
-         total += entry.SampleCount
-      }
-      if int(total) != count {
+      if !expandRuns(stbl.Ctts.Entries, count,
+         func(e CttsEntry) uint32 { return e.SampleCount },
+         func(i int, e CttsEntry) { samples[i].CompositionTimeOffset = e.SampleOffset }) {
          return nil, errors.New("ctts does not cover every sample")
-      }
-      index := 0
-      for _, entry := range stbl.Ctts.Entries {
-         for j := uint32(0); j < entry.SampleCount; j++ {
-            samples[index].CompositionTimeOffset = entry.SampleOffset
-            index++
-         }
       }
    }
 
