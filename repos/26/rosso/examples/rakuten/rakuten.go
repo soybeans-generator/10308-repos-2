@@ -5,6 +5,7 @@ import (
    "41.neocities.org/rosso/provider/rakuten"
    "fmt"
    "log"
+   "net/url"
    "os"
 )
 
@@ -116,7 +117,11 @@ func (c *client) do_audio() error {
    if err != nil {
       return err
    }
-   manifest, err := maya.DashList(&stream_info.Url.Url)
+   manifest_url, err := url.Parse(stream_info.Url)
+   if err != nil {
+      return err
+   }
+   manifest, err := maya.DashList(manifest_url)
    if err != nil {
       return err
    }

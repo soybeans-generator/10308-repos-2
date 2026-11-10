@@ -11,7 +11,7 @@ var tests = []struct {
    {
       height:   2160,
       language: []string{"ENG"},
-      url:      "https://rakuten.tv/ie?content_id=blair-witch&content_type=movies",
+      url:      "https://rakuten.tv/uk?content_type=movies&content_id=the-hustle",
       why:      []string{"2160"},
    },
    {
