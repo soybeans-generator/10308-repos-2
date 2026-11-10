@@ -18,6 +18,72 @@ import (
    "time"
 )
 
+const drmProxySecret = "Whn8QFuLFM7Heiz6fYCYga7cYPM8ARe6"
+
+//go:embed page.gql
+var queryPage string
+
+func FetchWidevine(body []byte) ([]byte, error) {
+   req, err := http.NewRequest("POST", licenseURL("widevine"), bytes.NewReader(body))
+   if err != nil {
+      return nil, err
+   }
+   req.Header.Set("content-type", "application/octet-stream")
+
+   resp, err := do(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   return io.ReadAll(resp.Body)
+}
+
+// https://nbc.com/saturday-night-live/video/november-15-glen-powell/9000454161
+func GetName(urlData string) (string, error) {
+   parsedURL, err := url.Parse(urlData)
+   if err != nil {
+      return "", err
+   }
+   return strings.TrimPrefix(parsedURL.Path, "/"), nil
+}
+
+func PlayReady() string {
+   return licenseURL("playready")
+}
+
+func buildQuery(drmType string) string {
+   timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+   mac := hmac.New(sha256.New, []byte(drmProxySecret))
+   fmt.Fprint(mac, timestamp, drmType)
+   hash := hex.EncodeToString(mac.Sum(nil))
+
+   return url.Values{
+      "device": {"web"},
+      "hash":   {hash},
+      "time":   {timestamp},
+   }.Encode()
+}
+
+// do sends the request, logs the method and URL, and returns the response.
+func do(req *http.Request) (*http.Response, error) {
+   log.Println(req.Method, req.URL)
+   return http.DefaultClient.Do(req)
+}
+
+// licenseURL returns the DRM-proxy licence URL for the given DRM type.
+func licenseURL(drmType string) string {
+   return "https://drmproxy.digitalsvc.apps.nbcuni.com/drm-proxy/license/" +
+      drmType + "?" + buildQuery(drmType)
+}
+
+type Metadata struct {
+   MpxAccountId    int `json:",string"`
+   MpxGuid         int `json:",string"`
+   ProgrammingType string
+}
+
 func FetchMetadata(name string) (*Metadata, error) {
    body := map[string]any{
       "query": queryPage,
@@ -43,10 +109,10 @@ func FetchMetadata(name string) (*Metadata, error) {
    }
    req.Header.Set("content-type", "application/json")
    req.Header.Add("x-tve-platform", "web")
-   
+
    // they are blocking the Go user agent
    req.Header.Add("user-agent", "")
-   
+
    resp, err := do(req)
    if err != nil {
       return nil, err
@@ -121,69 +187,3 @@ func (s *Stream) GetManifest() (*url.URL, error) {
    manifest.Path = strings.Replace(manifest.Path, "_2sec", "", 1)
    return manifest, nil
 }
-const drmProxySecret = "Whn8QFuLFM7Heiz6fYCYga7cYPM8ARe6"
-
-//go:embed page.gql
-var queryPage string
-
-func FetchWidevine(body []byte) ([]byte, error) {
-   req, err := http.NewRequest("POST", licenseURL("widevine"), bytes.NewReader(body))
-   if err != nil {
-      return nil, err
-   }
-   req.Header.Set("content-type", "application/octet-stream")
-
-   resp, err := do(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   return io.ReadAll(resp.Body)
-}
-
-// https://nbc.com/saturday-night-live/video/november-15-glen-powell/9000454161
-func GetName(urlData string) (string, error) {
-   parsedURL, err := url.Parse(urlData)
-   if err != nil {
-      return "", err
-   }
-   return strings.TrimPrefix(parsedURL.Path, "/"), nil
-}
-
-func PlayReady() string {
-   return licenseURL("playready")
-}
-
-func buildQuery(drmType string) string {
-   timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-
-   mac := hmac.New(sha256.New, []byte(drmProxySecret))
-   fmt.Fprint(mac, timestamp, drmType)
-   hash := hex.EncodeToString(mac.Sum(nil))
-
-   return url.Values{
-      "device": {"web"},
-      "hash":   {hash},
-      "time":   {timestamp},
-   }.Encode()
-}
-
-// do sends the request, logs the method and URL, and returns the response.
-func do(req *http.Request) (*http.Response, error) {
-   log.Println(req.Method, req.URL)
-   return http.DefaultClient.Do(req)
-}
-
-// licenseURL returns the DRM-proxy licence URL for the given DRM type.
-func licenseURL(drmType string) string {
-   return "https://drmproxy.digitalsvc.apps.nbcuni.com/drm-proxy/license/" +
-      drmType + "?" + buildQuery(drmType)
-}
-
-type Metadata struct {
-   MpxAccountId    int `json:",string"`
-   MpxGuid         int `json:",string"`
-   ProgrammingType string
-}
-
