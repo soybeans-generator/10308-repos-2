@@ -10,16 +10,12 @@
 //   prkf -5   signing.go     decrypt the signing key                       BLA
 //   prkf -6   plainkey.go    derive the encryption key                     BLA
 //
-// -1..-3 read only the DLL; -4..-6 read only the sample. Every artefact lives
-// under outDir, every path is declared once at the end of this file, and dllPath is
-// the one path outside it.
+// -1..-3 read only the DLL; -4..-6 read only the sample. Every artefact lives under
+// outDir, every path is declared once at the end of this file, and dllPath is the one
+// path outside it.
 //
-// The (stage 1, stage 2) search lives in -6 because a candidate is accepted only
-// when d*G == the sample's public key, so there is no sample for it earlier. Its
-// result is cached per family.
-//
-// No goroutines, channels or mutexes. main is the only place that calls os.Exit
-// outside wbVEH.
+// No goroutines, channels or mutexes. main is the only place that calls os.Exit outside
+// wbVEH.
 package main
 
 import (
@@ -31,6 +27,7 @@ import (
    "fmt"
    "os"
    "path/filepath"
+   "strings"
    "time"
 )
 
@@ -38,14 +35,13 @@ import (
 // total_length(4) certificate_length(4).
 const certHdr = 16
 
-// dllPath is the PlayReady module, read and mapped where Windows installed it. It
-// stays outside outDir: a descriptor is an RVA into the mapped image, so the bytes
-// hashed and the image the Warbird gate executes must be the same module, and a
-// copy under testdata/ is a different mapping.
+// dllPath is the PlayReady module, read and mapped where Windows installed it. It stays
+// outside outDir: a descriptor is an RVA into the mapped image, so the bytes hashed and
+// the image the Warbird gate executes must be the same module.
 const dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 
-// outDir is the one directory the pipeline uses: the sample it reads and every file
-// it writes. Read and write through dataFile, never by spelling a path.
+// outDir is the one directory the pipeline uses: the sample it reads and every file it
+// writes. Read and write through dataFile, never by spelling a path.
 const outDir = "testdata"
 
 var (
@@ -74,9 +70,9 @@ var (
    oracleDir = dataFile("oracle")
 )
 
-// cmdCert carves the CHAI certificate chain out of corePath and writes it to
-// certPath. A candidate must tile its own certificate entries exactly, and a chain
-// whose preceding length prefix matches its total length is preferred.
+// cmdCert carves the CHAI certificate chain out of corePath and writes it to certPath.
+// A candidate must tile its own certificate entries exactly, and a chain whose preceding
+// length prefix matches its total length is preferred.
 func cmdCert() error {
    if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
       return fmt.Errorf("missing input: %s\n  put the PlayReady sample there before running", corePath)
@@ -159,9 +155,9 @@ func cmdExtract() error {
    return cmdKeys()
 }
 
-// cmdKeys parses the PRKF key-material section and writes the four key components.
-// It re-reads corePath rather than taking buf from cmdCert: the two halves are
-// independent and neither holds state for the other.
+// cmdKeys parses the PRKF key-material section and writes the four key components. It
+// re-reads corePath rather than taking buf from cmdCert: the two halves are independent
+// and neither holds state for the other.
 func cmdKeys() error {
    b, err := os.ReadFile(corePath)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
@@ -199,14 +195,18 @@ func cmdKeys() error {
          r.off, len(r.pub), len(r.priv), hex.EncodeToString(head))
    }
 
-   // The encryption key is the unique record with a 65-byte private component.
+   // The encryption key is the unique record with a 65-byte private component; the
+   // signing key is the record immediately before it. No field separates it from the
+   // other 32-byte record: ver/flags/z1/z2 are identical across all three and every
+   // pubkey occurs exactly twice.
    var enc *keyRecord
-   for _, r := range recs {
+   encIdx := -1
+   for j, r := range recs {
       if len(r.priv) == 65 {
          if enc != nil {
             return fmt.Errorf("more than one record has a 65-byte private component")
          }
-         enc = r
+         enc, encIdx = r, j
       }
    }
    if enc == nil {
@@ -214,20 +214,10 @@ func cmdKeys() error {
    }
    fmt.Printf("encryption key: %#x  (65-byte private component)\n", enc.off)
 
-   // The signing key is the 32-byte record immediately preceding it. No field
-   // separates it from the other 32-byte record: ver/flags/z1/z2 are identical
-   // across all three and every pubkey occurs exactly twice.
-   i := -1
-   for j, r := range recs {
-      if r == enc {
-         i = j
-         break
-      }
-   }
-   if i <= 0 {
+   if encIdx == 0 {
       return fmt.Errorf("no 32-byte record precedes the encryption key")
    }
-   sig := recs[i-1]
+   sig := recs[encIdx-1]
    if len(sig.priv) != 32 {
       return fmt.Errorf("record before the encryption key has a %d-byte private component, expected 32", len(sig.priv))
    }
@@ -261,6 +251,17 @@ func dataFile(name string) string {
    return filepath.Join(outDir, name)
 }
 
+// errStep adapts an error-returning step to the exit code the dispatcher reports.
+func errStep(fn func() error) func() int {
+   return func() int {
+      if err := fn(); err != nil {
+         fmt.Fprintln(os.Stderr, err)
+         return 1
+      }
+      return 0
+   }
+}
+
 // ------------------------------------------------------------------- dispatch
 
 func main() {
@@ -274,26 +275,48 @@ func main() {
       os.Exit(code)
    }
 
-   step1 := flag.Bool("1", false, "DLL:  locate the signing-key routine")
-   step2 := flag.Bool("2", false, "DLL:  decrypt the Warbird image")
-   step3 := flag.Bool("3", false, "DLL:  derive the nibble permutation")
-   step4 := flag.Bool("4", false, "BLA:  carve the CHAI chain and the four key components")
-   step5 := flag.Bool("5", false, "BLA:  decrypt the signing key")
-   step6 := flag.Bool("6", false, "BLA:  derive the encryption key")
-
+   var (
+      doFind    = flag.Bool("1", false, "DLL:  locate the signing-key routine")
+      doImg     = flag.Bool("2", false, "DLL:  decrypt the Warbird image")
+      doMap     = flag.Bool("3", false, "DLL:  derive the nibble permutation")
+      doExtract = flag.Bool("4", false, "BLA:  carve the CHAI chain and the four key components")
+      doDecrypt = flag.Bool("5", false, "BLA:  decrypt the signing key")
+      doPlain   = flag.Bool("6", false, "BLA:  derive the encryption key")
+   )
    flag.Parse()
 
+   var run func() int
    n := 0
-   for _, on := range []bool{*step1, *step2, *step3, *step4, *step5, *step6} {
-      if on {
-         n++
-      }
+   if *doFind {
+      n++
+      run = errStep(cmdFindSub)
    }
-   switch {
-   case n == 0:
+   if *doImg {
+      n++
+      run = stageDecryptImg
+   }
+   if *doMap {
+      n++
+      run = dmDeriveMap
+   }
+   if *doExtract {
+      n++
+      run = errStep(cmdExtract)
+   }
+   if *doDecrypt {
+      n++
+      run = errStep(cmdDecrypt)
+   }
+   if *doPlain {
+      n++
+      run = dpDerive
+   }
+
+   if n == 0 {
       flag.Usage()
       os.Exit(2)
-   case n > 1:
+   }
+   if n > 1 {
       fmt.Fprintln(os.Stderr, "prkf: select exactly one of -1 through -6")
       os.Exit(2)
    }
@@ -303,50 +326,15 @@ func main() {
       os.Exit(1)
    }
 
-   // runStep cannot be a deferred timer inside each stage: main calls os.Exit with
-   // the stage's return value, which unwinds no frames.
-   runStep := func(fn func() int) {
-      t0 := time.Now()
-      code := fn()
-      fmt.Printf("elapsed %s\n", time.Since(t0).Round(time.Millisecond))
-      os.Exit(code)
-   }
-
-   // errStep adapts an error-returning step to the code runStep reports, so every
-   // dispatch arm below is runStep of one identifier.
-   errStep := func(fn func() error) func() int {
-      return func() int {
-         if err := fn(); err != nil {
-            fmt.Fprintln(os.Stderr, err)
-            return 1
-         }
-         return 0
-      }
-   }
-
-   switch {
-   case *step1:
-      runStep(errStep(cmdFindSub))
-   case *step2:
-      runStep(stageDecryptImg)
-   case *step3:
-      runStep(dmDeriveMap)
-   case *step4:
-      runStep(errStep(cmdExtract))
-   case *step5:
-      runStep(errStep(cmdDecrypt))
-   case *step6:
-      runStep(dpDerive)
-   }
+   // The elapsed line cannot be a deferred timer inside the step: main exits with the
+   // step's code, which unwinds no frames.
+   t0 := time.Now()
+   code := run()
+   fmt.Printf("elapsed %s\n", time.Since(t0).Round(time.Millisecond))
+   os.Exit(code)
 }
 
-// u32be reads a big-endian uint32 at off, reporting whether it fit.
-func u32be(buf []byte, off int) (uint32, bool) {
-   if off < 0 || off+4 > len(buf) {
-      return 0, false
-   }
-   return binary.BigEndian.Uint32(buf[off:]), true
-}
+// ------------------------------------------------------------------ the sample
 
 type chain struct {
    base        int
@@ -357,20 +345,18 @@ type chain struct {
    prefixOK    bool
 }
 
-// parseChain is a self-validating parse of a CHAI chain at base.
+// parseChain is a self-validating parse of a CHAI chain at base. One bounds check
+// covers the whole fixed header, so the three fields below are read directly.
 func parseChain(buf []byte, base int) (*chain, bool) {
    const chaiHdr = 20 // magic(4) version(4) total_length(4) flags(4) cert_count(4)
 
-   if base < 0 || base+4 > len(buf) || !bytes.Equal(buf[base:base+4], []byte("CHAI")) {
+   if base < 0 || base+chaiHdr > len(buf) || !bytes.Equal(buf[base:base+4], []byte("CHAI")) {
       return nil, false
    }
 
-   totalLength, okTL := u32be(buf, base+8)
-   flags, okFl := u32be(buf, base+12)
-   certCount, okCC := u32be(buf, base+16)
-   if !okTL || !okFl || !okCC {
-      return nil, false
-   }
+   totalLength := binary.BigEndian.Uint32(buf[base+8:])
+   flags := binary.BigEndian.Uint32(buf[base+12:])
+   certCount := binary.BigEndian.Uint32(buf[base+16:])
    if totalLength < chaiHdr || int(totalLength) > len(buf)-base {
       return nil, false
    }
@@ -393,9 +379,9 @@ func parseChain(buf []byte, base int) (*chain, bool) {
       return nil, false
    }
 
-   if p, ok := u32be(buf, base-4); ok {
-      c.prefix = p
-      c.prefixOK = p == totalLength
+   if base >= 4 {
+      c.prefix = binary.BigEndian.Uint32(buf[base-4:])
+      c.prefixOK = c.prefix == totalLength
    }
    return c, true
 }
@@ -445,6 +431,41 @@ func walk(buf []byte, start, end int) []section {
       off += total
    }
    return out
+}
+
+// ------------------------------------------------------------------- the step log
+
+// stepLog is the log -2, -3 and -6 keep: every line goes to the terminal as it is
+// produced and to the step's file when the step ends, so no return path can leave the
+// file unwritten. -1 does not use it: its log must be on disk before the next statement
+// runs, because it is the only evidence a stalled scan leaves behind.
+type stepLog struct {
+   path  string
+   lines []string
+}
+
+func newStepLog(path string) *stepLog { return &stepLog{path: path} }
+
+// Failf logs a FATAL line and returns the code for it, so a step's every failure is one
+// `return lg.Failf(...)`.
+func (l *stepLog) Failf(f string, a ...any) int {
+   l.Printf("FATAL: "+f, a...)
+   return 1
+}
+
+// Finish writes the log and folds a write failure into the step's exit code:
+// `defer lg.Finish(&code)`.
+func (l *stepLog) Finish(code *int) {
+   if err := os.WriteFile(l.path, []byte(strings.Join(l.lines, "\n")+"\n"), 0o644); err != nil {
+      fmt.Fprintf(os.Stderr, "prkf: %s: %v\n", l.path, err)
+      *code = 1
+   }
+}
+
+func (l *stepLog) Printf(f string, a ...any) {
+   s := fmt.Sprintf(f, a...)
+   l.lines = append(l.lines, s)
+   fmt.Println(s)
 }
 
 // main.go end

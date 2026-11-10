@@ -1,45 +1,36 @@
 // signing.go begin
 //go:build windows
 
-// prkf -1 and -5: find the signing-key routine's descriptor, then decrypt the signing
-// key with it. One file, because -1 writes prsubs.json and -5 reads it, both call the
-// same ABI in kernel.go, and both name the same DLL.
+// prkf -1 and -5: find the signing-key routine's descriptor, then decrypt the signing key
+// with it. One file, because -1 writes prsubs.json and -5 reads it, both call the same ABI
+// in kernel.go, and both name the same DLL.
 //
-// -1 scans the DLL for Warbird heap-exec descriptors, then re-executes this binary once
-// per CHUNK of candidates and reads the RESULT line each descriptor produced.
-// Discovery rests entirely on properties of the routine itself, read from its
-// disassembly - no sample key files:
+// -1 scans the DLL for Warbird heap-exec descriptors, then re-executes this binary once per
+// CHUNK of candidates and reads the RESULT line each descriptor produced. Discovery rests
+// entirely on properties of the routine itself, read from its disassembly - no sample key
+// files:
 //
-//  1. accepts exactly 0x20 bytes and succeeds
-//     (it begins: cmp dword ptr [rcx+10h], 20h)
+//  1. accepts exactly 0x20 bytes and succeeds (cmp dword ptr [rcx+10h], 20h)
 //  2. writes its output buffer; 3. different input -> different output
 //  4. REJECTS a size other than 0x20
 //
-// Property 4 is the discriminating one - it collapses the large set of descriptors
-// that merely return success. Verification against a real key is -5's job. Zero
-// accepted descriptors, or more than one, is an error to investigate.
+// Property 4 is the discriminating one - it collapses the large set of descriptors that
+// merely return success. Verification against a real key is -5's job. Zero accepted
+// descriptors, or more than one, is an error to investigate.
 //
-// # CHUNKING
-//
-// A child pays LoadLibrary before its first call, so one child per descriptor spent 981
-// module loads on 981 probes. Descriptors are probed in chunks of 64, sequentially -
-// no goroutines, no worker pool.
-//
-// A chunk that dies takes its remaining descriptors with it. A child prints its rows in
-// order, so the first descriptor with no RESULT line is the one that faulted; it is
-// recorded as NO_OUTPUT and the rest are retried as a run.
-//
-// Every child streams its stderr into the log as it arrives, so a hung chunk leaves its
-// last trace line as the final record. There is no deadline - a timeout would make a
-// hang invisible.
-//
-// # VERSION SUPPORT
+// Descriptors are probed in chunks of 64, sequentially: a child pays LoadLibrary before its
+// first call, so one child per descriptor spent 981 module loads on 981 probes. A chunk
+// that dies takes its remaining descriptors with it; a child prints its rows in order, so
+// the first descriptor with no RESULT line is the one that faulted, and the rest are
+// retried as a run. Every child streams its stderr into the log as it arrives, so a hung
+// chunk leaves its last trace line as the final record - there is no deadline, because a
+// timeout would make a hang invisible.
 //
 // Only ONE value differs between DLL builds: the RVA of the heap descriptor holding the
-// signing-key routine, from prsubsPath keyed by the DLL sha256. This step refuses to
-// run if the cache does not match. Everything else cannot drift: op=3 and the
-// WarbirdCallArgs layout are kernel ABI; the routine's argument struct is packed and
-// its layout fixed by source; size == 0x20 it tests itself.
+// signing-key routine, from prsubsPath keyed by the DLL sha256. This step refuses to run if
+// the cache does not match. Everything else cannot drift: op=3 and the WarbirdCallArgs
+// layout are kernel ABI; the routine's argument struct is packed and its layout fixed by
+// source; size == 0x20 it tests itself.
 package main
 
 import (
@@ -60,8 +51,7 @@ import (
 // probeChunk is how many descriptors one probe child handles.
 const probeChunk = 64
 
-// childT0 captures the process start, so every trace line can carry a millisecond
-// offset.
+// childT0 captures the process start, so every trace line can carry a millisecond offset.
 var childT0 = time.Now()
 
 // ------------------------------------------------------------ -5: decrypt
@@ -85,17 +75,13 @@ func cmdDecrypt() error {
    if err != nil {
       return err
    }
-   want := pubBytes(raw)
-   if want == nil {
-      return fmt.Errorf("%s: not a P-256 public key", sigPubPath)
-   }
-   // An out-of-range d makes pubFor return nil, which falls through to the same verdict
-   // as a mismatched point.
-   if gotPub := pubFor(got); gotPub == nil || !bytes.Equal(gotPub, want) {
+   // An out-of-range d makes pubFor return nil, which pubMatches reports as a mismatch.
+   if !pubMatches(got, raw) {
       return fmt.Errorf("d*G != %s - the plaintext is not the private key for\n"+
          "that public key; the descriptor, the argument layout or the\n"+
          "input file is wrong; nothing was written", sigPubPath)
    }
+   want := pubBytes(raw)
    fmt.Printf("[ OK ] d*G == %s\n", sigPubPath)
    fmt.Printf("       Q = (%s,\n            %s)\n",
       hex.EncodeToString(want[1:33]), hex.EncodeToString(want[33:65]))
@@ -120,17 +106,11 @@ func cmdFindSub() error {
    if err != nil {
       return err
    }
-   // Checked, and checked before the elapsed line runs: the header calls this log the
-   // only evidence a stalled scan leaves behind, so a close that fails must not be
-   // silent.
-   defer func() {
-      if err := logf.Close(); err != nil {
-         fmt.Fprintf(os.Stderr, "prkf -1: %s: close: %v\n", scanLogPath, err)
-      }
-   }()
-   // *os.File writes are unbuffered, so each line reaches the log as soon as it is
-   // written. logErr keeps the first write failure, because a log that stops mid-scan
-   // is worse than one that says so.
+
+   // Writes go straight to the file, not through stepLog: this log is the only evidence a
+   // stalled scan leaves behind, so a line must be on disk before the next statement runs.
+   // *os.File writes are unbuffered, which is exactly that guarantee. logErr keeps the
+   // first write failure, because a log that stops mid-scan is worse than one that says so.
    var logErr error
    w := func(s string) {
       if logErr != nil {
@@ -140,15 +120,18 @@ func cmdFindSub() error {
          logErr = err
       }
    }
+   wf := func(f string, a ...any) { w(fmt.Sprintf(f, a...)) }
 
-   // Deferred, not printed inline: the error returns below are exactly when the total
-   // time is worth knowing. stdout's line comes from main.
+   // One defer, so the elapsed line - which is exactly what the error returns below are
+   // worth knowing for - cannot run before the close is checked or after it is skipped.
    defer func() {
-      el := time.Since(start).Round(time.Millisecond)
-      w("elapsed " + el.String())
-      if logErr != nil {
+      w("elapsed " + time.Since(start).Round(time.Millisecond).String())
+      switch cerr := logf.Close(); {
+      case logErr != nil:
          fmt.Fprintf(os.Stderr, "prkf -1: %s: %v (the log above is incomplete)\n",
             scanLogPath, logErr)
+      case cerr != nil:
+         fmt.Fprintf(os.Stderr, "prkf -1: %s: close: %v\n", scanLogPath, cerr)
       }
    }()
 
@@ -160,7 +143,7 @@ func cmdFindSub() error {
 
    _, secs := peSections(data)
    descs := signingCandidates(data, secs)
-   w(fmt.Sprintf("heap descriptors: %d", len(descs)))
+   wf("heap descriptors: %d", len(descs))
    fmt.Printf("heap descriptors: %d\n", len(descs))
 
    if selfErr != nil {
@@ -172,7 +155,7 @@ func cmdFindSub() error {
    // either faulted its chunk or was never reached; the passes below recover both.
    results := make([]string, len(descs))
    chunks := (len(descs) + probeChunk - 1) / probeChunk
-   w(fmt.Sprintf("probing %d descriptors in %d chunks of %d", len(descs), chunks, probeChunk))
+   wf("probing %d descriptors in %d chunks of %d", len(descs), chunks, probeChunk)
 
    tally := func() (done, accepted int) {
       for _, r := range results {
@@ -188,7 +171,7 @@ func cmdFindSub() error {
 
    for lo := 0; lo < len(descs); lo += probeChunk {
       hi := min(lo+probeChunk, len(descs))
-      w(fmt.Sprintf("chunk %d/%d  idx %d..%d", lo/probeChunk+1, chunks, lo, hi-1))
+      wf("chunk %d/%d  idx %d..%d", lo/probeChunk+1, chunks, lo, hi-1)
       got := probeBatch(descs[lo:hi], w)
       for i := lo; i < hi; i++ {
          if r, ok := got[descs[i].descVA]; ok {
@@ -199,11 +182,10 @@ func cmdFindSub() error {
       fmt.Printf("  %d/%d  accepted=%d\n", done, len(descs), accepted)
    }
 
-   // A dead run is retried as a run: the faulting descriptor is recorded and skipped,
-   // and everything behind it goes into the next pass. Recording NO_OUTPUT for the
-   // faulting descriptor is what guarantees the next pass is strictly smaller - a
-   // routine that dies on its first call is not the signing-key routine, so this is its
-   // verdict, not a gap.
+   // A dead run is retried as a run: the faulting descriptor is recorded and skipped, and
+   // everything behind it goes into the next pass. Recording NO_OUTPUT for the faulting
+   // descriptor is what guarantees the next pass is strictly smaller - a routine that dies
+   // on its first call is not the signing-key routine, so this is its verdict, not a gap.
    for pass := 0; ; pass++ {
       var missing []int
       for i, r := range results {
@@ -215,7 +197,7 @@ func cmdFindSub() error {
          break
       }
       if pass == 0 {
-         w(fmt.Sprintf("retrying %d descriptors in chunks of %d", len(missing), probeChunk))
+         wf("retrying %d descriptors in chunks of %d", len(missing), probeChunk)
          fmt.Printf("  %d descriptors produced no row - retrying in chunks\n", len(missing))
       }
 
@@ -251,9 +233,9 @@ func cmdFindSub() error {
    }
 
    w("")
-   w(fmt.Sprintf("accepted: %d", len(acc)))
+   wf("accepted: %d", len(acc))
    for _, d := range acc {
-      w(fmt.Sprintf("  desc %#09x code %#09x+%#07x", d.descVA, d.rva, d.ln))
+      wf("  desc %#09x code %#09x+%#07x", d.descVA, d.rva, d.ln)
    }
 
    if len(acc) == 0 {
@@ -268,14 +250,12 @@ func cmdFindSub() error {
    }
 
    d := acc[0]
-   rec := subRecord{
+   compact, err := json.Marshal(subRecord{
       SHA256:  shaHex,
       DescVA:  d.descVA,
       CodeRVA: d.rva,
       SegLen:  d.ln,
-   }
-
-   compact, err := json.Marshal(rec)
+   })
    if err != nil {
       return err
    }
@@ -294,8 +274,8 @@ func cmdFindSub() error {
 // ---- the kernel call -----------------------------------------------------
 
 // decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key, reading the
-// *.sig.prv component from prvPath and returning the 32-byte plaintext. Nothing is
-// written; cmdDecrypt writes after validating.
+// *.sig.prv component from prvPath and returning the 32-byte plaintext. Nothing is written;
+// cmdDecrypt writes after validating.
 func decryptSigningKey(prvPath string) ([]byte, error) {
    rec, err := loadPrsubs()
    if err != nil {
@@ -317,24 +297,21 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
       return nil, fmt.Errorf("%s: expected %d bytes, got %d", prvPath, keyLen, len(enc))
    }
 
-   // A random fill proves the routine actually wrote to the output buffer; a fixed
-   // sentinel could collide with real key material.
+   // A random fill proves the routine actually wrote to the output buffer; a fixed sentinel
+   // could collide with real key material.
    fill := make([]byte, keyLen)
    if _, err := rand.Read(fill); err != nil {
       return nil, err
    }
-   keyBuf := append(make([]byte, 0, keyLen), enc...) // the routine gets its own copy
-   status := make([]byte, 0x10)                      // zero-filled
-   out := append(make([]byte, 0, keyLen), fill...)
+   keyBuf := slices.Clone(enc)  // the routine gets its own copy
+   status := make([]byte, 0x10) // zero-filled
+   out := slices.Clone(fill)
 
-   // out must stay live until the result is read - its address is stored as a uintptr -
-   // and it is, by the comparison below.
-   args := newWbArgs(uint64(base)+uint64(rec.DescVA), status, keyBuf, out, keyLen)
-   st := callWarbird(args)
+   st := op3Call(base)(rec.DescVA, 0x34, keyLen, status, keyBuf, out, nil)
 
-   if st32 := uint32(st); st32 != 0 {
-      msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st32)
-      if st32 == 0xC0000095 {
+   if st != 0 {
+      msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st)
+      if st == 0xC0000095 {
          msg += " (INTEGER_OVERFLOW: desc_va is wrong for this build)"
       }
       return nil, errors.New(msg)
@@ -361,54 +338,45 @@ func isFile(p string) bool {
    return err == nil && fi.Mode().IsRegular()
 }
 
-// runOne probes one descriptor and prints its RESULT line. A probe that cannot be set
-// up still prints a line, because the parent would otherwise retry this descriptor
-// forever.
-func runOne(base uintptr, descVA uint32) {
+// runOne probes one descriptor and prints its RESULT line. A probe that cannot be set up
+// still prints a line, because the parent would otherwise retry this descriptor forever.
+func runOne(op3 op3Func, descVA uint32) {
    trace("probe %#x begin", descVA)
 
-   // Two distinct 32-byte inputs: the routine must map them to distinct outputs, which
-   // is what distinguishes a transform from a copy.
+   // A and B differ, so a transform and a copy are distinguishable. C is A one byte short
+   // and must be rejected: that property is what collapses the descriptors that merely
+   // return success.
    inputA := make([]byte, keyLen)
-   for i := range inputA {
-      inputA[i] = byte(i)
-   }
    inputB := make([]byte, keyLen)
-   for i := range inputB {
-      inputB[i] = byte(keyLen + i)
+   for i := range inputA {
+      inputA[i], inputB[i] = byte(i), byte(keyLen+i)
    }
 
-   fail := func(tag string, err error) {
-      trace("probe %s failed: %v", tag, err)
-      fmt.Printf("RESULT %#x NO_OUTPUT exit=setup:%v\n", descVA, err)
+   var p [3]*probeResult
+   for i, c := range [3]struct {
+      tag  string
+      data []byte
+      size uint32
+   }{
+      {"A", inputA, keyLen},
+      {"B", inputB, keyLen},
+      {"C", inputA, keyLen - 1},
+   } {
+      var err error
+      if p[i], err = probe(op3, descVA, c.tag, c.data, c.size); err != nil {
+         trace("probe %s failed: %v", c.tag, err)
+         fmt.Printf("RESULT %#x NO_OUTPUT exit=setup:%v\n", descVA, err)
+         return
+      }
    }
+   a, b, c := p[0], p[1], p[2]
 
-   a, err := probe(base, descVA, "A", inputA, keyLen)
-   if err != nil {
-      fail("A", err)
-      return
-   }
-   b, err := probe(base, descVA, "B", inputB, keyLen)
-   if err != nil {
-      fail("B", err)
-      return
-   }
-   c, err := probe(base, descVA, "C", inputA, keyLen-1) // one byte short - must be rejected
-   if err != nil {
-      fail("C", err)
-      return
-   }
-
-   // sawSuccess is NTSTATUS 0 AND a zero status dword - not NTSTATUS alone.
-   okA := a.ntstatus == 0 && statusOK(a.status) &&
-      !bytes.Equal(a.out, a.fill) && !bytes.Equal(a.out, inputA)
-   okB := b.ntstatus == 0 && statusOK(b.status) &&
-      !bytes.Equal(b.out, b.fill) && !bytes.Equal(b.out, inputB)
-   okInput := !bytes.Equal(a.out, b.out)
+   // Rejection is judged on NTSTATUS and the status dword alone - the output buffer is not
+   // consulted, because a routine that refused the size wrote nothing to judge.
    okReject := !(c.ntstatus == 0 && statusOK(c.status))
 
    verdict := "REJECT"
-   if okA && okB && okInput && okReject {
+   if a.wrote && b.wrote && !bytes.Equal(a.out, b.out) && okReject {
       verdict = "ACCEPT"
    }
    trace("emit %#x verdict=%s", descVA, verdict)
@@ -422,7 +390,7 @@ func runOne(base uintptr, descVA uint32) {
       a.ntstatus, hex.EncodeToString(a.status),
       b.ntstatus, hex.EncodeToString(b.status),
       c.ntstatus, hex.EncodeToString(c.status),
-      okInput, okReject,
+      !bytes.Equal(a.out, b.out), okReject,
       hex.EncodeToString(a.out))
 }
 
@@ -441,15 +409,16 @@ func runProbes(descs []uint32) int {
    }
    trace("dll loaded base=%#x", base)
 
+   op3 := op3Call(base)
    for _, d := range descs {
-      runOne(base, d)
+      runOne(op3, d)
    }
    trace("done")
    return 0
 }
 
-// spanMapped reports whether [rva, rva+n) lies inside one section's mapped extent,
-// which is the larger of its virtual and raw sizes.
+// spanMapped reports whether [rva, rva+n) lies inside one section's mapped extent, which is
+// the larger of its virtual and raw sizes.
 func spanMapped(secs []imgSection, rva, n uint32) bool {
    lo, hi := uint64(rva), uint64(rva)+uint64(n)
    for _, s := range secs {
@@ -460,9 +429,9 @@ func spanMapped(secs []imgSection, rva, n uint32) bool {
    return false
 }
 
-// trace writes one timestamped line to the child's stderr. Writes to stderr are
-// unbuffered syscalls, so the line is out of this process before the next statement
-// runs - including when the next statement is the kernel call that never returns.
+// trace writes one timestamped line to the child's stderr. Writes to stderr are unbuffered
+// syscalls, so the line is out of this process before the next statement runs - including
+// when the next statement is the kernel call that never returns.
 func trace(format string, a ...any) {
    fmt.Fprintf(os.Stderr, "[pid %d +%dms] %s\n",
       os.Getpid(), time.Since(childT0).Milliseconds(), fmt.Sprintf(format, a...))
@@ -473,9 +442,9 @@ func trace(format string, a ...any) {
 // signingCandidates is the shared census filtered to what -1 can probe: a heap-exec
 // descriptor whose code span is non-empty and lies inside a mapped section.
 //
-// This is a filter, not a second scan: the digest validation, the section walk and the
-// size cap are all scanDescs's. The dedupe by (desc_va, code rva, len) stays because
-// overlapping section extents can present the same descriptor twice.
+// This is a filter, not a second scan: the digest validation, the section walk and the size
+// cap are all scanDescs's. The dedupe by (desc_va, code rva, len) stays because overlapping
+// section extents can present the same descriptor twice.
 func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    type key struct{ va, rva, ln uint32 }
    seen := make(map[key]bool)
@@ -494,8 +463,8 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
       out = append(out, d)
    }
 
-   // A total order over keys the map already deduplicated: no equal elements can reach
-   // the comparator. rva first, so the order matches the code layout the log reports.
+   // A total order over keys the map already deduplicated: no equal elements can reach the
+   // comparator. rva first, so the order matches the code layout the log reports.
    slices.SortFunc(out, func(a, b imgDesc) int {
       if c := cmp.Compare(a.rva, b.rva); c != 0 {
          return c
@@ -508,16 +477,19 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    return out
 }
 
+// probeResult is one WB heap-exec call. wrote is NTSTATUS 0, a zero status dword, and an
+// output buffer that is neither the random fill nor the input - the whole success test, so
+// no caller has to hold the fill or the input to decide it.
 type probeResult struct {
    ntstatus uint32
    status   []byte // the 4 status bytes the routine wrote
    out      []byte
-   fill     []byte
+   wrote    bool
 }
 
 // probe performs one WB heap-exec call. A failure to draw the random fill is returned
 // rather than exited on, so the caller decides what to print.
-func probe(base uintptr, descVA uint32, tag string, data []byte, size uint32) (*probeResult, error) {
+func probe(op3 op3Func, descVA uint32, tag string, data []byte, size uint32) (*probeResult, error) {
    trace("probe %#x %s begin size=%#x", descVA, tag, size)
 
    fill := make([]byte, keyLen)
@@ -527,20 +499,17 @@ func probe(base uintptr, descVA uint32, tag string, data []byte, size uint32) (*
    keyBuf := make([]byte, keyLen)
    copy(keyBuf, data) // always keyLen bytes; a short data leaves the tail zero
    status := make([]byte, 0x10)
-   out := make([]byte, keyLen)
-   copy(out, fill)
+   out := slices.Clone(fill)
 
-   args := newWbArgs(uint64(base)+uint64(descVA), status, keyBuf, out, size)
-   r1 := callWarbird(args)
-
-   // Reading out here is also what keeps its backing array alive across the call.
-   trace("probe %#x %s returned st=%#010x sv=%x", descVA, tag, uint32(r1), status[:4])
+   r1 := op3(descVA, 0x34, size, status, keyBuf, out, nil)
+   trace("probe %#x %s returned st=%#010x sv=%x", descVA, tag, r1, status[:4])
 
    return &probeResult{
-      ntstatus: uint32(r1),
+      ntstatus: r1,
       status:   status[:4], // per-call buffer, never reused, so no copy
       out:      out,
-      fill:     fill,
+      wrote: r1 == 0 && statusOK(status) &&
+         !bytes.Equal(out, fill) && !bytes.Equal(out, keyBuf),
    }, nil
 }
 
