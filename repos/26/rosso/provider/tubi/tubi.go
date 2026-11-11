@@ -22,7 +22,14 @@ func AcquireLicense(server *LicenseServer, body []byte) ([]byte, error) {
    }
    defer resp.Body.Close()
 
-   return io.ReadAll(resp.Body)
+   response, err := io.ReadAll(resp.Body)
+   if err != nil {
+      return nil, err
+   }
+   if resp.StatusCode < 200 || resp.StatusCode > 299 {
+      return nil, errors.New(resp.Status + ": " + string(response))
+   }
+   return response, nil
 }
 
 func do(req *http.Request) (*http.Response, error) {
@@ -31,45 +38,7 @@ func do(req *http.Request) (*http.Response, error) {
 }
 
 type ContentResponse struct {
-   HeroImages           []string        `json:"hero_images"`
-   UpdatedAt            string          `json:"updated_at"`
-   GracenoteId          string          `json:"gracenote_id"`
-   Type                 string          `json:"type"`
-   AvailabilityStarts   string          `json:"availability_starts"`
-   IsCdc                bool            `json:"is_cdc"`
-   AvailabilityDuration int             `json:"availability_duration"`
-   Description          string          `json:"description"`
-   Id                   int             `json:"id,string"`
-   Tags                 []string        `json:"tags"`
-   Country              string          `json:"country"`
-   AvailabilityEnds     string          `json:"availability_ends"`
-   Directors            []string        `json:"directors"`
-   Version              int             `json:"version"`
-   DetailedType         string          `json:"detailed_type"`
-   VideoResources       []VideoResource `json:"video_resources"`
-   LoginReason          string          `json:"login_reason"`
-   Posterarts           []string        `json:"posterarts"`
-   Backgrounds          []string        `json:"backgrounds"`
-   NeedsLogin           bool            `json:"needs_login"`
-   PolicyMatch          bool            `json:"policy_match"`
-   VideoPreviewUrl      string          `json:"video_preview_url"`
-   Duration             int             `json:"duration"`
-   Actors               []string        `json:"actors"`
-   IsReplay             bool            `json:"is_replay"`
-   Url                  string          `json:"url"`
-   InternalTags         []string        `json:"internal_tags"`
-   PlayerType           string          `json:"player_type"`
-   HasTrailer           bool            `json:"has_trailer"`
-   PublisherId          string          `json:"publisher_id"`
-   Year                 int             `json:"year"`
-   ValidDuration        int             `json:"valid_duration"`
-   Lang                 string          `json:"lang"`
-   ImdbId               string          `json:"imdb_id"`
-   Title                string          `json:"title"`
-   LandscapeImages      []string        `json:"landscape_images"`
-   Thumbnails           []string        `json:"thumbnails"`
-   ContentOrientation   string          `json:"content_orientation"`
-   HasSubtitle          bool            `json:"has_subtitle"`
+   VideoResources []VideoResource `json:"video_resources"`
 }
 
 func GetContent(contentId int) (*ContentResponse, error) {
@@ -112,10 +81,7 @@ func GetContent(contentId int) (*ContentResponse, error) {
 }
 
 type LicenseServer struct {
-   Url             string `json:"url"`
-   HdcpVersion     string `json:"hdcp_version"`
-   AuthHeaderKey   string `json:"auth_header_key"`
-   AuthHeaderValue string `json:"auth_header_value"`
+   Url string `json:"url"`
 }
 
 func (*LicenseServer) CachePath() string {
@@ -123,17 +89,10 @@ func (*LicenseServer) CachePath() string {
 }
 
 type Manifest struct {
-   Url      string `json:"url"`
-   Duration int    `json:"duration"`
+   Url string `json:"url"`
 }
 
 type VideoResource struct {
-   Type             string        `json:"type"`
-   Codec            string        `json:"codec"`
-   Resolution       string        `json:"resolution"`
-   Manifest         Manifest      `json:"manifest"`
-   LicenseServer    LicenseServer `json:"license_server"`
-   TitanVersion     string        `json:"titan_version"`
-   SsaiVersion      string        `json:"ssai_version"`
-   GeneratorVersion string        `json:"generator_version"`
+   Manifest      Manifest      `json:"manifest"`
+   LicenseServer LicenseServer `json:"license_server"`
 }

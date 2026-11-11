@@ -8,14 +8,14 @@ var tests = []struct {
    url        string
 }{
    {
-      url:        "https://tubitv.com/movies/710383",
-      drm:        true,
-      resolution: "720p",
-   },
-   {
       url:        "https://tubitv.com/movies/714654",
       drm:        false,
       resolution: "1080p",
+   },
+   {
+      url:        "https://tubitv.com/movies/710383",
+      drm:        true,
+      resolution: "720p",
    },
    {
       drm:        false,
