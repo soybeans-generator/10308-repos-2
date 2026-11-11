@@ -72,7 +72,7 @@ var (
 var selfPath, selfErr = os.Executable()
 
 // childEnvFor renders spec as the one NAME=VALUE entry a spawn site passes.
-func childEnvFor(spec childSpec) (string, error) {
+func childEnvFor(spec *childSpec) (string, error) {
    b, err := json.Marshal(spec)
    if err != nil {
       return "", fmt.Errorf("%s: %w", childEnv, err)
@@ -447,7 +447,7 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]string {
       vas[i] = d.descVA
    }
 
-   p := runCollect(childSpec{Mode: "probe", Descs: vas}, 0, w)
+   p := runCollect(&childSpec{Mode: "probe", Descs: vas}, 0, w)
    if p.err != nil {
       w("  spawn: " + p.err.Error())
       return out
@@ -527,20 +527,20 @@ type dmResult struct {
 }
 
 // dmSweep spawns one sweep child for the given families and parses its rows.
-func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
-   p := runCollect(childSpec{
+func dmSweep(descRVA uint32, fams []int, sets []uint32) *dmResult {
+   p := runCollect(&childSpec{
       Mode:  "sweep",
       Descs: []uint32{descRVA},
       Fams:  fams,
       Sets:  sets,
    }, 30*time.Minute, nil)
 
-   r := dmResult{fams: map[int]*dmFam{}, rc: p.rc}
+   r := &dmResult{fams: map[int]*dmFam{}, rc: p.rc}
    if p.err != nil {
       r.loadfail = "LOADFAIL " + p.err.Error()
       return r
    }
-   bad := func(ln string) dmResult {
+   bad := func(ln string) *dmResult {
       r.loadfail = "LOADFAIL malformed row: " + ln
       return r
    }
@@ -615,7 +615,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) dmResult {
 // dmSweepAll is dmSweep plus the fault fallback: one child covers all families, so a
 // fault costs every family at once. Re-running one family at a time salvages the ones
 // that did not fault, and costs nothing when the batch succeeds.
-func dmSweepAll(descRVA uint32, fams []int, sets []uint32, logf func(string, ...any)) dmResult {
+func dmSweepAll(descRVA uint32, fams []int, sets []uint32, logf func(string, ...any)) *dmResult {
    r := dmSweep(descRVA, fams, sets)
    if r.loadfail != "" || len(fams) <= 1 {
       return r
@@ -753,13 +753,13 @@ type procOut struct {
 // timeout > 0 bounds the run; -1's probe passes 0, because a deadline there would make a
 // hang indistinguishable from a fault. stream, when non-nil, receives each stderr line as
 // it arrives and before Wait, so a child that never exits still leaves its trace.
-func runCollect(spec childSpec, timeout time.Duration, stream func(string)) procOut {
+func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *procOut {
    if selfErr != nil {
-      return procOut{rc: -1, err: selfErr}
+      return &procOut{rc: -1, err: selfErr}
    }
    entry, err := childEnvFor(spec)
    if err != nil {
-      return procOut{rc: -1, err: err}
+      return &procOut{rc: -1, err: err}
    }
 
    ctx := context.Background()
@@ -777,11 +777,11 @@ func runCollect(spec childSpec, timeout time.Duration, stream func(string)) proc
    var er io.ReadCloser
    if stream != nil {
       if er, err = cmd.StderrPipe(); err != nil {
-         return procOut{rc: -1, err: err}
+         return &procOut{rc: -1, err: err}
       }
    }
    if err := cmd.Start(); err != nil {
-      return procOut{rc: -1, err: err}
+      return &procOut{rc: -1, err: err}
    }
    if er != nil {
       sc := bufio.NewScanner(er)
@@ -800,7 +800,7 @@ func runCollect(spec childSpec, timeout time.Duration, stream func(string)) proc
    // every trace line is out of the child before the rows are read.
    runErr := cmd.Wait()
 
-   p := procOut{stdout: so.Bytes(), rc: -1}
+   p := &procOut{stdout: so.Bytes(), rc: -1}
    if ctx.Err() != nil {
       return p // deadline hit: no verdict, and not a start failure either
    }

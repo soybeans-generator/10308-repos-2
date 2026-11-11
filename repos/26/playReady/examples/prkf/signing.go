@@ -250,7 +250,7 @@ func cmdFindSub() error {
    }
 
    d := acc[0]
-   compact, err := json.Marshal(subRecord{
+   compact, err := json.Marshal(&subRecord{
       SHA256:  shaHex,
       DescVA:  d.descVA,
       CodeRVA: d.rva,

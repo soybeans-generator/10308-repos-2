@@ -65,13 +65,15 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
       maxBlk  = 4000
    )
 
-   blockOf := func(rva int) (imgDesc, bool) {
+   // &h is safe from Go 1.22 on: the loop variable is per-iteration, so each pass has its own
+   // address and the return cannot alias a later iteration.
+   blockOf := func(rva int) (*imgDesc, bool) {
       for _, h := range in.heaps {
          if h.ln != 0 && int(h.rva) <= rva && rva < int(h.rva+h.ln) {
-            return h, true
+            return &h, true
          }
       }
-      return imgDesc{}, false
+      return nil, false
    }
    matchDesc := func(t int) (uint32, bool) {
       best, bestDist := uint32(0), tol+1
@@ -339,13 +341,13 @@ type dpBatch struct {
 // reported against the line that caused it. The check is isHex32 and not a length test for
 // the reason stated there: a field that decodes to a prefix is a different value, and every
 // caller below decodes these strings without a second look.
-func dpParse(p procOut, pre string) dpBatch {
-   var r dpBatch
+func dpParse(p *procOut, pre string) *dpBatch {
+   r := &dpBatch{}
    if p.err != nil {
       r.loadfail = "LOADFAIL " + p.err.Error()
       return r
    }
-   malformed := func(x string) dpBatch {
+   malformed := func(x string) *dpBatch {
       r.loadfail = "LOADFAIL malformed row: " + x
       return r
    }
@@ -384,8 +386,8 @@ func dpParse(p procOut, pre string) dpBatch {
 
 // dpRunP1 spawns one stage-1 probe child and parses its rows. Phase 1 is phase 2 with a
 // single empty OBF, which selects the phase-1 argument shape (see dpWorker).
-func dpRunP1(descs []uint32) dpBatch {
-   return dpParse(runCollect(childSpec{
+func dpRunP1(descs []uint32) *dpBatch {
+   return dpParse(runCollect(&childSpec{
       Mode:  "p1",
       Descs: descs,
       Obfs:  []string{""},
@@ -393,12 +395,12 @@ func dpRunP1(descs []uint32) dpBatch {
 }
 
 // dpRunP2 spawns one stage-2 probe child and parses its rows.
-func dpRunP2(start int, obfs []dpObf, descs []uint32) dpBatch {
+func dpRunP2(start int, obfs []dpObf, descs []uint32) *dpBatch {
    vals := make([]string, len(obfs))
    for i, o := range obfs {
       vals[i] = o.v
    }
-   return dpParse(runCollect(childSpec{
+   return dpParse(runCollect(&childSpec{
       Mode:  "p2",
       Start: start,
       Obfs:  vals,

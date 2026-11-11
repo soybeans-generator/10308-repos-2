@@ -162,7 +162,7 @@ func stageDecryptImg() (code int) {
    //
    // A failed patch is reported as rc != 0 with no bytes: the call is skipped, and the
    // block belongs with the ones that failed rather than the ones that did not change.
-   decryptBlock := func(h imgDesc) (got []byte, rc uint32, err error) {
+   decryptBlock := func(h *imgDesc) (got []byte, rc uint32, err error) {
       lib, err := wbLoad(dllPath)
       if err != nil {
          return nil, 0, fmt.Errorf("LoadLibraryW failed at heap block 0x%x: %w", h.rva, err)
@@ -193,7 +193,7 @@ func stageDecryptImg() (code int) {
       }
       before := append([]byte(nil), img[h.rva:h.rva+h.ln]...)
 
-      got, rc, err := decryptBlock(h)
+      got, rc, err := decryptBlock(&h)
       if err != nil {
          return fail("%v", err)
       }
@@ -234,8 +234,8 @@ func stageDecryptImg() (code int) {
    // pfLoad, not a fresh profile: re-running -2 against the same build must not discard a
    // map and a stage pairing that are still valid.
    cen := &profileCensus{}
-   for _, d := range segs {
-      for _, sp := range segSpans(f, d, sizeImg) {
+   for _, s := range segs {
+      for _, sp := range segSpans(f, &s, sizeImg) {
          cen.Spans = append(cen.Spans, [2]uint32{sp.start, sp.length})
       }
    }
@@ -336,7 +336,7 @@ func splitDescs(fb []byte, secs []imgSection) (segs, heaps []imgDesc) {
 // heap reports whether this is a heap-exec descriptor. 0xF0 is the only size the kernel
 // treats that way, and the size field is covered by the digest, so the test cannot be
 // spoofed by a corrupt byte.
-func (d imgDesc) heap() bool {
+func (d *imgDesc) heap() bool {
    return d.size == 0xF0
 }
 
@@ -412,7 +412,7 @@ func mergeRuns(ivs []imgRun) []imgRun {
 //
 // -2 must not dedupe: its descriptors list overlapping spans, and deduping by RVA loses the
 // later, larger ones.
-func segSpans(fb []byte, d imgDesc, sizeImg uint32) []imgRun {
+func segSpans(fb []byte, d *imgDesc, sizeImg uint32) []imgRun {
    if int(d.off)+int(d.size) > len(fb) {
       return nil
    }

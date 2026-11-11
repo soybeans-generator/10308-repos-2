@@ -43,6 +43,9 @@ import (
 // are pure table work, so they run here.
 func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any)) ([]byte, error) {
    t := in.tab[fam]
+   if t == nil {
+      return nil, fmt.Errorf("no family %d table in %s - re-run prkf -3", fam, profilePath)
+   }
    say("family %d  cluster 0x%06x", fam, t.cluster)
    say("stage 1  0x%06x  key half %d  out buffer %d", st.S1, st.K1, st.O1)
    say("stage 2  0x%06x  key half %d  out buffer %d", st.S2, st.K2, st.O2)
@@ -124,7 +127,7 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
 //
 // An image byte above 0x0F means the cluster is not the table the profile says it is, which
 // is a wrong profile rather than a wrong scalar, so it fails instead of masking.
-func dpChain(img []byte, t famTab, mut []byte) ([]byte, bool) {
+func dpChain(img []byte, t *famTab, mut []byte) ([]byte, bool) {
    if len(mut) < 0x20 {
       return nil, false
    }
@@ -297,7 +300,7 @@ func pubMatches(d, raw []byte) bool {
 type dpInputs struct {
    *pfImage
    fams []int
-   tab  map[int]famTab
+   tab  map[int]*famTab
 }
 
 // dpLoadInputs validates the profile pfPrep already parsed and builds the per-family tables.
@@ -312,7 +315,7 @@ func dpLoadInputs() (*dpInputs, error) {
       return nil, err
    }
 
-   in := &dpInputs{pfImage: pi, tab: make(map[int]famTab, len(pi.prof.Map))}
+   in := &dpInputs{pfImage: pi, tab: make(map[int]*famTab, len(pi.prof.Map))}
    // pfValidate has already rejected any map key that is not a family index and any table
    // that is not a permutation, so neither Atoi nor the map can fail here. The Atoi error is
    // still returned: the alternative is a silent map[0] that hides the two disagreeing, and
@@ -323,7 +326,7 @@ func dpLoadInputs() (*dpInputs, error) {
          return nil, fmt.Errorf("%s: map key %q is not a family index: %w",
             profilePath, k, err)
       }
-      in.tab[v] = famTab{cluster: pm.Cluster, perm: pm.Map}
+      in.tab[v] = &famTab{cluster: pm.Cluster, perm: pm.Map}
       in.fams = append(in.fams, v)
    }
    slices.Sort(in.fams)
