@@ -130,6 +130,27 @@ func (e *Episode) String() string {
    return formatPlayableDetails(e.Id, e.Title, e.ViewOptions.Private.Streams)
 }
 
+type Error struct {
+   Code    string `json:"code"`
+   Message string `json:"message"`
+}
+
+type Errors []Error
+
+func (e Errors) Error() string {
+   var data strings.Builder
+   for i, item := range e {
+      if i >= 1 {
+         data.WriteByte('\n')
+      }
+      if item.Code != "" {
+         fmt.Fprintf(&data, "code: %s\n", item.Code)
+      }
+      fmt.Fprintf(&data, "message: %s", item.Message)
+   }
+   return data.String()
+}
+
 type Language struct {
    Id string `json:"id"`
 }
@@ -280,11 +301,16 @@ func FetchStart(marketCode string) (*Start, error) {
    defer resp.Body.Close()
 
    var apiResp struct {
-      Data Start `json:"data"`
+      Data   Start  `json:"data"`
+      Errors Errors `json:"errors"`
    }
 
    if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
       return nil, err
+   }
+
+   if len(apiResp.Errors) > 0 {
+      return nil, apiResp.Errors
    }
 
    return &apiResp.Data, nil
@@ -304,8 +330,8 @@ type Stream struct {
 }
 
 type StreamInfo struct {
-   LicenseUrl *Url `json:"license_url"`
-   Url        *Url // MPD
+   LicenseUrl string `json:"license_url"`
+   Url        string // MPD
 }
 
 func FetchEpisodeStreaming(contentId string, userClassification Classification, audioLanguage string) (*StreamInfo, error) {
@@ -358,10 +384,15 @@ func fetchStreaming(contentId string, contentType string, userClassification Cla
       Data struct {
          StreamInfos []StreamInfo `json:"stream_infos"`
       } `json:"data"`
+      Errors Errors `json:"errors"`
    }
 
    if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
       return nil, err
+   }
+
+   if len(apiResp.Errors) > 0 {
+      return nil, apiResp.Errors
    }
 
    for _, info := range apiResp.Data.StreamInfos {
@@ -376,7 +407,7 @@ func (*StreamInfo) CachePath() string {
 }
 
 func (s *StreamInfo) FetchLicense(challenge []byte) ([]byte, error) {
-   req, err := http.NewRequest("POST", s.LicenseUrl.Url.String(), bytes.NewReader(challenge))
+   req, err := http.NewRequest("POST", s.LicenseUrl, bytes.NewReader(challenge))
    if err != nil {
       return nil, err
    }
@@ -454,18 +485,6 @@ func (show *TvShow) String() string {
       data.WriteString(currentSeason.Id)
    }
    return data.String()
-}
-
-type Url struct {
-   Url url.URL
-}
-
-func (u *Url) MarshalText() ([]byte, error) {
-   return u.Url.MarshalBinary()
-}
-
-func (u *Url) UnmarshalText(text []byte) error {
-   return u.Url.UnmarshalBinary(text)
 }
 
 type ViewOptions struct {

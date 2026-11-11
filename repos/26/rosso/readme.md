@@ -11,30 +11,30 @@ streaming API authentication, metadata, and DRM playback
 
 | Titles | Country | Provider |
 |---|---|---|
-| 7575 | US | [Tubi TV] |
-| 6661 | US | [Kanopy] |
-| 5387 | US | [Plex] |
-| 5326 | UK | [Rakuten TV] |
-| 4908 | US | [Amazon Prime Video] |
+| 7603 | US | [Tubi TV] |
+| 6610 | US | [Kanopy] |
+| 5369 | US | [Plex] |
+| 5320 | UK | [Rakuten TV] |
+| 4920 | US | [Amazon Prime Video] |
 | 3808 | US | [The Roku Channel] |
-| 2929 | JP | [U-NEXT] |
-| 2173 | CA | [Crave] |
+| 2910 | JP | [U-NEXT] |
+| 2154 | CA | [Crave] |
 | 1843 | US | [Pluto TV] |
-| 1411 | FR | [Molotov TV] |
 | 1338 | US | [HBO Max] |
+| 1313 | FR | [Molotov TV] |
 | 1129 | AU | [Stan] |
-| 973 | US | [Hulu] |
-| 892 | US | [AMC+] |
+| 933 | US | [Hulu] |
+| 855 | US | [AMC+] |
 | 811 | NL | [CineMember] |
-| 717 | US | [Paramount Plus Premium] |
-| 656 | US | [Criterion Channel] |
+| 678 | US | [Paramount Plus Premium] |
+| 658 | US | [Criterion Channel] |
 | 607 | US | [Disney Plus] |
-| 475 | US | [Peacock Premium] |
-| 396 | UK | [ITVX] |
+| 474 | US | [Peacock Premium] |
+| 392 | UK | [ITVX] |
 | 392 | BR | [Oldflix] |
 | 388 | CZ | [Canal+] |
-| 313 | US | [MUBI] |
-| 311 | BE | [RTBF Auvio] |
+| 312 | US | [MUBI] |
+| 312 | BE | [RTBF Auvio] |
 | 10 | US | [NBC] |
 
 [Stan]:https://justwatch.com/au/provider/stan?tomatoMeter=50

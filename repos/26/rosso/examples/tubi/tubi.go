@@ -17,8 +17,7 @@ func main() {
 }
 
 type client struct {
-   Widevine   maya.FlagString
-   bitrate    maya.FlagBool
+   PlayReady  maya.FlagString
    cache      maya.Cache
    content_id maya.FlagInt
    dash_id    maya.FlagString
@@ -36,15 +35,14 @@ func (c *client) do() error {
       return c.cache.Encode(c)
    }
    flags := maya.FlagSet{
-      {Name: "widevine-folder", Value: &c.Widevine},
+      {Name: "playReady-folder", Value: &c.PlayReady},
       {Name: "content-id", Value: &c.content_id},
       {Name: "dash-id", Value: &c.dash_id},
-      {Name: "bitrate", Value: &c.bitrate, Needs: []string{"dash-id"}},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {
       return err
    }
-   if flags.IsSet(&c.Widevine) {
+   if flags.IsSet(&c.PlayReady) {
       return c.cache.Encode(c)
    }
    if c.content_id >= 1 {
@@ -82,15 +80,12 @@ func (c *client) do_dash_id() error {
    if err != nil {
       return err
    }
-   if c.bitrate {
-      return maya.DashBitrate(string(c.dash_id), &manifest)
-   }
    license := func(body []byte) ([]byte, error) {
       return tubi.AcquireLicense(&server, body)
    }
    return maya.DashDownload(string(c.dash_id), &manifest, &maya.Options{
-      Device:  string(c.Widevine),
-      Drm:     maya.DrmWidevine,
+      Device:  string(c.PlayReady),
+      Drm:     maya.DrmPlayReady,
       License: license,
    })
 }
