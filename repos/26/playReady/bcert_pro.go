@@ -133,10 +133,12 @@ type Certificate struct {
 }
 
 func (c *Certificate) String() string {
-   var data []byte
-   data = fmt.Appendln(data, &c.ManufacturerInfo.ManufacturerStrings)
-   data = fmt.Append(data, "security level: ", c.BasicInfo.SecurityLevel)
-   return string(data)
+   data := &strings.Builder{}
+   if c.ManufacturerInfo != nil {
+      fmt.Fprintln(data, &c.ManufacturerInfo.ManufacturerStrings)
+   }
+   fmt.Fprint(data, "security level: ", c.BasicInfo.SecurityLevel)
+   return data.String()
 }
 
 type Chain struct {

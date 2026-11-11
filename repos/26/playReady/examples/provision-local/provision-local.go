@@ -56,13 +56,12 @@ func (c *client) do_certificate() error {
    if err != nil {
       return err
    }
-
-   if len(chain.Certificates) == 0 {
-      return fmt.Errorf("no certificates found in the chain")
+   for i, certificate := range chain.Certificates {
+      if i >= 1 {
+         fmt.Println()
+      }
+      fmt.Println(&certificate)
    }
-
-   fmt.Println(&chain.Certificates[0])
-
    return nil
 }
 
