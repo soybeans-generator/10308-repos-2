@@ -2,7 +2,6 @@ package tubidrm
 
 import (
    "bytes"
-   "context"
    "fmt"
    "io"
    "net/http"
@@ -12,7 +11,7 @@ import (
 // License posts body to v.URL and returns the response bytes unmodified.
 //
 // body is forwarded byte for byte; nothing is encoded, decoded or validated.
-func License(ctx context.Context, hc *http.Client, v Values, body []byte) ([]byte, error) {
+func License(hc *http.Client, v Values, body []byte) ([]byte, error) {
    if hc == nil {
       hc = &http.Client{Timeout: 30 * time.Second}
    }
@@ -23,7 +22,7 @@ func License(ctx context.Context, hc *http.Client, v Values, body []byte) ([]byt
       return nil, fmt.Errorf("tubidrm: empty request body")
    }
 
-   req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.URL, bytes.NewReader(body))
+   req, err := http.NewRequest(http.MethodPost, v.URL, bytes.NewReader(body))
    if err != nil {
       return nil, err
    }

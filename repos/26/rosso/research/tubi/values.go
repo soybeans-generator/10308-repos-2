@@ -4,7 +4,6 @@
 package tubidrm
 
 import (
-   "context"
    "encoding/json"
    "fmt"
    "io"
@@ -39,7 +38,7 @@ type Values struct {
 }
 
 // FetchValues performs the request that yields the license-request values.
-func FetchValues(ctx context.Context, hc *http.Client, r ValuesRequest) (Values, error) {
+func FetchValues(hc *http.Client, r ValuesRequest) (Values, error) {
    if hc == nil {
       hc = &http.Client{Timeout: 30 * time.Second}
    }
@@ -47,17 +46,14 @@ func FetchValues(ctx context.Context, hc *http.Client, r ValuesRequest) (Values,
       return Values{}, fmt.Errorf("tubidrm: ContentID and DeviceID are required")
    }
 
-   req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.contentURL(), nil)
+   req, err := http.NewRequest(http.MethodGet, r.contentURL(), nil)
    if err != nil {
       return Values{}, err
    }
    h := req.Header
    h.Set("Accept", "*/*")
    h.Set("Accept-Language", "en-US")
-   h.Set("User-Agent", r.UserAgent)
-   if r.UserAgent == "" {
-      h.Set("User-Agent", defaultUserAgent)
-   }
+   h.Set("User-Agent", r.userAgent())
    h.Set("Origin", defaultOrigin)
    h.Set("Referer", defaultReferer)
    h.Set("Accept-Version", "~5.0.0")
@@ -165,6 +161,13 @@ func (r ValuesRequest) resourceType() string {
       return r.ResourceType
    }
    return ResourceWidevine
+}
+
+func (r ValuesRequest) userAgent() string {
+   if r.UserAgent != "" {
+      return r.UserAgent
+   }
+   return defaultUserAgent
 }
 
 type contentResponse struct {
