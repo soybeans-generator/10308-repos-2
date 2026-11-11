@@ -11,19 +11,10 @@ import (
    "strconv"
 )
 
-const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0"
-
 func AcquireLicense(server *LicenseServer, body []byte) ([]byte, error) {
    req, err := http.NewRequest("POST", server.Url, bytes.NewReader(body))
    if err != nil {
       return nil, err
-   }
-   req.Header.Set("Accept", "*/*")
-   req.Header.Set("User-Agent", userAgent)
-   req.Header.Set("Origin", "https://tubitv.com")
-   req.Header.Set("Referer", "https://tubitv.com/")
-   if server.AuthHeaderKey != "" && server.AuthHeaderValue != "" {
-      req.Header.Set(server.AuthHeaderKey, server.AuthHeaderValue)
    }
 
    resp, err := do(req)
@@ -57,13 +48,13 @@ func GetContent(contentId int) (*ContentResponse, error) {
       Host:   "uapi.adrise.tv",
       Path:   "/cms/content",
    }
+
    query := url.Values{}
-   query.Set("deviceId", "!")
    query.Set("content_id", strconv.Itoa(contentId))
-   query.Add("limit_resolutions[]", "h264_1080p")
-   query.Add("limit_resolutions[]", "h265_1080p")
+   query.Set("deviceId", "deviceId")
    query.Set("platform", "web")
    query.Add("video_resources[]", "dash_playready_psshv0")
+   query.Add("limit_resolutions[]", "h265_1080p")
    target.RawQuery = query.Encode()
 
    req, err := http.NewRequest("GET", target.String(), nil)
