@@ -148,7 +148,9 @@ func buildOracle() int {
       if err != nil {
          return moFail("%v", err)
       }
-      blob := append(append([]byte(nil), c1b...), c2b...)
+      blob := make([]byte, 0, 0x80)
+      blob = append(blob, c1b...)
+      blob = append(blob, c2b...)
       if len(blob) != 0x80 {
          return moFail("nibble %02x: blob is %d bytes", nib, len(blob))
       }

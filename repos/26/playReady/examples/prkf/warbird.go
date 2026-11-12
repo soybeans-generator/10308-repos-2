@@ -191,7 +191,7 @@ func stageDecryptImg() (code int) {
          errCount++
          continue
       }
-      before := append([]byte(nil), img[h.rva:h.rva+h.ln]...)
+      before := img[h.rva : h.rva+h.ln]
 
       got, rc, err := decryptBlock(&h)
       if err != nil {
