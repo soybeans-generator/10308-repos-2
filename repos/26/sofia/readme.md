@@ -4,7 +4,7 @@
 > a fire somewhere out there in all that dark and cold. And I knew that
 > whenever I got there, he'd be there. And then I woke up.
 >
-> [No Country for Old Men](//youtube.com/watch?v=GH4IhjtaAUQ) (2007)
+> [No Country for Old Men](https://youtube.com/watch?v=GH4IhjtaAUQ) (2007)
 
 ## features
 
