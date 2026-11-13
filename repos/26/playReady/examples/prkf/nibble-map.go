@@ -51,6 +51,7 @@ import (
    "fmt"
    "os"
    "path/filepath"
+   "slices"
 
    "filippo.io/nistec"
 )
@@ -68,7 +69,7 @@ var dmFams = []int{0, 1, 2}
 // Defined once because two things must agree on it byte for byte - the X coordinate the
 // oracle puts on the curve, and the value -3 XORs the shared output with to recover the
 // magic.
-var moSentinel = append([]byte("HELLO MICROSOFT!"), make([]byte, 16)...)
+var moSentinel = slices.Concat([]byte("HELLO MICROSOFT!"), make([]byte, 16))
 
 // buildOracle writes the 15 key+licence pairs into oracleDir. Called by -3 when the
 // directory is missing. Its stdout goes straight to the terminal and is not folded into
@@ -77,7 +78,7 @@ func buildOracle() int {
    // 0x02||X is the compressed SEC 1 form, and the 0x02 prefix asks for the even root, so
    // the Y below is stable across runs. SetBytes is the whole check: it decompresses the
    // point and rejects an X that is not on the curve.
-   m, err := nistec.NewP256Point().SetBytes(append([]byte{0x02}, moSentinel...))
+   m, err := nistec.NewP256Point().SetBytes(slices.Concat([]byte{0x02}, moSentinel))
    if err != nil {
       return moFail("'HELLO MICROSOFT!' || 0^16 is not an x-coordinate on P-256: %v", err)
    }
@@ -148,9 +149,7 @@ func buildOracle() int {
       if err != nil {
          return moFail("%v", err)
       }
-      blob := make([]byte, 0, 0x80)
-      blob = append(blob, c1b...)
-      blob = append(blob, c2b...)
+      blob := slices.Concat(c1b, c2b)
       if len(blob) != 0x80 {
          return moFail("nibble %02x: blob is %d bytes", nib, len(blob))
       }

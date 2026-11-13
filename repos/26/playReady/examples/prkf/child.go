@@ -208,12 +208,12 @@ func dmLoadFail(f string, a ...any) int {
 // that is not real; forcing the table here collapses whatever this key derives, so its
 // bytes cannot matter.
 func dmPrv(family int) []byte {
-   p := make([]byte, 0x41)
+   var p [0x41]byte
    for i := 0; i < 0x40; i++ {
       p[i] = byte(i*37 + 0x5A)
    }
    p[0x40] = byte(family)
-   return p
+   return p[:]
 }
 
 // dmWorker is the sweep child. One image patch, then every family: find the live set
@@ -354,13 +354,13 @@ func dpPrv() ([]byte, error) {
 // dpTrial runs one op=3 trial. k1 goes in the key buffer, k2 in the output buffer; ln
 // and size2 are the only things that differ between the phases.
 func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, out []byte, rc uint32, st []byte) {
-   sb := make([]byte, 0x40)
-   b1 := make([]byte, 0x40)
-   b2 := make([]byte, 0x40)
-   copy(b1, k1)
-   copy(b2, k2) // nil k2 leaves this zero-filled
+   var sb [0x40]byte
+   var b1 [0x40]byte
+   var b2 [0x40]byte
+   copy(b1[:], k1)
+   copy(b2[:], k2) // nil k2 leaves this zero-filled
 
-   rc = op3(desc, ln, 0x20, sb, b1, b2, size2)
+   rc = op3(desc, ln, 0x20, sb[:], b1[:], b2[:], size2)
    return b1[:0x20], b2[:0x20], rc, sb[:4]
 }
 

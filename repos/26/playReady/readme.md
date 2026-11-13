@@ -6,7 +6,7 @@
 > be the best Brahms Interpreter." But I can be the best interpreter of my
 > music. That's what I strive for.
 >
-> — [Kelly Moran – Helix (Edit)](//youtube.com/watch?v=JHLJMlTzTMQ)
+> — [Kelly Moran – Helix](https://youtube.com/watch?v=JHLJMlTzTMQ)
 
 ## Reference
 
