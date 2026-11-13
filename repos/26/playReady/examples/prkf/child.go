@@ -60,8 +60,6 @@ const dmCLEN = 0x400
 
 // Static, never-moved scratch handed to native code.
 var (
-   dmST  [0x40]byte
-   dmOUT [0x100]byte
    dmKB  [0x48]byte
    dmARG [0x40]byte
    dmCB  []byte
@@ -176,23 +174,25 @@ func childMode() (code int, ok bool, err error) {
 //   +0x28  -> blob
 //   +0x30  -> output
 //
-// The results are copied out because dmST and dmOUT are reused by the next call.
+// The status dword and the output are locals, so the slices handed back are owned by the
+// caller and the next call cannot overwrite them.
 func dmCall(base uintptr, desc uint32, prv, blob []byte) (uint32, []byte, []byte) {
-   clear(dmST[:])
-   clear(dmOUT[:])
+   var st [4]byte
+   var out [0x20]byte
+
    copy(dmKB[:], prv)
    dmCB = append(dmCB[:0], blob...)
    a := dmARG[:0x38]
    binary.LittleEndian.PutUint64(a[0x00:], 3)
    binary.LittleEndian.PutUint64(a[0x08:], uint64(base)+uint64(desc))
-   binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&dmST[0]))))
+   binary.LittleEndian.PutUint64(a[0x10:], uint64(uintptr(unsafe.Pointer(&st[0]))))
    binary.LittleEndian.PutUint32(a[0x18:], 0)
    binary.LittleEndian.PutUint64(a[0x1C:], uint64(uintptr(unsafe.Pointer(&dmKB[0]))))
    binary.LittleEndian.PutUint32(a[0x24:], 0x41)
    binary.LittleEndian.PutUint64(a[0x28:], uint64(uintptr(unsafe.Pointer(&dmCB[0]))))
-   binary.LittleEndian.PutUint64(a[0x30:], uint64(uintptr(unsafe.Pointer(&dmOUT[0]))))
+   binary.LittleEndian.PutUint64(a[0x30:], uint64(uintptr(unsafe.Pointer(&out[0]))))
    r, _, _ := wbNtQuery.Call(0xB9, uintptr(unsafe.Pointer(&a[0])), 0x38, 0)
-   return uint32(r), append([]byte(nil), dmST[:4]...), append([]byte(nil), dmOUT[:0x20]...)
+   return uint32(r), st[:], out[:]
 }
 
 // dmLoadFail prints the LOADFAIL line the parent parses and yields exit code 4.
