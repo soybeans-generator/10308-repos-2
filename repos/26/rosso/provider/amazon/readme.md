@@ -3,7 +3,7 @@
 > Everything you talk about, cut that<br>
 > That door you trying to open, you could shut that
 >
-> [Logic (2017)](//youtube.com/watch?v=wH4kzAb4l0E)
+> [Logic (2017)](https://youtube.com/watch?v=wH4kzAb4l0E)
 
 ## Account Sources
 
