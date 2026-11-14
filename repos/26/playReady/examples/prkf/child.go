@@ -21,10 +21,6 @@
 //   RES <i> <a> <b>              two 0x20-byte buffers, hex; the half is i % 2
 //   RES <i> REJECT rc=.. st=..   the routine refused
 //
-// A buffer field is exactly 0x40 hex characters (isHex32), checked at the parser and not
-// at each use: hex.DecodeString returns the bytes it did decode alongside its error, so a
-// 66-character field with one bad trailing byte yields a well-formed 0x20 bytes.
-//
 // EXIT CODES: nothing here calls os.Exit. 0 after the rows, 2 for a bad payload, 4 when
 // the module cannot be loaded, 5 on bad input or a recovered panic, 6 when no fault
 // handler could be installed.
@@ -33,7 +29,6 @@ package main
 import (
    "bufio"
    "bytes"
-   "context"
    "encoding/binary"
    "encoding/hex"
    "encoding/json"
@@ -762,14 +757,7 @@ func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *pr
       return &procOut{rc: -1, err: err}
    }
 
-   ctx := context.Background()
-   if timeout > 0 {
-      var cancel context.CancelFunc
-      ctx, cancel = context.WithTimeout(ctx, timeout)
-      defer cancel()
-   }
-
-   cmd := exec.CommandContext(ctx, selfPath)
+   cmd := exec.Command(selfPath)
    cmd.Env = childEnvList(entry)
    var so bytes.Buffer
    cmd.Stdout = &so
@@ -783,6 +771,19 @@ func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *pr
    if err := cmd.Start(); err != nil {
       return &procOut{rc: -1, err: err}
    }
+
+   // The deadline does one thing - kill the child - and asks one question - did it fire?
+   // That is all a context.Context was doing here, and a timer answers both without the
+   // package. It is armed after Start because the callback dereferences cmd.Process,
+   // which is nil until then.
+   //
+   // A Kill that fails means the child had already exited; the check below tolerates that
+   // race anyway, so the error is dropped rather than reported as a failure to kill.
+   var kill *time.Timer
+   if timeout > 0 {
+      kill = time.AfterFunc(timeout, func() { _ = cmd.Process.Kill() })
+   }
+
    if er != nil {
       sc := bufio.NewScanner(er)
       sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -800,10 +801,15 @@ func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *pr
    // every trace line is out of the child before the rows are read.
    runErr := cmd.Wait()
 
-   p := &procOut{stdout: so.Bytes(), rc: -1}
-   if ctx.Err() != nil {
-      return p // deadline hit: no verdict, and not a start failure either
+   // Stop reports whether the timer was still pending. False means it fired, so the child
+   // was killed on the deadline: this run has no verdict, and is not a start failure
+   // either. The window between Wait returning and Stop is the same one ctx.Err() left, so
+   // a child that finished exactly on the deadline is still reported as no-verdict.
+   if kill != nil && !kill.Stop() {
+      return &procOut{stdout: so.Bytes(), rc: -1}
    }
+
+   p := &procOut{stdout: so.Bytes(), rc: -1}
    switch e := runErr.(type) {
    case nil:
       p.rc = 0

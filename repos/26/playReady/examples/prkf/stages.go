@@ -15,16 +15,16 @@
 // descriptor census: no DLL read, no scan, just the image and the patch.
 //
 // THE SEARCH IS EXHAUSTIVE OVER WHAT CAN VARIATE. Both stages share one candidate set and
-// every ordered pair is tried. op=3 gets a 0x20-byte key and two 0x20-byte buffers, and which
-// buffer a routine writes is not stated anywhere, so every trial reports both and the parent
-// tries each. The winner is recorded - S1, S2, K1, O1, K2, O2 - and the apply path replays
-// it.
+// every ordered pair is tried. op=3 gets a 0x20-byte key and two 0x20-byte buffers, and
+// which buffer a routine writes is not stated anywhere, so every trial reports both and the
+// parent tries each. The winner is recorded - S1, S2, K1, O1, K2, O2 - and the apply path
+// replays it.
 //
-// THE WALK MATCHES BOTH ADDRESSES: a lea/call target names either a descriptor's own address
-// (what op=3 is handed) or its descVA (what the kernel executes, so what a call inside the
-// image targets). Indexing only one of them misses the real stages whenever they differ. The
-// caps bound the walk; hitting one is reported as TRUNCATED, and a miss under a TRUNCATED
-// walk is not evidence of absence.
+// THE WALK MATCHES BOTH ADDRESSES: a lea/call target names either a descriptor's own
+// address (what op=3 is handed) or its descVA (what the kernel executes, so what a call
+// inside the image targets). Indexing only one of them misses the real stages whenever they
+// differ. The caps bound the walk; hitting one is reported as TRUNCATED, and a miss under a
+// TRUNCATED walk is not evidence of absence.
 //
 // USAGE  prkf -6 discovers, caches and applies. Its children are selected by childEnv and
 // take no arguments (see childMode in child.go).
@@ -65,8 +65,8 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
       maxBlk  = 4000
    )
 
-   // &h is safe from Go 1.22 on: the loop variable is per-iteration, so each pass has its own
-   // address and the return cannot alias a later iteration.
+   // &h is safe from Go 1.22 on: the loop variable is per-iteration, so each pass has its
+   // own address and the return cannot alias a later iteration.
    blockOf := func(rva int) (*imgDesc, bool) {
       for _, h := range in.heaps {
          if h.ln != 0 && int(h.rva) <= rva && rva < int(h.rva+h.ln) {
@@ -337,10 +337,9 @@ type dpBatch struct {
 // unprefixed, by the child's own handler - is not a row, and why a descriptor that printf'd
 // "RES ..." of its own cannot be mistaken for one.
 //
-// A RES row whose buffers are not exactly 0x20 bytes of hex is malformed, not a row, and is
-// reported against the line that caused it. The check is isHex32 and not a length test for
-// the reason stated there: a field that decodes to a prefix is a different value, and every
-// caller below decodes these strings without a second look.
+// A RES row whose buffers are not exactly 0x20 bytes of hex is malformed, not a row. The
+// check is isHex32 and not a length test: a field that decodes to a prefix is a different
+// value, and every caller below decodes these strings without a second look.
 func dpParse(p *procOut, pre string) *dpBatch {
    r := &dpBatch{}
    if p.err != nil {

@@ -226,10 +226,9 @@ func stageDecryptImg() (code int) {
    }
 
    // -2 establishes the profile: it is the first step that knows the DLL's digest and
-   // produces the artefact everything else is measured against.
-   //
-   // The census goes in here, not just SizeOfImage: scanDescs hashes several gigabytes, and
-   // every trial child needs the spans and heap blocks it produces.
+   // produces the artefact everything else is measured against. The census goes in here,
+   // not just SizeOfImage: scanDescs hashes several gigabytes, and every trial child needs
+   // the spans and heap blocks it produces.
    //
    // pfLoad, not a fresh profile: re-running -2 against the same build must not discard a
    // map and a stage pairing that are still valid.

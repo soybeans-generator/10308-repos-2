@@ -31,13 +31,13 @@ import (
    "time"
 )
 
-// certHdr is the fixed part of one certificate entry: magic(4) version(4)
-// total_length(4) certificate_length(4).
+// certHdr is the fixed part of one certificate entry:
+// magic(4) version(4) total_length(4) certificate_length(4).
 const certHdr = 16
 
-// dllPath is the PlayReady module, read and mapped where Windows installed it. It stays
-// outside outDir: a descriptor is an RVA into the mapped image, so the bytes hashed and
-// the image the Warbird gate executes must be the same module.
+// dllPath is the PlayReady module. It stays outside outDir: a descriptor is an RVA into
+// the mapped image, so the bytes hashed and the image the Warbird gate executes must be
+// the same module.
 const dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 
 // outDir is the one directory the pipeline uses: the sample it reads and every file it
@@ -71,7 +71,7 @@ var (
 )
 
 // cmdCert carves the CHAI certificate chain out of corePath and writes it to certPath.
-// A candidate must tile its own certificate entries exactly, and a chain whose preceding
+// A candidate must tile its own certificate entries exactly; a chain whose preceding
 // length prefix matches its total length is preferred.
 func cmdCert() error {
    if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
@@ -345,8 +345,7 @@ type chain struct {
    prefixOK    bool
 }
 
-// parseChain is a self-validating parse of a CHAI chain at base. One bounds check
-// covers the whole fixed header, so the three fields below are read directly.
+// parseChain is a self-validating parse of a CHAI chain at base.
 func parseChain(buf []byte, base int) (*chain, bool) {
    const chaiHdr = 20 // magic(4) version(4) total_length(4) flags(4) cert_count(4)
 
