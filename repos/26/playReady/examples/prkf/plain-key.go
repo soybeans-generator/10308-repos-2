@@ -28,8 +28,6 @@
 package main
 
 import (
-   "bytes"
-   "crypto/ecdh"
    "crypto/sha256"
    "encoding/hex"
    "fmt"
@@ -146,11 +144,12 @@ func dpChain(img []byte, t *famTab, mut []byte) ([]byte, bool) {
       pl[i] = byte(t.perm[b])
    }
 
-   out := make([]byte, 32)
+   // 32 bytes out of 64 nibbles: a fixed size, so an array and a slice of it.
+   var out [32]byte
    for i := 0; i < 64; i += 2 {
       out[i/2] = pl[i]<<4 | pl[i+1]
    }
-   return out, true
+   return out[:], true
 }
 
 // dpCommit is the one place a derived scalar becomes a file. The check is repeated here
@@ -262,37 +261,6 @@ func dpSample() (prv, pub []byte, err error) {
 // is01 reports whether a recorded half/buffer index is one of the two values a trial row can
 // carry. Every such index is read from dllprof.json, so it is checked rather than trusted.
 func is01(v int) bool { return v == 0 || v == 1 }
-
-// pubBytes normalizes a stored public key to the 65-byte SEC 1 form. The key files carry
-// X||Y with no prefix, so that is the only difference to absorb. nil means the point is off
-// the curve or at infinity, which NewPublicKey rejects.
-func pubBytes(raw []byte) []byte {
-   if len(raw) == 64 {
-      raw = append([]byte{4}, raw...)
-   }
-   k, err := ecdh.P256().NewPublicKey(raw)
-   if err != nil {
-      return nil
-   }
-   return k.Bytes()
-}
-
-// pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar. The range
-// check is NewPrivateKey's.
-func pubFor(d []byte) []byte {
-   priv, err := ecdh.P256().NewPrivateKey(d)
-   if err != nil {
-      return nil
-   }
-   return priv.PublicKey().Bytes()
-}
-
-// pubMatches reports whether d*G is the public key in raw, in either form. The nils are
-// checked first: bytes.Equal treats two empty slices as equal.
-func pubMatches(d, raw []byte) bool {
-   got, want := pubFor(d), pubBytes(raw)
-   return got != nil && want != nil && bytes.Equal(got, want)
-}
 
 // dpInputs is the profile plus the family tables -6 needs. The image, census, patch plan and
 // parsed profile all come from pfImage, which is the same load a trial child does; prof is

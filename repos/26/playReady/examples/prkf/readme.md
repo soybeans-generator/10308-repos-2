@@ -5,7 +5,7 @@
 > lose your job? Maybe there's a death in the family. Isn't the better thing, the
 > more humane thing to say that debt should be forgiven? Isn't that who we should be?
 >
-> [Munch Comes to Collect Dot's Debt | Fargo](//youtube.com/watch?v=TJLkz36llUQ)
+> [Munch Comes to Collect Dot's Debt | Fargo](https://youtube.com/watch?v=TJLkz36llUQ)
 
 ~~~
 C:\Users\Steven\AppData\Local\Microsoft\Edge\User Data\Default\

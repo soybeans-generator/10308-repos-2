@@ -64,19 +64,19 @@ func diCall(base, sac, rel, num uintptr) uint32 {
 //   [0x40..0xF0)  crypto params copied from a real descriptor
 //   [0xF0]        entry count (1), +0xF4 flags, +0xF8 rva, +0xFC size
 func diMakeDesc(hdr, params []byte, rva, size uint32) []byte {
-   buf := make([]byte, 0x100)
-   copy(buf[0x00:0x40], hdr)
-   copy(buf[0x40:], params) // params is 0xB0 bytes -> lands at [0x40..0xF0)
+   var b [0x100]byte
+   copy(b[0x00:0x40], hdr)
+   copy(b[0x40:], params) // params is 0xB0 bytes -> lands at [0x40..0xF0)
 
-   binary.LittleEndian.PutUint32(buf[0x20:], 0x100)
-   binary.LittleEndian.PutUint32(buf[0xF0:], 1)
-   binary.LittleEndian.PutUint32(buf[0xF4:], 0x30C)
-   binary.LittleEndian.PutUint32(buf[0xF8:], rva)
-   binary.LittleEndian.PutUint32(buf[0xFC:], size)
+   binary.LittleEndian.PutUint32(b[0x20:], 0x100)
+   binary.LittleEndian.PutUint32(b[0xF0:], 1)
+   binary.LittleEndian.PutUint32(b[0xF4:], 0x30C)
+   binary.LittleEndian.PutUint32(b[0xF8:], rva)
+   binary.LittleEndian.PutUint32(b[0xFC:], size)
 
-   sum := sha256.Sum256(buf[0x20:0x100])
-   copy(buf[0x00:0x20], sum[:])
-   return buf
+   sum := sha256.Sum256(b[0x20:0x100])
+   copy(b[0x00:0x20], sum[:])
+   return b[:]
 }
 
 // diReadMem copies n bytes out of the process we are running in. It is the one reader of

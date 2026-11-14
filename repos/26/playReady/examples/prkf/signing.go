@@ -36,6 +36,7 @@ package main
 import (
    "bytes"
    "cmp"
+   "crypto/ecdh"
    "crypto/rand"
    "encoding/hex"
    "encoding/json"
@@ -299,15 +300,15 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
 
    // A random fill proves the routine actually wrote to the output buffer; a fixed sentinel
    // could collide with real key material.
-   fill := make([]byte, keyLen)
-   if _, err := rand.Read(fill); err != nil {
+   var fill [keyLen]byte
+   if _, err := rand.Read(fill[:]); err != nil {
       return nil, err
    }
-   keyBuf := slices.Clone(enc)  // the routine gets its own copy
-   status := make([]byte, 0x10) // zero-filled
-   out := slices.Clone(fill)
+   keyBuf := slices.Clone(enc) // the routine gets its own copy
+   var status [0x10]byte       // zero-filled
+   out := slices.Clone(fill[:])
 
-   st := op3Call(base)(rec.DescVA, 0x34, keyLen, status, keyBuf, out, nil)
+   st := op3Call(base)(rec.DescVA, 0x34, keyLen, status[:], keyBuf, out, nil)
 
    if st != 0 {
       msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st)
@@ -317,13 +318,13 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
       return nil, errors.New(msg)
    }
 
-   if !statusOK(status) {
+   if !statusOK(status[:]) {
       return nil, fmt.Errorf("routine returned %s - the argument layout no "+
          "longer matches this build; re-run prkf -1",
          hex.EncodeToString(status[:4]))
    }
 
-   if bytes.Equal(out, fill) {
+   if bytes.Equal(out, fill[:]) {
       return nil, errors.New("output buffer untouched - out_off is wrong")
    }
    if bytes.Equal(out, enc) {
@@ -338,6 +339,41 @@ func isFile(p string) bool {
    return err == nil && fi.Mode().IsRegular()
 }
 
+// pubBytes normalizes a stored public key to the 65-byte SEC 1 form. The key files carry
+// X||Y with no prefix, so that is the only difference to absorb. nil means the point is off
+// the curve or at infinity, which NewPublicKey rejects.
+//
+// slices.Concat allocates a new array unconditionally, so raw is only ever read. That
+// matters because cmdDecrypt calls this twice on one buffer: an in-place prepend would
+// shift raw's own bytes and the second call would decode a different point.
+func pubBytes(raw []byte) []byte {
+   if len(raw) == 64 {
+      raw = slices.Concat([]byte{4}, raw)
+   }
+   k, err := ecdh.P256().NewPublicKey(raw)
+   if err != nil {
+      return nil
+   }
+   return k.Bytes()
+}
+
+// pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar. The range
+// check is NewPrivateKey's.
+func pubFor(d []byte) []byte {
+   priv, err := ecdh.P256().NewPrivateKey(d)
+   if err != nil {
+      return nil
+   }
+   return priv.PublicKey().Bytes()
+}
+
+// pubMatches reports whether d*G is the public key in raw, in either form. The nils are
+// checked first: bytes.Equal treats two empty slices as equal.
+func pubMatches(d, raw []byte) bool {
+   got, want := pubFor(d), pubBytes(raw)
+   return got != nil && want != nil && bytes.Equal(got, want)
+}
+
 // runOne probes one descriptor and prints its RESULT line. A probe that cannot be set up
 // still prints a line, because the parent would otherwise retry this descriptor forever.
 func runOne(op3 op3Func, descVA uint32) {
@@ -346,8 +382,7 @@ func runOne(op3 op3Func, descVA uint32) {
    // A and B differ, so a transform and a copy are distinguishable. C is A one byte short
    // and must be rejected: that property is what collapses the descriptors that merely
    // return success.
-   inputA := make([]byte, keyLen)
-   inputB := make([]byte, keyLen)
+   var inputA, inputB [keyLen]byte
    for i := range inputA {
       inputA[i], inputB[i] = byte(i), byte(keyLen+i)
    }
@@ -358,9 +393,9 @@ func runOne(op3 op3Func, descVA uint32) {
       data []byte
       size uint32
    }{
-      {"A", inputA, keyLen},
-      {"B", inputB, keyLen},
-      {"C", inputA, keyLen - 1},
+      {"A", inputA[:], keyLen},
+      {"B", inputB[:], keyLen},
+      {"C", inputA[:], keyLen - 1},
    } {
       var err error
       if p[i], err = probe(op3, descVA, c.tag, c.data, c.size); err != nil {
@@ -492,24 +527,24 @@ type probeResult struct {
 func probe(op3 op3Func, descVA uint32, tag string, data []byte, size uint32) (*probeResult, error) {
    trace("probe %#x %s begin size=%#x", descVA, tag, size)
 
-   fill := make([]byte, keyLen)
-   if _, err := rand.Read(fill); err != nil {
+   var fill [keyLen]byte
+   if _, err := rand.Read(fill[:]); err != nil {
       return nil, fmt.Errorf("probe %s: random fill: %w", tag, err)
    }
-   keyBuf := make([]byte, keyLen)
-   copy(keyBuf, data) // always keyLen bytes; a short data leaves the tail zero
-   status := make([]byte, 0x10)
-   out := slices.Clone(fill)
+   var keyBuf [keyLen]byte
+   copy(keyBuf[:], data) // always keyLen bytes; a short data leaves the tail zero
+   var status [0x10]byte
+   out := slices.Clone(fill[:])
 
-   r1 := op3(descVA, 0x34, size, status, keyBuf, out, nil)
+   r1 := op3(descVA, 0x34, size, status[:], keyBuf[:], out, nil)
    trace("probe %#x %s returned st=%#010x sv=%x", descVA, tag, r1, status[:4])
 
    return &probeResult{
       ntstatus: r1,
-      status:   status[:4], // per-call buffer, never reused, so no copy
+      status:   status[:4], // per-call array, never reused, so no copy
       out:      out,
-      wrote: r1 == 0 && statusOK(status) &&
-         !bytes.Equal(out, fill) && !bytes.Equal(out, keyBuf),
+      wrote: r1 == 0 && statusOK(status[:]) &&
+         !bytes.Equal(out, fill[:]) && !bytes.Equal(out, keyBuf[:]),
    }, nil
 }
 
