@@ -2,7 +2,7 @@
 
 > you know it maxes out at a hundred percent right?
 >
-> [A HUNDRED PERCENT](//youtube.com/watch?v=w0nVBFq9-Fk) (2019)
+> [A HUNDRED PERCENT](https://youtube.com/watch?v=w0nVBFq9-Fk) (2019)
 
 Music website and WebExtension
 
