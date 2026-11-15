@@ -73,20 +73,6 @@ func childEnvFor(spec *childSpec) (string, error) {
    return childEnv + "=" + string(b), nil
 }
 
-// childEnvList is os.Environ with any inherited childEnv removed. syscall.Getenv on
-// Windows returns the FIRST match, so appending a payload to an environment that already
-// holds one shadows the new spec and the child silently repeats the old work.
-func childEnvList(entry string) []string {
-   env := os.Environ()
-   out := make([]string, 0, len(env)+1)
-   for _, e := range env {
-      if !strings.HasPrefix(e, childEnv+"=") {
-         out = append(out, e)
-      }
-   }
-   return append(out, entry)
-}
-
 // childMode reports whether this process was started as one of the re-executed children,
 // and runs it if so. Called from main before the FlagSet exists: a child passes no
 // arguments, so there is nothing for the FlagSet to parse.
@@ -758,7 +744,9 @@ func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *pr
    }
 
    cmd := exec.Command(selfPath)
-   cmd.Env = childEnvList(entry)
+   // Last value wins: exec dedupes Env, case-insensitively on Windows, so an inherited
+   // PRKF_CHILD is shadowed by this spawn's spec rather than needing to be removed.
+   cmd.Env = append(os.Environ(), entry)
    var so bytes.Buffer
    cmd.Stdout = &so
 
