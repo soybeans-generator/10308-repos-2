@@ -41,12 +41,11 @@ func appendVarint(b []byte, x uint64) []byte {
 func consumeVarint(b []byte) (uint64, int, error) {
    var x uint64
 
-   for i := 0; i < len(b); i++ {
-      c := b[i]
+   for i, c := range b {
       if i == 9 && c > 1 {
          return 0, 0, fmt.Errorf("varint overflows 64 bits")
       }
-      x |= uint64(c&0x7f) << (7 * uint(i))
+      x |= uint64(c&0x7f) << (7 * i)
       if c < 0x80 {
          return x, i + 1, nil
       }
