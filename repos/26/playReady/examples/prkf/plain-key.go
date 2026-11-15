@@ -11,17 +11,17 @@
 //
 //   Proven by d*G == extracted.enc.pub. Nothing is written unless it holds.
 //
-// THIS STEP OWNS THE SEARCH: a candidate is accepted only when the scalar its chain produces
-// satisfies d*G == extracted.enc.pub, and nothing local can stand in for that check, since a
-// tuple verified against itself is consistent by construction. There is no sample before -4,
-// so the search lives here, cached per family.
+// THIS STEP OWNS THE SEARCH: a candidate is accepted only when the scalar its chain
+// produces satisfies d*G == extracted.enc.pub, and nothing local can stand in for that
+// check, since a tuple verified against itself is consistent by construction. There is no
+// sample before -4, so the search lives here, cached per family.
 //
 // STAGES 3 AND 4 ARE ONE PASS: mut is 32 bytes, so 64 nibbles. Nibble i selects one byte
 // from its own 16-byte row at the family's cluster, and that byte - a value in 0..15 -
 // indexes the 16-entry permutation. So `perm[img[cluster+i*16+nibble]]`, sixty-four times.
 //
-// key[0x40] % 3 selects one of three routine families, each with its own bijection table AND
-// its own stage routines, so a search records only the family it was run for.
+// key[0x40] % 3 selects one of three routine families, each with its own bijection table
+// AND its own stage routines, so a search records only the family it was run for.
 //
 // Applying a pairing is two children - stage 1 then stage 2 - using the recorded key halves
 // and buffers, the only combination that reproduces the sample's key.
@@ -36,9 +36,9 @@ import (
    "strconv"
 )
 
-// dpApply replays a pairing and returns the scalar its chain produces. Two children - p1 for
-// stage 1, p2 for stage 2 - because those are the only trial modes there are. Stages 3 and 4
-// are pure table work, so they run here.
+// dpApply replays a pairing and returns the scalar its chain produces. Two children - p1
+// for stage 1, p2 for stage 2 - because those are the only trial modes there are. Stages 3
+// and 4 are pure table work, so they run here.
 func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any)) ([]byte, error) {
    t := in.tab[fam]
    if t == nil {
@@ -72,9 +72,7 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
       v, err := hex.DecodeString(r.buf[st.O1])
       if err != nil {
          // dpParse already proved this field is 0x40 hex characters, so this cannot fire
-         // today. It stays on the same argument dpCommit re-runs pubMatches: the one place
-         // that must not depend on a guarantee made in another file is the one that feeds
-         // the next stage, because a prefix decode here is a different 0x20 bytes and every
+         // today. It stays because a prefix decode here is a different 0x20 bytes and every
          // verdict below it would read as "no match".
          return nil, fmt.Errorf("stage 1 (0x%06x): key half %d buffer %d: %w",
             st.S1, st.K1, st.O1, err)
@@ -286,8 +284,7 @@ func dpLoadInputs() (*dpInputs, error) {
    in := &dpInputs{pfImage: pi, tab: make(map[int]*famTab, len(pi.prof.Map))}
    // pfValidate has already rejected any map key that is not a family index and any table
    // that is not a permutation, so neither Atoi nor the map can fail here. The Atoi error is
-   // still returned: the alternative is a silent map[0] that hides the two disagreeing, and
-   // the rule is stated in kernel.go and used here.
+   // still returned: the alternative is a silent map[0] that hides the two disagreeing.
    for k, pm := range pi.prof.Map {
       v, err := strconv.Atoi(k)
       if err != nil {
