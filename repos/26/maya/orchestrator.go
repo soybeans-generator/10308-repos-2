@@ -1,4 +1,4 @@
-// orchestrator.go begin
+// orchestrator.go marker preserve
 package maya
 
 import (
@@ -355,4 +355,4 @@ type typeInfo struct {
    IsFmp4    bool
 }
 
-// orchestrator.go end
+// orchestrator.go marker preserve
