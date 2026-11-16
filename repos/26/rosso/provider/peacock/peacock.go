@@ -1,3 +1,4 @@
+// peacock.go marker preserve
 package peacock
 
 import (
@@ -381,4 +382,4 @@ func (p *PlayoutVodResponse) AcquireLicense(challenge []byte) ([]byte, error) {
    return license, nil
 }
 
-// license.go
+// peacock.go marker preserve

@@ -1,3 +1,4 @@
+// playout.go marker preserve
 package peacock
 
 import (
@@ -63,12 +64,11 @@ type PlayoutVodResponse struct {
 
 // PlayoutVod requests a VOD playout URL from POST /video/playouts/vod using the
 // embedded mTLS certificate. token supplies the userToken; providerVariantID
-// identifies the asset to play. vcodec selects the requested video codec
-// (e.g. "H264" or "H265"). protection selects the DRM system ("WIDEVINE" or
-// "PLAYREADY"). colourSpace selects the requested transfer range ("SDR",
-// "HDR10" or "DolbyVision").
+// identifies the asset to play. The video codec capability is always sent as
+// H264 and the colour space as SDR. protection selects the DRM system
+// ("WIDEVINE" or "PLAYREADY").
 func PlayoutVod(
-   token *TokenResponse, providerVariantID, vcodec, protection, colourSpace string,
+   token *TokenResponse, providerVariantID, protection string,
 ) (*PlayoutVodResponse, error) {
    if token == nil {
       return nil, fmt.Errorf("playout vod: nil token")
@@ -78,9 +78,6 @@ func PlayoutVod(
    }
    if providerVariantID == "" {
       return nil, fmt.Errorf("playout vod: empty providerVariantID")
-   }
-   if vcodec == "" {
-      return nil, fmt.Errorf("playout vod: empty vcodec")
    }
    if protection == "" {
       return nil, fmt.Errorf("playout vod: empty protection")
@@ -93,11 +90,11 @@ func PlayoutVod(
                Container:  "ISOBMFF",
                Protection: protection,
                Transport:  "DASH",
-               Vcodec:     vcodec,
+               Vcodec:     "H264",
             },
          },
          MaxVideoFormat:        "UHD",
-         SupportedColourSpaces: []string{colourSpace},
+         SupportedColourSpaces: []string{"SDR"},
       },
       ProviderVariantID:            providerVariantID,
       PersonaParentalControlRating: "9",
@@ -179,3 +176,5 @@ type playoutRequest struct {
    ProviderVariantID            string        `json:"providerVariantId"`
    PersonaParentalControlRating string        `json:"personaParentalControlRating"`
 }
+
+// playout.go marker preserve
