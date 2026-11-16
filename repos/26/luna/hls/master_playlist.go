@@ -102,11 +102,19 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
       } else if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
          attrs := parseAttributes(line, "#EXT-X-STREAM-INF:")
 
-         if i+1 >= len(lines) { // Malformed, missing URI
+         // Malformed, missing URI.
+         if i+1 >= len(lines) {
             return nil, fmt.Errorf("malformed EXT-X-STREAM-INF: missing URI")
          }
          i++
          uriLine := lines[i]
+
+         // The line following the tag must be a URI, not another tag or an
+         // empty line. url.Parse would happily accept "#EXT-X-...", turning
+         // it into a fragment-only URL and swallowing the real entry.
+         if uriLine == "" || strings.HasPrefix(uriLine, "#") {
+            return nil, fmt.Errorf("malformed EXT-X-STREAM-INF: expected URI, got %q", uriLine)
+         }
 
          stream, exists := streamMap[uriLine]
          if !exists {
@@ -115,7 +123,7 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
                return nil, fmt.Errorf("invalid URI in EXT-X-STREAM-INF: %w", err)
             }
 
-            // First time seeing this URI, create a new StreamInf
+            // First time seeing this URI, create a new StreamInf.
             stream = &StreamInf{
                Id:  streamCounter,
                Uri: parsedUrl,
