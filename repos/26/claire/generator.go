@@ -34,7 +34,6 @@ func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
    if err := os.WriteFile(cssDestPath, []byte(styleFile), 0o644); err != nil {
       return err
    }
-   styleSheetPath := calculateStyleSheetPath(importPath)
 
    pkgDirs, err := findAllPackageDirs(sourceDir)
    if err != nil {
@@ -84,7 +83,13 @@ func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
       }
       pd.RepositoryUrl = repoUrl
       pd.Version = version
-      pd.StyleSheetPath = styleSheetPath
+      // Relative to the page being rendered, so the generated tree is
+      // self-contained however it is served.
+      depth := 0
+      if d != "." {
+         depth = len(strings.Split(filepath.ToSlash(d), "/"))
+      }
+      pd.StyleSheetPath = strings.Repeat("../", depth) + "style.css"
       pd.ImportPath = path.Join(importPath, filepath.ToSlash(d))
       docs[d] = pd
    }
@@ -118,14 +123,6 @@ func Generate(sourceDir, outputDir, repoUrl, version, importPath string) error {
       }
    }
    return nil
-}
-
-func calculateStyleSheetPath(importPath string) string {
-   var pathPrefix string
-   if parts := strings.SplitN(importPath, "/", 2); len(parts) > 1 {
-      pathPrefix = parts[1]
-   }
-   return path.Join("/", pathPrefix, "style.css")
 }
 
 // findAllPackageDirs returns the module-relative directories holding buildable
