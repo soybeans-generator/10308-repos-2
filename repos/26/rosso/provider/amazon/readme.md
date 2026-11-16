@@ -7,14 +7,13 @@
 
 ## Account Sources
 
-### ShareSub
-https://sharesub.com/brand/amazon?template=prime-video-sans-pub
+Make sure to get **4K UHD**
 
 ### G2G
+
 https://g2g.com/categories/amazon-accounts
 
 ### Z2U
-Make sure to get **4K UHD**
 
 - https://z2u.com/amazon-prime-video/accounts-5-11070
 - https://z2u.com/amazon-prime-video/subscriptions-12-11070
@@ -22,6 +21,12 @@ Make sure to get **4K UHD**
 **DO NOT BUY FROM:**
 - HMG premium
 - UZINOX
+
+### ShareSub
+
+DO NOT USE THEY DO NOT PROVIDE CREDENTIALS
+
+https://sharesub.com/brand/amazon?template=prime-video-sans-pub
 
 ## Android TV App Setup
 
