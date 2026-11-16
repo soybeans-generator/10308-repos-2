@@ -17,15 +17,13 @@ func main() {
 }
 
 type client struct {
-   Widevine     maya.FlagString
-   address      maya.FlagString
-   cache        maya.Cache
-   colour_space maya.FlagString
-   dash_id      maya.FlagString
-   email        maya.FlagString
-   password     maya.FlagString
-   token        maya.FlagBool
-   vcodec       maya.FlagString
+   Widevine maya.FlagString
+   address  maya.FlagString
+   cache    maya.Cache
+   dash_id  maya.FlagString
+   email    maya.FlagString
+   password maya.FlagString
+   token    maya.FlagBool
 }
 
 func (*client) CachePath() string {
@@ -44,19 +42,7 @@ func (c *client) do() error {
       {Name: "email", Value: &c.email, Needs: []string{"password"}},
       {Name: "password", Value: &c.password, Needs: []string{"email"}},
       {Name: "token", Value: &c.token},
-      {Name: "address", Value: &c.address, Needs: []string{"vcodec"}},
-      {
-         Name:  "vcodec",
-         Value: &c.vcodec,
-         Usage: "H264 H265",
-         Needs: []string{"address"},
-      },
-      {
-         Name:  "colour-space",
-         Value: &c.colour_space,
-         Usage: "HDR10 DolbyVision",
-         Needs: []string{"address"},
-      },
+      {Name: "address", Value: &c.address},
       {Name: "dash-id", Value: &c.dash_id},
    }
    if err := flags.Parse(os.Args[1:]); err != nil {
@@ -72,9 +58,7 @@ func (c *client) do() error {
       return c.do_token()
    }
    if c.address != "" {
-      if c.vcodec != "" {
-         return c.do_address()
-      }
+      return c.do_address()
    }
    if c.dash_id != "" {
       return c.do_dash_id()
@@ -89,9 +73,7 @@ func (c *client) do_address() error {
       return err
    }
    contentID := path.Base(string(c.address))
-   playout, err := peacock.PlayoutVod(
-      &token, contentID, string(c.vcodec), "WIDEVINE", string(c.colour_space),
-   )
+   playout, err := peacock.PlayoutVod(&token, contentID, "WIDEVINE")
    if err != nil {
       return err
    }
