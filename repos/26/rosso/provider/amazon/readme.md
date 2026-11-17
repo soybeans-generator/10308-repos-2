@@ -5,74 +5,38 @@
 >
 > [Logic (2017)](https://youtube.com/watch?v=wH4kzAb4l0E)
 
-## Account Sources
+## textverified.com
 
-Make sure to get **4K UHD**
-
-### G2G
-
-https://g2g.com/categories/amazon-accounts
-
-### Z2U
-
-- https://z2u.com/amazon-prime-video/accounts-5-11070
-- https://z2u.com/amazon-prime-video/subscriptions-12-11070
-
-**DO NOT BUY FROM:**
-- HMG premium
-- UZINOX
-
-### ShareSub
-
-DO NOT USE THEY DO NOT PROVIDE CREDENTIALS
-
-https://sharesub.com/brand/amazon?template=prime-video-sans-pub
-
-## Android TV App Setup
-
-### APK Source
-
-https://apkmirror.com/apk/amazon-mobile-llc/prime-video-android-tv-android-tv
-
-Even though it's a TV app, you can use it with a phone device - just install as normal.
-
---------------------------
-
-### ADB Commands
-
-**Start the app:**
-```
-adb shell monkey -p com.amazon.amazonvideo.livingroom -c android.intent.category.LEANBACK_LAUNCHER 1
-```
-
-**Stop/Clear the app:**
-```
-adb shell pm clear com.amazon.amazonvideo.livingroom
-```
-
-### Environment Setup
-
-Create Pixel 5, Android 11 device. Install system certificate.
-
-### Reference Issues
-1. https://github.com/httptoolkit/frida-interception-and-unpinning/issues/207
-2. https://issuetracker.google.com/issues/331256113
-3. https://issuetracker.google.com/issues/522344738
-4. https://github.com/frida/frida-core/issues/1240
-5. <https://gitlab.com/newbit/rootAVD/-/work_items/117>
+https://app.textverified.com
 
 ## SSL Pinning Bypass - Technical Analysis
 
 ### The Binary
-The app ships a **15MB ARM native library called `libignite.so`** inside `split_config.armeabi_v7a.apk`. This single binary contains the entire app engine including a statically linked copy of **curl 8.9.1-DEV** and **OpenSSL** (BoringSSL variant). Symbols are fully stripped — identification was done by scanning for embedded strings like `curl version is %s`, `curl/curl/lib/vtls/openssl.c`, `SSL certificate problem: %s`, etc.
+
+The app ships a **15MB ARM native library called `libignite.so`** inside
+`split_config.armeabi_v7a.apk`. This single binary contains the entire app
+engine including a statically linked copy of **curl 8.9.1-DEV** and **OpenSSL**
+(BoringSSL variant). Symbols are fully stripped — identification was done by
+scanning for embedded strings like `curl version is %s`,
+`curl/curl/lib/vtls/openssl.c`, `SSL certificate problem: %s`, etc.
 
 ### How the Trusted CAs are Loaded
-The app bundles a CA certificate store inside `assets/ignite-assets.tar` in the base APK. This tar contains `bin/certs/` with ~168 individual PEM certificate files in OpenSSL's `c_rehash` hash-named format (`XXXXXXXX.0`). At first launch, the tar is extracted to `/data/data/com.amazon.amazonvideo.livingroom/files/bin/certs/`.
 
-However, **the certs are NOT loaded from disk at verification time**. The app reads the cert files into memory at startup and passes them to curl via **`CURLOPT_CAINFO_BLOB`** — an in-memory blob.
+The app bundles a CA certificate store inside `assets/ignite-assets.tar` in the
+base APK. This tar contains `bin/certs/` with ~168 individual PEM certificate
+files in OpenSSL's `c_rehash` hash-named format (`XXXXXXXX.0`). At first
+launch, the tar is extracted to
+`/data/data/com.amazon.amazonvideo.livingroom/files/bin/certs/`.
+
+However, **the certs are NOT loaded from disk at verification time**. The app
+reads the cert files into memory at startup and passes them to curl via
+**`CURLOPT_CAINFO_BLOB`** — an in-memory blob.
 
 ### How Verification is Configured
-The statically linked curl is configured with `CURLOPT_SSL_VERIFYPEER = 1` via `curl_easy_setopt()`. Three call sites were found in the `.text` section of `libignite.so` with this ARM Thumb instruction pattern:
+
+The statically linked curl is configured with `CURLOPT_SSL_VERIFYPEER = 1` via
+`curl_easy_setopt()`. Three call sites were found in the `.text` section of
+`libignite.so` with this ARM Thumb instruction pattern:
 
 ```
 MOVS R1, #64    (CURLOPT_SSL_VERIFYPEER = 64)
@@ -96,3 +60,43 @@ each `curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1)` call site — disables
 SSL peer verification entirely. The patch is done in-place on the APK file to
 preserve zip offsets and alignment, since Android loads `.so` files directly
 from the APK via memory mapping.
+
+## Android TV App Setup
+
+### APK Source
+
+https://apkmirror.com/apk/amazon-mobile-llc/prime-video-android-tv-android-tv
+
+Even though it's a TV app, you can use it with a phone device - just install as normal.
+
+### Environment Setup
+
+Create Pixel 5, Android 11 device. Install system certificate.
+
+### Reference Issues
+
+1. https://github.com/httptoolkit/frida-interception-and-unpinning/issues/207
+2. https://issuetracker.google.com/issues/331256113
+3. https://issuetracker.google.com/issues/522344738
+4. https://github.com/frida/frida-core/issues/1240
+5. <https://gitlab.com/newbit/rootAVD/-/work_items/117>
+
+### ADB Commands
+
+```
+emulator -avd Pixel_5 -no-snapshot-load -http-proxy http://127.0.0.1:8080
+
+adb install-multiple (Get-ChildItem *.apk)
+```
+
+Start the app:
+
+```
+adb shell monkey -p com.amazon.amazonvideo.livingroom -c android.intent.category.LEANBACK_LAUNCHER 1
+```
+
+Stop/Clear the app:
+
+```
+adb shell pm clear com.amazon.amazonvideo.livingroom
+```
