@@ -165,6 +165,15 @@ func decodeLicenseFromMessage(message protobuf.Message, requestData []byte, sess
          kc.Iv = f.Bytes
       }
       if f, ok := m.First(3); ok {
+         // iv is required on the wire; absent or wrong length is malformed.
+         if len(kc.Iv) != aes.BlockSize {
+            return nil, fmt.Errorf("invalid IV length %d, want %d", len(kc.Iv), aes.BlockSize)
+         }
+         // CryptBlocks panics unless the input is a whole number of blocks.
+         if len(f.Bytes) == 0 || len(f.Bytes)%aes.BlockSize != 0 {
+            return nil, fmt.Errorf("encrypted key length %d is not a positive multiple of %d", len(f.Bytes), aes.BlockSize)
+         }
+
          dec := cipher.NewCBCDecrypter(ckCipher, kc.Iv)
          plain := make([]byte, len(f.Bytes))
          dec.CryptBlocks(plain, f.Bytes)
