@@ -6,10 +6,9 @@ import (
    "errors"
 )
 
-// --- Logic ---
-func Decrypt(data []byte, sample *SencSample, block cipher.Block) {
+func Decrypt(data []byte, sample *SencSample, block cipher.Block) error {
    if sample == nil || len(sample.IV) == 0 {
-      return
+      return nil
    }
    iv := sample.IV
    if len(iv) == 8 {
@@ -20,7 +19,7 @@ func Decrypt(data []byte, sample *SencSample, block cipher.Block) {
    stream := cipher.NewCTR(block, iv)
    if len(sample.Subsamples) == 0 {
       stream.XORKeyStream(data, data)
-      return
+      return nil
    }
    offset := 0
    for _, subsample := range sample.Subsamples {
@@ -30,12 +29,12 @@ func Decrypt(data []byte, sample *SencSample, block cipher.Block) {
       }
       end := offset + int(subsample.BytesOfProtectedData)
       if end > len(data) {
-         end = len(data)
+         return errors.New("senc subsamples exceed sample size")
       }
-      chunk := data[offset:end]
-      stream.XORKeyStream(chunk, chunk)
+      stream.XORKeyStream(data[offset:end], data[offset:end])
       offset = end
    }
+   return nil
 }
 
 // ExtractPsshData takes a byte slice that may be raw protobuf, a single PSSH box,
