@@ -4,7 +4,7 @@
 >
 > [A HUNDRED PERCENT](https://youtube.com/watch?v=w0nVBFq9-Fk) (2019)
 
-Music website and WebExtension
+Music website
 
 ## Music website
 
