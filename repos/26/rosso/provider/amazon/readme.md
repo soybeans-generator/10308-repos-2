@@ -7,14 +7,13 @@
 
 ## Account Sources
 
-### ShareSub
-https://sharesub.com/brand/amazon?template=prime-video-sans-pub
+Make sure to get **4K UHD**
 
 ### G2G
+
 https://g2g.com/categories/amazon-accounts
 
 ### Z2U
-Make sure to get **4K UHD**
 
 - https://z2u.com/amazon-prime-video/accounts-5-11070
 - https://z2u.com/amazon-prime-video/subscriptions-12-11070
@@ -23,12 +22,21 @@ Make sure to get **4K UHD**
 - HMG premium
 - UZINOX
 
+### ShareSub
+
+DO NOT USE THEY DO NOT PROVIDE CREDENTIALS
+
+https://sharesub.com/brand/amazon?template=prime-video-sans-pub
+
 ## Android TV App Setup
 
 ### APK Source
+
 https://apkmirror.com/apk/amazon-mobile-llc/prime-video-android-tv-android-tv
 
 Even though it's a TV app, you can use it with a phone device - just install as normal.
+
+--------------------------
 
 ### ADB Commands
 
@@ -43,6 +51,7 @@ adb shell pm clear com.amazon.amazonvideo.livingroom
 ```
 
 ### Environment Setup
+
 Create Pixel 5, Android 11 device. Install system certificate.
 
 ### Reference Issues
@@ -81,57 +90,9 @@ The ARM code runs on an **x86 emulator via `libndk_translation.so`** (Google's A
 - File I/O from translated ARM code goes through syscalls differently than x86 libc wrappers
 
 ### The Fix
-**Patching 3 bytes in the APK** — changing `MOVS R2, #1` to `MOVS R2, #0` at each `curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1)` call site — disables SSL peer verification entirely. The patch is done in-place on the APK file to preserve zip offsets and alignment, since Android loads `.so` files directly from the APK via memory mapping.
 
-## DRM Device Testing Results
-
-### PlayReady SL3000 (Full Support)
-
-| Resolution | HDR | Bitrate | Result | Details |
-|------------|-----|---------|--------|---------|
-| 576p | None | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | None | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 576p | HDR10 | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | HDR10 | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 576p | DolbyVision | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | DolbyVision | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 2160p | None | CVBR | ✅ SUCCESS | 1920x1080, hev1.1.6.L120.90 |
-| 2160p | None | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 2160p | HDR10 | CVBR | ✅ SUCCESS | 3840x2160, hev1.2.4.L150.90 |
-| 2160p | HDR10 | CBR | ✅ SUCCESS | 3840x1600, hev1.2.4.L150.90 |
-| 2160p | DolbyVision | CVBR | ✅ SUCCESS | 3840x2160, dvhe.05.06 |
-| 2160p | DolbyVision | CBR | ✅ SUCCESS | 3840x2160, dvhe.05.06 |
-
-### PlayReady SL2000 (Partial Support)
-
-| Resolution | HDR | Bitrate | Result | Details |
-|------------|-----|---------|--------|---------|
-| 576p | None | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | None | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 576p | HDR10 | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | HDR10 | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 576p | DolbyVision | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | DolbyVision | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 2160p | None | CVBR | ✅ SUCCESS | 1920x1080, hev1.1.6.L120.90 |
-| 2160p | None | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 2160p | HDR10 | CVBR | ❌ DENIED | License - 403 Denied |
-| 2160p | HDR10 | CBR | ❌ DENIED | License - 403 Denied |
-| 2160p | DolbyVision | CVBR | ❌ DENIED | License - 403 Denied |
-| 2160p | DolbyVision | CBR | ❌ DENIED | License - 403 Denied |
-
-### Widevine L3 (SD Only)
-
-| Resolution | HDR | Bitrate | Result | Details |
-|------------|-----|---------|--------|---------|
-| 576p | None | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | None | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 576p | HDR10 | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | HDR10 | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 576p | DolbyVision | CVBR | ✅ SUCCESS | 960x540, hev1.1.6.L90.90 |
-| 576p | DolbyVision | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 2160p | None | CVBR | ❌ FAULT | License - 500 Fault |
-| 2160p | None | CBR | ❌ FAIL | Manifest - Failed to extract Akamai MPD |
-| 2160p | HDR10 | CVBR | ❌ FAULT | License - 500 Fault |
-| 2160p | HDR10 | CBR | ❌ FAULT | License - 500 Fault |
-| 2160p | DolbyVision | CVBR | ❌ FAULT | License - 500 Fault |
-| 2160p | DolbyVision | CBR | ❌ FAULT | License - 500 Fault |
+**Patching 3 bytes in the APK** — changing `MOVS R2, #1` to `MOVS R2, #0` at
+each `curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1)` call site — disables
+SSL peer verification entirely. The patch is done in-place on the APK file to
+preserve zip offsets and alignment, since Android loads `.so` files directly
+from the APK via memory mapping.
