@@ -6,7 +6,6 @@ import (
    "encoding/json"
    "errors"
    "fmt"
-   "io"
    "net/http"
    "net/url"
    "strings"
@@ -22,32 +21,6 @@ const (
 )
 
 const HostAmazonAPI = "https://api.amazon.com"
-
-const detailsATFClientFeatures = "ShowPSEWarning,EnableBuyBoxV2," +
-   "EnableRecordingExperience,EnableDetailsRecordButton,EnableBuyBoxActionsV2," +
-   "EnableBuyBoxActionsV3,EnableOutOfStreamSponsorship,EnableBuyBoxActionsV4," +
-   "EnableCommonSenseMedia,EnableMapsTelemetryPassthrough," +
-   "EnableSterlingSponsorship,EnableConsentPopUp"
-
-// dynamicFeatures "DetailsAtf" is what asks the server to populate the
-// above-the-fold section. Without it primaryActions comes back empty and there
-// is no playback envelope anywhere in the response.
-const detailsATFDynamicFeatures = "CLIENT_DECORATION_ENABLE_DAAPI,DetailsAtf,RecordingCardSupported"
-
-// detailsATFRoles mirrors the roles the Android TV client sends for the
-// details page. "playback-envelope-supported" is the one that matters here; the
-// rest keep the offer cards accurate.
-const detailsATFRoles = "live-supported,startover-supported,linear-supported," +
-   "prime-offer-supported,multipart-notification-supported,tvod-supported," +
-   "svod-supported,supports-dai-timeshifting,supports-rapid-recap," +
-   "playback-envelope-supported,linear-playback-envelope-supported," +
-   "prime-benefit-activation-supported,supports-stream-sampler-vod," +
-   "supports-in-player-multi-offer,supports-in-player-full-content-sampler," +
-   "supports-stream-selector-modal,av-liveliness-with-unavailable-message-supported," +
-   "new-title-badge-supported,coming-soon-title-badge-supported," +
-   "supports-consent-redirection,supports-trailer,psft-supported," +
-   "supports-in-player-go-ad-free,supports-plan-selection," +
-   "sponsored-promotion-slot-supported"
 
 // the wrong DTID will fail the license request. if you change the DTID you
 // need to relog. also if you get a failed license request try provision again.
@@ -279,13 +252,6 @@ type Device struct {
    DeviceTypeID  string
 }
 
-// EntitlementMessaging holds the "entitlementMessaging" object from the resource.
-type EntitlementMessaging struct {
-   EntitlementMessageSlotDetail struct {
-      Message string `json:"message"`
-   } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
-}
-
 // Profile represents an Amazon actor profile.
 type Profile struct {
    ProfileID        string `json:"profileId"`
@@ -349,172 +315,6 @@ func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error)
    }
 
    return nil, fmt.Errorf("default profile not found")
-}
-
-// Resource represents the "resource" object returned from the detailsPageATF endpoint.
-type Resource struct {
-   Actions []struct {
-      Metadata struct {
-         PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
-      } `json:"metadata"`
-   } `json:"actions"`
-   ApplyHdr       bool `json:"applyHdr"`
-   ApplyUhd       bool `json:"applyUhd"`
-   PrimaryActions []struct {
-      NavigationAction struct {
-         PlaybackMetadata struct {
-            PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
-         } `json:"playbackMetadata"`
-      } `json:"navigationAction"`
-      OfferCards []struct {
-         OfferCardDecoration struct {
-            TransactionDetail []struct {
-               Text string
-            }
-         }
-      } `json:"offerCards"`
-   } `json:"primaryActions"`
-   EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
-
-   // raw is the undecoded response body, used as a last-resort search for the
-   // playback envelope when the server relocates it again.
-   raw []byte
-}
-
-// GetItemDetails uses the actor access token to get metadata for a specific title.
-// It explicitly passes UI schema flags to ensure the server returns the PlaybackEnvelope.
-func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource, error) {
-   req, err := http.NewRequest(
-      "GET",
-      HostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/detailsPage/detailsPageATF",
-      nil,
-   )
-   if err != nil {
-      return nil, err
-   }
-   query := url.Values{}
-   query.Set("itemId", titleId)
-   query.Set("presentationScheme", "android-tv-react")
-   query.Set("widgetScheme", "lrc-detail-v4.2.1.1")
-   query.Set("clientId", "pv-lrc-rust")
-   query.Set("isReactionEnabledInDP", "true")
-   query.Set("newMaturityRatings", "true")
-   query.Set("dynamicBadgingEnabled", "true")
-   query.Set("isMapsV2DatumEnabled", "true")
-   // Device parameters
-   query.Set("deviceTypeID", deviceTypeID)
-   query.Set("deviceID", DeviceID)
-
-   if token != nil {
-      // Critical UI and Feature flags to force the V2/V3 BuyBox response with
-      // PlaybackEnvelope
-      query.Set("roles", detailsATFRoles)
-      query.Set("clientFeatures", detailsATFClientFeatures)
-      query.Set("dynamicFeatures", detailsATFDynamicFeatures)
-      // you can get the envelope without the extra roles, but it will be trailer:
-      // resource.secondaryActions[0].presentation.label = "Watch trailer"
-      req.Header.Set("authorization", "Bearer "+token.Token)
-   } else {
-      query.Add("firmware", "")
-      query.Add("roles", "prime-offer-supported,svod-supported,tvod-supported")
-      query.Add("clientFeatures", "EnableBuyBoxV2")
-   }
-
-   req.URL.RawQuery = query.Encode()
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   // Keep the body so the envelope search can fall back to a full walk.
-   body, err := io.ReadAll(resp.Body)
-   if err != nil {
-      return nil, fmt.Errorf("failed to read response: %w", err)
-   }
-
-   var result struct {
-      Resource Resource `json:"resource"`
-   }
-   if err := json.Unmarshal(body, &result); err != nil {
-      return nil, err
-   }
-   result.Resource.raw = body
-   return &result.Resource, nil
-}
-
-// GetPlaybackExperienceMetadata returns the first playback envelope found in the
-// resource: the legacy "actions" list, then the modern "primaryActions" list,
-// then a full walk of the raw JSON in case the server moved it again.
-func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
-   for _, action := range r.Actions {
-      pem := action.Metadata.PlaybackExperienceMetadata
-      if pem.PlaybackEnvelope != "" {
-         return &pem, nil
-      }
-   }
-   for _, action := range r.PrimaryActions {
-      pem := action.NavigationAction.PlaybackMetadata.PlaybackExperienceMetadata
-      if pem.PlaybackEnvelope != "" {
-         return &pem, nil
-      }
-   }
-   if len(r.raw) > 0 {
-      var tree any
-      if err := json.Unmarshal(r.raw, &tree); err == nil {
-         if pem := findPlaybackExperienceMetadata(tree); pem != nil {
-            return pem, nil
-         }
-      }
-   }
-   return nil, fmt.Errorf(
-      "playbackExperienceMetadata not found in actions, primaryActions or raw response",
-   )
-}
-
-func (r *Resource) String() string {
-   var data strings.Builder
-   if r.ApplyHdr {
-      data.WriteString("HDR: true")
-   } else {
-      data.WriteString("HDR: false")
-   }
-   data.WriteByte('\n')
-   if r.ApplyUhd {
-      data.WriteString("UHD: true")
-   } else {
-      data.WriteString("UHD: false")
-   }
-
-   for _, pa := range r.PrimaryActions {
-      for _, oc := range pa.OfferCards {
-         details := oc.OfferCardDecoration.TransactionDetail
-         if len(details) == 0 {
-            continue
-         }
-         data.WriteByte('\n')
-         data.WriteString("offer card: ")
-         for j, td := range details {
-            if j > 0 {
-               data.WriteByte(' ')
-            }
-            data.WriteString(td.Text)
-         }
-      }
-   }
-
-   if r.EntitlementMessaging.EntitlementMessageSlotDetail.Message != "" {
-      data.WriteByte('\n')
-      data.WriteString("entitlement message: ")
-      data.WriteString(r.EntitlementMessaging.EntitlementMessageSlotDetail.Message)
-   }
-
-   return data.String()
 }
 
 // TokenPair represents the access and refresh tokens returned upon successful
@@ -650,6 +450,75 @@ func (t *TokenPair) Refresh() error {
    t.AccessToken = result.AccessToken
 
    return nil
+}
+
+// GetPlaybackExperienceMetadata returns the first playback envelope found in the
+// resource: the legacy "actions" list, then the modern "primaryActions" list,
+// then a full walk of the raw JSON in case the server moved it again.
+func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
+   for _, action := range r.Actions {
+      pem := action.Metadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   for _, action := range r.PrimaryActions {
+      pem := action.NavigationAction.PlaybackMetadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   if len(r.raw) > 0 {
+      var tree any
+      if err := json.Unmarshal(r.raw, &tree); err == nil {
+         if pem := findPlaybackExperienceMetadata(tree); pem != nil {
+            return pem, nil
+         }
+      }
+   }
+   return nil, fmt.Errorf(
+      "playbackExperienceMetadata not found in actions, primaryActions or raw response",
+   )
+}
+
+func (r *Resource) String() string {
+   var data strings.Builder
+   if r.ApplyHdr {
+      data.WriteString("HDR: true")
+   } else {
+      data.WriteString("HDR: false")
+   }
+   data.WriteByte('\n')
+   if r.ApplyUhd {
+      data.WriteString("UHD: true")
+   } else {
+      data.WriteString("UHD: false")
+   }
+
+   for _, pa := range r.PrimaryActions {
+      for _, oc := range pa.OfferCards {
+         details := oc.OfferCardDecoration.TransactionDetail
+         if len(details) == 0 {
+            continue
+         }
+         data.WriteByte('\n')
+         data.WriteString("offer card: ")
+         for j, td := range details {
+            if j > 0 {
+               data.WriteByte(' ')
+            }
+            data.WriteString(td.Text)
+         }
+      }
+   }
+
+   if r.EntitlementMessaging.EntitlementMessageSlotDetail.Message != "" {
+      data.WriteByte('\n')
+      data.WriteString("entitlement message: ")
+      data.WriteString(r.EntitlementMessaging.EntitlementMessageSlotDetail.Message)
+   }
+
+   return data.String()
 }
 
 // Clean extracts the Akamai MPD URL from the main playlist and sanitizes its path.

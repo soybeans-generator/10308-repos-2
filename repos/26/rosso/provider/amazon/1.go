@@ -15,6 +15,32 @@ const DeviceID = "deviceID"
 
 const HostATVPS = "https://atv-ps.amazon.com"
 
+const detailsATFClientFeatures = "ShowPSEWarning,EnableBuyBoxV2," +
+   "EnableRecordingExperience,EnableDetailsRecordButton,EnableBuyBoxActionsV2," +
+   "EnableBuyBoxActionsV3,EnableOutOfStreamSponsorship,EnableBuyBoxActionsV4," +
+   "EnableCommonSenseMedia,EnableMapsTelemetryPassthrough," +
+   "EnableSterlingSponsorship,EnableConsentPopUp"
+
+// dynamicFeatures "DetailsAtf" is what asks the server to populate the
+// above-the-fold section. Without it primaryActions comes back empty and there
+// is no playback envelope anywhere in the response.
+const detailsATFDynamicFeatures = "CLIENT_DECORATION_ENABLE_DAAPI,DetailsAtf,RecordingCardSupported"
+
+// detailsATFRoles mirrors the roles the Android TV client sends for the
+// details page. "playback-envelope-supported" is the one that matters here; the
+// rest keep the offer cards accurate.
+const detailsATFRoles = "live-supported,startover-supported,linear-supported," +
+   "prime-offer-supported,multipart-notification-supported,tvod-supported," +
+   "svod-supported,supports-dai-timeshifting,supports-rapid-recap," +
+   "playback-envelope-supported,linear-playback-envelope-supported," +
+   "prime-benefit-activation-supported,supports-stream-sampler-vod," +
+   "supports-in-player-multi-offer,supports-in-player-full-content-sampler," +
+   "supports-stream-selector-modal,av-liveliness-with-unavailable-message-supported," +
+   "new-title-badge-supported,coming-soon-title-badge-supported," +
+   "supports-consent-redirection,supports-trailer,psft-supported," +
+   "supports-in-player-go-ad-free,supports-plan-selection," +
+   "sponsored-promotion-slot-supported"
+
 // types.go marker preserve
 // GetPlayReadyLicense fetches the PlayReady DRM license for the given title.
 func GetPlayReadyLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
@@ -119,6 +145,13 @@ type ActorToken struct {
    Token string `json:"token"`
 }
 
+// EntitlementMessaging holds the "entitlementMessaging" object from the resource.
+type EntitlementMessaging struct {
+   EntitlementMessageSlotDetail struct {
+      Message string `json:"message"`
+   } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
+}
+
 // PlaybackExperienceMetadata contains the envelope and related data needed for playback requests.
 type PlaybackExperienceMetadata struct {
    PlaybackEnvelope string `json:"playbackEnvelope"`
@@ -135,6 +168,103 @@ type PlaybackUrls struct {
          Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
       } `json:"urls"`
    } `json:"intraTitlePlaylist"`
+}
+
+// Resource represents the "resource" object returned from the detailsPageATF endpoint.
+type Resource struct {
+   Actions []struct {
+      Metadata struct {
+         PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
+      } `json:"metadata"`
+   } `json:"actions"`
+   ApplyHdr       bool `json:"applyHdr"`
+   ApplyUhd       bool `json:"applyUhd"`
+   PrimaryActions []struct {
+      NavigationAction struct {
+         PlaybackMetadata struct {
+            PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
+         } `json:"playbackMetadata"`
+      } `json:"navigationAction"`
+      OfferCards []struct {
+         OfferCardDecoration struct {
+            TransactionDetail []struct {
+               Text string
+            }
+         }
+      } `json:"offerCards"`
+   } `json:"primaryActions"`
+   EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
+
+   // raw is the undecoded response body, used as a last-resort search for the
+   // playback envelope when the server relocates it again.
+   raw []byte
+}
+
+// GetItemDetails uses the actor access token to get metadata for a specific title.
+// It explicitly passes UI schema flags to ensure the server returns the PlaybackEnvelope.
+func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource, error) {
+   req, err := http.NewRequest(
+      "GET",
+      HostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/detailsPage/detailsPageATF",
+      nil,
+   )
+   if err != nil {
+      return nil, err
+   }
+   query := url.Values{}
+   query.Set("itemId", titleId)
+   query.Set("presentationScheme", "android-tv-react")
+   query.Set("widgetScheme", "lrc-detail-v4.2.1.1")
+   query.Set("clientId", "pv-lrc-rust")
+   query.Set("isReactionEnabledInDP", "true")
+   query.Set("newMaturityRatings", "true")
+   query.Set("dynamicBadgingEnabled", "true")
+   query.Set("isMapsV2DatumEnabled", "true")
+   // Device parameters
+   query.Set("deviceTypeID", deviceTypeID)
+   query.Set("deviceID", DeviceID)
+
+   if token != nil {
+      // Critical UI and Feature flags to force the V2/V3 BuyBox response with
+      // PlaybackEnvelope
+      query.Set("roles", detailsATFRoles)
+      query.Set("clientFeatures", detailsATFClientFeatures)
+      query.Set("dynamicFeatures", detailsATFDynamicFeatures)
+      // you can get the envelope without the extra roles, but it will be trailer:
+      // resource.secondaryActions[0].presentation.label = "Watch trailer"
+      req.Header.Set("authorization", "Bearer "+token.Token)
+   } else {
+      query.Add("firmware", "")
+      query.Add("roles", "prime-offer-supported,svod-supported,tvod-supported")
+      query.Add("clientFeatures", "EnableBuyBoxV2")
+   }
+
+   req.URL.RawQuery = query.Encode()
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // Keep the body so the envelope search can fall back to a full walk.
+   body, err := io.ReadAll(resp.Body)
+   if err != nil {
+      return nil, fmt.Errorf("failed to read response: %w", err)
+   }
+
+   var result struct {
+      Resource Resource `json:"resource"`
+   }
+   if err := json.Unmarshal(body, &result); err != nil {
+      return nil, err
+   }
+   result.Resource.raw = body
+   return &result.Resource, nil
 }
 
 // VodPlaybackParams holds the configuration for fetching playback resources.
@@ -184,7 +314,6 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    if err != nil {
       return nil, err
    }
-
    urlStr := HostATVPS + "/playback/prs/GetVodPlaybackResources"
    req, err := http.NewRequest("POST", urlStr, bytes.NewReader(body))
    if err != nil {
@@ -193,10 +322,9 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    query := url.Values{}
    query.Set("deviceID", DeviceID)
    query.Set("deviceTypeID", p.DeviceTypeID)
-   query.Set("titleId", p.TitleId)
+
    req.URL.RawQuery = query.Encode()
    req.Header.Set("Authorization", "Bearer "+p.ActorToken.Token)
-   req.Header.Set("content-type", "application/json")
 
    resp, err := doRequest(req)
    if err != nil {
