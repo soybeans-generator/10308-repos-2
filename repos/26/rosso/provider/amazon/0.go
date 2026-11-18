@@ -11,17 +11,6 @@ import (
    "strings"
 )
 
-const (
-   AppName         = "AIV"
-   AppVersion      = "3.12.0"
-   DeviceModel     = "sdk_gphone_x86"
-   OSVersion       = "Android"
-   SoftwareVersion = "999"
-   DeviceDomain    = "Device"
-)
-
-const HostAmazonAPI = "https://api.amazon.com"
-
 // the wrong DTID will fail the license request. if you change the DTID you
 // need to relog. also if you get a failed license request try provision again.
 // this might be UHD also
@@ -55,10 +44,6 @@ var Devices = []Device{
    },
 }
 
-func deviceName() string {
-   return fmt.Sprintf("%%FIRST_NAME%%'s%%DUPE_STRATEGY_1st%% %s", DeviceModel)
-}
-
 func trimURLPath(rawUrl string) (*url.URL, error) {
    parsedURL, err := url.Parse(rawUrl)
    if err != nil {
@@ -78,37 +63,94 @@ func trimURLPath(rawUrl string) (*url.URL, error) {
    return parsedURL, nil
 }
 
-// playback.go marker preserve
-// GetActorToken exchanges the account refresh token and actor ID for an actor-specific access token.
-func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error) {
+// GetPrimaryProfile uses the account access token to fetch available profiles and returns the primary profile.
+func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error) {
+   req, err := http.NewRequest(
+      "GET",
+      HostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/profiles/profileSelection",
+      nil,
+   )
+   if err != nil {
+      return nil, err
+   }
+   query := url.Values{}
+   query.Set("deviceTypeID", deviceTypeID)
+   query.Set("deviceID", DeviceID)
+   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+   req.URL.RawQuery = query.Encode()
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   // Embed our new Profile struct alongside the error Message struct
+   var result struct {
+      Resource struct {
+         Profiles []Profile `json:"profiles"`
+      } `json:"resource"`
+      Message *struct {
+         Body *struct {
+            Code    string `json:"code"`
+            Message string `json:"message"`
+         } `json:"body"`
+      } `json:"message"`
+   }
+
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, fmt.Errorf("failed to decode response (status %d): %w", resp.StatusCode, err)
+   }
+
+   // 1. Check for the structured JSON API error
+   if result.Message != nil && result.Message.Body != nil {
+      return nil, fmt.Errorf("API error [%s]: %s", result.Message.Body.Code, result.Message.Body.Message)
+   }
+
+   // 2. Check for standard HTTP errors if no JSON error message was provided
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // 3. Extract and return the primary profile
+   for _, profile := range result.Resource.Profiles {
+      if profile.IsDefaultProfile {
+         return &profile, nil
+      }
+   }
+
+   return nil, fmt.Errorf("default profile not found")
+}
+
+// PollRegister attempts to register the device. This should typically be called in a loop
+// until it returns success (after the user links the device on the web).
+func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
    payload := map[string]any{
-      "actor_id":             profile.ProfileID,
-      "domain":               DeviceDomain,
-      "device_name":          deviceName(),
-      "app_name":             AppName,
-      "app_version":          AppVersion,
-      "device_model":         DeviceModel,
-      "os_version":           OSVersion,
-      "device_type":          deviceTypeID,
-      "device_serial":        DeviceID,
-      "software_version":     SoftwareVersion,
-      "requested_token_type": "actor_access_token",
-      "source_token_type":    "refresh_token",
-      "source_device_tokens": []any{
-         map[string]any{
-            "device_type": deviceTypeID,
-            "account_refresh_token": map[string]string{
-               "token": tokens.RefreshToken,
-            },
+      "auth_data": map[string]any{
+         "code_pair": map[string]string{
+            "public_code":  codes.PublicCode,
+            "private_code": codes.PrivateCode,
          },
       },
+      "registration_data": map[string]string{
+         "domain":           DeviceDomain,
+         "device_name":      deviceName(),
+         "app_name":         AppName,
+         "app_version":      AppVersion,
+         "device_model":     DeviceModel,
+         "os_version":       OSVersion,
+         "device_type":      deviceTypeID,
+         "device_serial":    DeviceID,
+         "software_version": SoftwareVersion,
+      },
+      "requested_token_type": []string{"bearer"},
    }
    body, err := json.Marshal(payload)
    if err != nil {
       return nil, err
    }
    req, err := http.NewRequest(
-      "POST", HostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
+      "POST", HostAmazonAPI+"/auth/register", bytes.NewBuffer(body),
    )
    if err != nil {
       return nil, err
@@ -120,59 +162,30 @@ func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*A
       return nil, err
    }
    defer resp.Body.Close()
-
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   // Embed our new ActorToken struct into the anonymous decoder struct
    var result struct {
-      DeviceTokens []struct {
-         ActorAccessToken ActorToken `json:"actor_access_token"`
-      } `json:"device_tokens"`
+      Response struct {
+         Success struct {
+            Tokens struct {
+               Bearer TokenPair `json:"bearer"`
+            } `json:"tokens"`
+         } `json:"success"`
+         Error struct {
+            Code    string `json:"code"`
+            Message string `json:"message"`
+         } `json:"error"`
+      } `json:"response"`
    }
-
    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
       return nil, err
    }
-
-   if len(result.DeviceTokens) == 0 {
-      return nil, fmt.Errorf("no device tokens returned")
+   if result.Response.Error.Code != "" {
+      return nil, fmt.Errorf("amazon API error: %s - %s", result.Response.Error.Code, result.Response.Error.Message)
    }
-
-   token := result.DeviceTokens[0].ActorAccessToken
-   return &token, nil
-}
-
-// findPlaybackExperienceMetadata walks an arbitrary decoded JSON value looking
-// for a playbackExperienceMetadata object that carries a non-empty envelope.
-func findPlaybackExperienceMetadata(v any) *PlaybackExperienceMetadata {
-   switch node := v.(type) {
-   case map[string]any:
-      if raw, ok := node["playbackExperienceMetadata"]; ok {
-         if obj, ok := raw.(map[string]any); ok {
-            b, err := json.Marshal(obj)
-            if err == nil {
-               var pem PlaybackExperienceMetadata
-               if json.Unmarshal(b, &pem) == nil && pem.PlaybackEnvelope != "" {
-                  return &pem
-               }
-            }
-         }
-      }
-      for _, child := range node {
-         if pem := findPlaybackExperienceMetadata(child); pem != nil {
-            return pem
-         }
-      }
-   case []any:
-      for _, child := range node {
-         if pem := findPlaybackExperienceMetadata(child); pem != nil {
-            return pem
-         }
-      }
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
    }
-   return nil
+   bearer := result.Response.Success.Tokens.Bearer
+   return &bearer, nil
 }
 
 // CodePair represents the public and private codes used for device linking.
@@ -252,144 +265,6 @@ type Device struct {
    DeviceTypeID  string
 }
 
-// Profile represents an Amazon actor profile.
-type Profile struct {
-   ProfileID        string `json:"profileId"`
-   IsDefaultProfile bool   `json:"isDefaultProfile"`
-}
-
-// GetPrimaryProfile uses the account access token to fetch available profiles and returns the primary profile.
-func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error) {
-   req, err := http.NewRequest(
-      "GET",
-      HostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/profiles/profileSelection",
-      nil,
-   )
-   if err != nil {
-      return nil, err
-   }
-   query := url.Values{}
-   query.Set("deviceTypeID", deviceTypeID)
-   query.Set("deviceID", DeviceID)
-   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-   req.URL.RawQuery = query.Encode()
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   // Embed our new Profile struct alongside the error Message struct
-   var result struct {
-      Resource struct {
-         Profiles []Profile `json:"profiles"`
-      } `json:"resource"`
-      Message *struct {
-         Body *struct {
-            Code    string `json:"code"`
-            Message string `json:"message"`
-         } `json:"body"`
-      } `json:"message"`
-   }
-
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, fmt.Errorf("failed to decode response (status %d): %w", resp.StatusCode, err)
-   }
-
-   // 1. Check for the structured JSON API error
-   if result.Message != nil && result.Message.Body != nil {
-      return nil, fmt.Errorf("API error [%s]: %s", result.Message.Body.Code, result.Message.Body.Message)
-   }
-
-   // 2. Check for standard HTTP errors if no JSON error message was provided
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   // 3. Extract and return the primary profile
-   for _, profile := range result.Resource.Profiles {
-      if profile.IsDefaultProfile {
-         return &profile, nil
-      }
-   }
-
-   return nil, fmt.Errorf("default profile not found")
-}
-
-// TokenPair represents the access and refresh tokens returned upon successful
-// registration
-type TokenPair struct {
-   AccessToken  string `json:"access_token"`
-   RefreshToken string `json:"refresh_token"`
-}
-
-// PollRegister attempts to register the device. This should typically be called in a loop
-// until it returns success (after the user links the device on the web).
-func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
-   payload := map[string]any{
-      "auth_data": map[string]any{
-         "code_pair": map[string]string{
-            "public_code":  codes.PublicCode,
-            "private_code": codes.PrivateCode,
-         },
-      },
-      "registration_data": map[string]string{
-         "domain":           DeviceDomain,
-         "device_name":      deviceName(),
-         "app_name":         AppName,
-         "app_version":      AppVersion,
-         "device_model":     DeviceModel,
-         "os_version":       OSVersion,
-         "device_type":      deviceTypeID,
-         "device_serial":    DeviceID,
-         "software_version": SoftwareVersion,
-      },
-      "requested_token_type": []string{"bearer"},
-   }
-   body, err := json.Marshal(payload)
-   if err != nil {
-      return nil, err
-   }
-   req, err := http.NewRequest(
-      "POST", HostAmazonAPI+"/auth/register", bytes.NewBuffer(body),
-   )
-   if err != nil {
-      return nil, err
-   }
-   req.Header.Set("content-type", "application/json")
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-   var result struct {
-      Response struct {
-         Success struct {
-            Tokens struct {
-               Bearer TokenPair `json:"bearer"`
-            } `json:"tokens"`
-         } `json:"success"`
-         Error struct {
-            Code    string `json:"code"`
-            Message string `json:"message"`
-         } `json:"error"`
-      } `json:"response"`
-   }
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, err
-   }
-   if result.Response.Error.Code != "" {
-      return nil, fmt.Errorf("amazon API error: %s - %s", result.Response.Error.Code, result.Response.Error.Message)
-   }
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-   bearer := result.Response.Success.Tokens.Bearer
-   return &bearer, nil
-}
-
 func (*TokenPair) CachePath() string {
    return "rosso/amazon/TokenPair"
 }
@@ -453,8 +328,8 @@ func (t *TokenPair) Refresh() error {
 }
 
 // GetPlaybackExperienceMetadata returns the first playback envelope found in the
-// resource: the legacy "actions" list, then the modern "primaryActions" list,
-// then a full walk of the raw JSON in case the server moved it again.
+// resource: the legacy "actions" list first, then the modern "primaryActions"
+// list.
 func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
    for _, action := range r.Actions {
       pem := action.Metadata.PlaybackExperienceMetadata
@@ -468,17 +343,7 @@ func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata,
          return &pem, nil
       }
    }
-   if len(r.raw) > 0 {
-      var tree any
-      if err := json.Unmarshal(r.raw, &tree); err == nil {
-         if pem := findPlaybackExperienceMetadata(tree); pem != nil {
-            return pem, nil
-         }
-      }
-   }
-   return nil, fmt.Errorf(
-      "playbackExperienceMetadata not found in actions, primaryActions or raw response",
-   )
+   return nil, fmt.Errorf("playbackExperienceMetadata not found in actions or primaryActions")
 }
 
 func (r *Resource) String() string {

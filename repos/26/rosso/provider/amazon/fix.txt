@@ -1,8 +1,7 @@
 
-1 func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource, error)
+1 func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error)
 
-2 func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error)
-3 func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error)
-4 func (t *TokenPair) Refresh() error
-5 func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error)
-6 func CreateCodePair(deviceTypeID string) (*CodePair, error)
+2 func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error)
+3 func (t *TokenPair) Refresh() error
+4 func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error)
+5 func CreateCodePair(deviceTypeID string) (*CodePair, error)
