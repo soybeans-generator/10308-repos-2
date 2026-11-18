@@ -1,3 +1,4 @@
+// 0.go marker preserve
 package amazon
 
 import (
@@ -285,41 +286,6 @@ type EntitlementMessaging struct {
    } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
 }
 
-// PlaybackUrls is the parent holding the intra-title playlists.
-type PlaybackUrls struct {
-   SessionHandoff     *SessionHandoff `json:"-"`
-   IntraTitlePlaylist []struct {
-      Type string `json:"type"`
-      Urls []struct {
-         Url string `json:"url"`
-         Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
-      } `json:"urls"`
-   } `json:"intraTitlePlaylist"`
-}
-
-// Clean extracts the Akamai MPD URL from the main playlist and sanitizes its path.
-// Returns an error if the Main playlist or Akamai CDN is not found.
-func (p *PlaybackUrls) Clean() (*url.URL, error) {
-   for _, playlist := range p.IntraTitlePlaylist {
-      if playlist.Type == "Main" {
-         if len(playlist.Urls) == 0 {
-            return nil, fmt.Errorf("no urls found in main playlist")
-         }
-
-         // Require Akamai to avoid the 30MB Cloudfront/Amazon MPD bloat
-         for _, u := range playlist.Urls {
-            if u.Cdn == "akamai" {
-               return trimURLPath(u.Url)
-            }
-         }
-
-         return nil, fmt.Errorf("akamai cdn not found in main playlist")
-      }
-   }
-
-   return nil, fmt.Errorf("main playlist not found in response")
-}
-
 // Profile represents an Amazon actor profile.
 type Profile struct {
    ProfileID        string `json:"profileId"`
@@ -551,16 +517,6 @@ func (r *Resource) String() string {
    return data.String()
 }
 
-// SessionHandoff is the token returned by GetVodPlaybackResources. The DRM
-// license request requires it.
-type SessionHandoff struct {
-   Token string `json:"sessionHandoffToken"`
-}
-
-func (*SessionHandoff) CachePath() string {
-   return "rosso/amazon/SessionHandoff"
-}
-
 // TokenPair represents the access and refresh tokens returned upon successful
 // registration
 type TokenPair struct {
@@ -696,113 +652,27 @@ func (t *TokenPair) Refresh() error {
    return nil
 }
 
-// VodPlaybackParams holds the configuration for fetching playback resources.
-type VodPlaybackParams struct {
-   ActorToken                 *ActorToken
-   TitleId                    string
-   PlaybackExperienceMetadata *PlaybackExperienceMetadata
-   DeviceTypeID               string
-   VideoCodec                 string // e.g., "H264" or "H265"
-   DRMType                    string // e.g., "Widevine" or "PlayReady"
-   BitrateAdaptation          string // e.g., "CBR" or "CVBR"
-   DynamicRangeFormat         string // e.g., "None", "DolbyVision", or "HDR10"
-   MaxVideoResolution         string // e.g., "576p" or "2160p"
-}
+// Clean extracts the Akamai MPD URL from the main playlist and sanitizes its path.
+// Returns an error if the Main playlist or Akamai CDN is not found.
+func (p *PlaybackUrls) Clean() (*url.URL, error) {
+   for _, playlist := range p.IntraTitlePlaylist {
+      if playlist.Type == "Main" {
+         if len(playlist.Urls) == 0 {
+            return nil, fmt.Errorf("no urls found in main playlist")
+         }
 
-// Fetch requests the final MPD resources for playback from Amazon's API.
-func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
-   if p == nil {
-      return nil, fmt.Errorf("VodPlaybackParams cannot be nil")
-   }
-   payload := map[string]any{
-      "vodPlaylistedPlaybackUrlsRequest": map[string]any{
-         "playbackSettingsRequest": map[string]any{
-            "firmware": "", // required but can be empty
-            "titleId":  p.TitleId,
-         },
-         "device": map[string]any{
-            "hdcpLevel":          "2.3", // at least 2.2 is needed for UHD with hev1
-            "maxVideoResolution": p.MaxVideoResolution,
-            "streamingTechnologies": map[string]any{
-               "DASH": map[string]any{
-                  "bitrateAdaptations":  []string{p.BitrateAdaptation},
-                  "codecs":              []string{p.VideoCodec},
-                  "drmType":             p.DRMType,
-                  "dynamicRangeFormats": []string{p.DynamicRangeFormat},
-               },
-            },
-            "supportedStreamingTechnologies": []string{"DASH"},
-         },
-      },
-      "globalParameters": map[string]any{
-         "playbackEnvelope":       p.PlaybackExperienceMetadata.PlaybackEnvelope,
-         "deviceCapabilityFamily": "LivingRoomPlayer",
-      },
-   }
-   body, err := json.Marshal(payload)
-   if err != nil {
-      return nil, err
+         // Require Akamai to avoid the 30MB Cloudfront/Amazon MPD bloat
+         for _, u := range playlist.Urls {
+            if u.Cdn == "akamai" {
+               return trimURLPath(u.Url)
+            }
+         }
+
+         return nil, fmt.Errorf("akamai cdn not found in main playlist")
+      }
    }
 
-   urlStr := HostATVPS + "/playback/prs/GetVodPlaybackResources"
-   req, err := http.NewRequest("POST", urlStr, bytes.NewReader(body))
-   if err != nil {
-      return nil, err
-   }
-   query := url.Values{}
-   query.Set("deviceID", DeviceID)
-   query.Set("deviceTypeID", p.DeviceTypeID)
-   query.Set("titleId", p.TitleId)
-   req.URL.RawQuery = query.Encode()
-   req.Header.Set("Authorization", "Bearer "+p.ActorToken.Token)
-   req.Header.Set("content-type", "application/json")
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   var result struct {
-      Sessionization struct {
-         SessionHandoffToken string `json:"sessionHandoffToken"`
-      } `json:"sessionization"`
-      GlobalError struct {
-         Code    string `json:"code"`
-         Message string `json:"message"`
-      } `json:"globalError"`
-      VodPlaylistedPlaybackUrls struct {
-         Result struct {
-            PlaybackUrls PlaybackUrls `json:"playbackUrls"`
-         } `json:"result"`
-         Error struct {
-            Message string `json:"message"`
-         } `json:"error"`
-      } `json:"vodPlaylistedPlaybackUrls"`
-   }
-
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, err
-   }
-
-   if result.GlobalError.Code != "" {
-      return nil, fmt.Errorf("global API error: [%s] %s", result.GlobalError.Code, result.GlobalError.Message)
-   }
-
-   if result.VodPlaylistedPlaybackUrls.Error.Message != "" {
-      return nil, fmt.Errorf("API error: %s", result.VodPlaylistedPlaybackUrls.Error.Message)
-   }
-
-   // Return the parent struct holding the playlists
-   playbackUrls := result.VodPlaylistedPlaybackUrls.Result.PlaybackUrls
-   playbackUrls.SessionHandoff = &SessionHandoff{
-      Token: result.Sessionization.SessionHandoffToken,
-   }
-   return &playbackUrls, nil
+   return nil, fmt.Errorf("main playlist not found in response")
 }
 
 func (*ActorToken) CachePath() string {
@@ -812,3 +682,5 @@ func (*ActorToken) CachePath() string {
 func (*PlaybackExperienceMetadata) CachePath() string {
    return "rosso/amazon/PlaybackExperienceMetadata"
 }
+
+// 0.go marker preserve

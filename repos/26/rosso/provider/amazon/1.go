@@ -1,3 +1,4 @@
+// 1.go marker preserve
 package amazon
 
 import (
@@ -16,21 +17,13 @@ const HostATVPS = "https://atv-ps.amazon.com"
 
 // types.go marker preserve
 // GetPlayReadyLicense fetches the PlayReady DRM license for the given title.
-func GetPlayReadyLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string, sessionHandoff ...string) ([]byte, error) {
-   handoff := ""
-   if len(sessionHandoff) > 0 {
-      handoff = sessionHandoff[0]
-   }
-   return fetchDRMLicense("/playback/drm-vod/GetPlayReadyLicense", actorToken, metadata, licenseChallenge, deviceTypeID, handoff)
+func GetPlayReadyLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
+   return fetchDRMLicense("/playback/drm-vod/GetPlayReadyLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
 }
 
 // GetWidevineLicense requests a Widevine DRM license from the Amazon endpoint.
-func GetWidevineLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string, sessionHandoff ...string) ([]byte, error) {
-   handoff := ""
-   if len(sessionHandoff) > 0 {
-      handoff = sessionHandoff[0]
-   }
-   return fetchDRMLicense("/playback/drm-vod/GetWidevineLicense", actorToken, metadata, licenseChallenge, deviceTypeID, handoff)
+func GetWidevineLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
+   return fetchDRMLicense("/playback/drm-vod/GetWidevineLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
 }
 
 // doRequest wraps the http.Client Do method to log every outgoing request.
@@ -41,14 +34,11 @@ func doRequest(req *http.Request) (*http.Response, error) {
 }
 
 // fetchDRMLicense is the shared base function for making DRM requests
-func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string, sessionHandoffToken string) ([]byte, error) {
+func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
    payload := map[string]any{
-      "includeHdcpTestKey":  true,
-      "playbackEnvelope":    metadata.PlaybackEnvelope,
-      "licenseChallenge":    licenseChallenge,
-      "sessionHandoffToken": sessionHandoffToken,
+      "playbackEnvelope": metadata.PlaybackEnvelope,
+      "licenseChallenge": licenseChallenge,
    }
-
    body, err := json.Marshal(payload)
    if err != nil {
       return nil, fmt.Errorf("failed to marshal payload: %w", err)
@@ -62,10 +52,8 @@ func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExpe
    query := url.Values{}
    query.Set("deviceTypeID", deviceTypeID)
    query.Set("deviceID", DeviceID)
-
    req.URL.RawQuery = query.Encode()
    req.Header.Set("Authorization", "Bearer "+actorToken.Token)
-   req.Header.Set("content-type", "application/json")
 
    resp, err := doRequest(req)
    if err != nil {
@@ -137,3 +125,119 @@ type PlaybackExperienceMetadata struct {
    ExpiryTime       int64  `json:"expiryTime"`
    CorrelationId    string `json:"correlationId"`
 }
+
+// PlaybackUrls is the parent holding the intra-title playlists.
+type PlaybackUrls struct {
+   IntraTitlePlaylist []struct {
+      Type string `json:"type"`
+      Urls []struct {
+         Url string `json:"url"`
+         Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
+      } `json:"urls"`
+   } `json:"intraTitlePlaylist"`
+}
+
+// VodPlaybackParams holds the configuration for fetching playback resources.
+type VodPlaybackParams struct {
+   ActorToken                 *ActorToken
+   TitleId                    string
+   PlaybackExperienceMetadata *PlaybackExperienceMetadata
+   DeviceTypeID               string
+   VideoCodec                 string // e.g., "H264" or "H265"
+   DRMType                    string // e.g., "Widevine" or "PlayReady"
+   BitrateAdaptation          string // e.g., "CBR" or "CVBR"
+   DynamicRangeFormat         string // e.g., "None", "DolbyVision", or "HDR10"
+   MaxVideoResolution         string // e.g., "576p" or "2160p"
+}
+
+// Fetch requests the final MPD resources for playback from Amazon's API.
+func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
+   if p == nil {
+      return nil, fmt.Errorf("VodPlaybackParams cannot be nil")
+   }
+   payload := map[string]any{
+      "vodPlaylistedPlaybackUrlsRequest": map[string]any{
+         "playbackSettingsRequest": map[string]any{
+            "firmware": "", // required but can be empty
+            "titleId":  p.TitleId,
+         },
+         "device": map[string]any{
+            "hdcpLevel":          "2.3", // at least 2.2 is needed for UHD with hev1
+            "maxVideoResolution": p.MaxVideoResolution,
+            "streamingTechnologies": map[string]any{
+               "DASH": map[string]any{
+                  "bitrateAdaptations":  []string{p.BitrateAdaptation},
+                  "codecs":              []string{p.VideoCodec},
+                  "drmType":             p.DRMType,
+                  "dynamicRangeFormats": []string{p.DynamicRangeFormat},
+               },
+            },
+            "supportedStreamingTechnologies": []string{"DASH"},
+         },
+      },
+      "globalParameters": map[string]any{
+         "playbackEnvelope":       p.PlaybackExperienceMetadata.PlaybackEnvelope,
+         "deviceCapabilityFamily": "LivingRoomPlayer",
+      },
+   }
+   body, err := json.Marshal(payload)
+   if err != nil {
+      return nil, err
+   }
+
+   urlStr := HostATVPS + "/playback/prs/GetVodPlaybackResources"
+   req, err := http.NewRequest("POST", urlStr, bytes.NewReader(body))
+   if err != nil {
+      return nil, err
+   }
+   query := url.Values{}
+   query.Set("deviceID", DeviceID)
+   query.Set("deviceTypeID", p.DeviceTypeID)
+   query.Set("titleId", p.TitleId)
+   req.URL.RawQuery = query.Encode()
+   req.Header.Set("Authorization", "Bearer "+p.ActorToken.Token)
+   req.Header.Set("content-type", "application/json")
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   var result struct {
+      GlobalError struct {
+         Code    string `json:"code"`
+         Message string `json:"message"`
+      } `json:"globalError"`
+      VodPlaylistedPlaybackUrls struct {
+         Result struct {
+            PlaybackUrls PlaybackUrls `json:"playbackUrls"`
+         } `json:"result"`
+         Error struct {
+            Message string `json:"message"`
+         } `json:"error"`
+      } `json:"vodPlaylistedPlaybackUrls"`
+   }
+
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+
+   if result.GlobalError.Code != "" {
+      return nil, fmt.Errorf("global API error: [%s] %s", result.GlobalError.Code, result.GlobalError.Message)
+   }
+
+   if result.VodPlaylistedPlaybackUrls.Error.Message != "" {
+      return nil, fmt.Errorf("API error: %s", result.VodPlaylistedPlaybackUrls.Error.Message)
+   }
+
+   // Return the parent struct holding the playlists
+   playbackUrls := result.VodPlaylistedPlaybackUrls.Result.PlaybackUrls
+   return &playbackUrls, nil
+}
+
+// 1.go marker preserve

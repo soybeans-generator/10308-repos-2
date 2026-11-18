@@ -1,10 +1,9 @@
 
-1 func fetchDRMLicense
+1 func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error)
 
-2 func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error)
-3 func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource, error)
-4 func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error)
-5 func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error)
-6 func (t *TokenPair) Refresh() error
-7 func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error)
-8 func CreateCodePair(deviceTypeID string) (*CodePair, error)
+2 func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource, error)
+3 func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error)
+4 func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error)
+5 func (t *TokenPair) Refresh() error
+6 func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error)
+7 func CreateCodePair(deviceTypeID string) (*CodePair, error)
