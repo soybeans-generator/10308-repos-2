@@ -1,3 +1,4 @@
+// code.go marker preserve
 package amazon
 
 import (
@@ -9,9 +10,22 @@ import (
    "net/http"
 )
 
+const (
+   AppName         = "AIV"
+   AppVersion      = "3.12.0"
+   DeviceModel     = "sdk_gphone_x86"
+   OSVersion       = "Android"
+   SoftwareVersion = "999"
+   DeviceDomain    = "Device"
+)
+
 const DeviceID = "deviceID"
 
 const HostAmazonAPI = "https://api.amazon.com"
+
+func deviceName() string {
+   return fmt.Sprintf("%%FIRST_NAME%%'s%%DUPE_STRATEGY_1st%% %s", DeviceModel)
+}
 
 // doRequest wraps the http.Client Do method to log every outgoing request.
 func doRequest(req *http.Request) (*http.Response, error) {
@@ -34,9 +48,15 @@ func CreateCodePair(deviceTypeID string) (*CodePair, error) {
 
    payload := map[string]any{
       "code_data": map[string]string{
-         "domain":        "Device",
-         "device_type":   deviceTypeID,
-         "device_serial": DeviceID,
+         "domain":           DeviceDomain,
+         "device_name":      deviceName(),
+         "app_name":         AppName,
+         "app_version":      AppVersion,
+         "device_model":     DeviceModel,
+         "os_version":       OSVersion,
+         "device_type":      deviceTypeID,
+         "device_serial":    DeviceID,
+         "software_version": SoftwareVersion,
       },
    }
    body, err := json.MarshalIndent(payload, "", " ")
@@ -44,12 +64,13 @@ func CreateCodePair(deviceTypeID string) (*CodePair, error) {
       return nil, err
    }
    req, err := http.NewRequest(
-      "POST", HostAmazonAPI+"/auth/create_codepair",
+      "POST", HostAmazonAPI+"/auth/create/codepair",
       bytes.NewBuffer(body),
    )
    if err != nil {
       return nil, err
    }
+   req.Header.Set("content-type", "application/json")
 
    resp, err := doRequest(req)
    if err != nil {
@@ -69,3 +90,5 @@ func CreateCodePair(deviceTypeID string) (*CodePair, error) {
 
    return &result, nil
 }
+
+// code.go marker preserve

@@ -109,13 +109,15 @@ func (c *client) do_complete_login() error {
    }
    return c.cache.Encode(tokenPair)
 }
+
 func (c *client) do_dash_id() error {
    var (
       actor_token amazon.ActorToken
+      handoff     amazon.SessionHandoff
       manifest    maya.Manifest
       metadata    amazon.PlaybackExperienceMetadata
    )
-   err := c.cache.Decode(&actor_token, &manifest, &metadata)
+   err := c.cache.Decode(&actor_token, &handoff, &manifest, &metadata)
    if err != nil {
       return err
    }
@@ -126,6 +128,7 @@ func (c *client) do_dash_id() error {
          &metadata,
          signedRequest,
          string(c.DeviceTypeId),
+         handoff.Token,
       )
    }
    return maya.DashDownload(string(c.dash_id), &manifest, &maya.Options{
@@ -196,7 +199,9 @@ func (c *client) do_playback() error {
    if err != nil {
       return err
    }
-   return c.cache.Encode(actor_token, manifest, metadata)
+   return c.cache.Encode(
+      actor_token, resources.SessionHandoff, manifest, metadata,
+   )
 }
 
 func (c *client) do_title_id() error {

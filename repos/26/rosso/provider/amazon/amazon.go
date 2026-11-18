@@ -1,3 +1,4 @@
+// amazon.go marker preserve
 package amazon
 
 import (
@@ -8,10 +9,35 @@ import (
    "net/http"
    "net/url"
    "strings"
-   "time"
 )
 
 const HostATVPS = "https://atv-ps.amazon.com"
+
+const detailsATFClientFeatures = "ShowPSEWarning,EnableBuyBoxV2," +
+   "EnableRecordingExperience,EnableDetailsRecordButton,EnableBuyBoxActionsV2," +
+   "EnableBuyBoxActionsV3,EnableOutOfStreamSponsorship,EnableBuyBoxActionsV4," +
+   "EnableCommonSenseMedia,EnableMapsTelemetryPassthrough," +
+   "EnableSterlingSponsorship,EnableConsentPopUp"
+
+// dynamicFeatures "DetailsAtf" is what asks the server to populate the
+// above-the-fold section. Without it primaryActions comes back empty and there
+// is no playback envelope anywhere in the response.
+const detailsATFDynamicFeatures = "CLIENT_DECORATION_ENABLE_DAAPI,DetailsAtf,RecordingCardSupported"
+
+// detailsATFRoles mirrors the roles the Android TV client sends for the
+// details page. "playback-envelope-supported" is the one that matters here; the
+// rest keep the offer cards accurate.
+const detailsATFRoles = "live-supported,startover-supported,linear-supported," +
+   "prime-offer-supported,multipart-notification-supported,tvod-supported," +
+   "svod-supported,supports-dai-timeshifting,supports-rapid-recap," +
+   "playback-envelope-supported,linear-playback-envelope-supported," +
+   "prime-benefit-activation-supported,supports-stream-sampler-vod," +
+   "supports-in-player-multi-offer,supports-in-player-full-content-sampler," +
+   "supports-stream-selector-modal,av-liveliness-with-unavailable-message-supported," +
+   "new-title-badge-supported,coming-soon-title-badge-supported," +
+   "supports-consent-redirection,supports-trailer,psft-supported," +
+   "supports-in-player-go-ad-free,supports-plan-selection," +
+   "sponsored-promotion-slot-supported"
 
 // the wrong DTID will fail the license request. if you change the DTID you
 // need to relog. also if you get a failed license request try provision again.
@@ -48,20 +74,30 @@ var Devices = []Device{
 
 // types.go marker preserve
 // GetPlayReadyLicense fetches the PlayReady DRM license for the given title.
-func GetPlayReadyLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
-   return fetchDRMLicense("/playback/drm-vod/GetPlayReadyLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
+func GetPlayReadyLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string, sessionHandoff ...string) ([]byte, error) {
+   handoff := ""
+   if len(sessionHandoff) > 0 {
+      handoff = sessionHandoff[0]
+   }
+   return fetchDRMLicense("/playback/drm-vod/GetPlayReadyLicense", actorToken, metadata, licenseChallenge, deviceTypeID, handoff)
 }
 
 // GetWidevineLicense requests a Widevine DRM license from the Amazon endpoint.
-func GetWidevineLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
-   return fetchDRMLicense("/playback/drm-vod/GetWidevineLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
+func GetWidevineLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string, sessionHandoff ...string) ([]byte, error) {
+   handoff := ""
+   if len(sessionHandoff) > 0 {
+      handoff = sessionHandoff[0]
+   }
+   return fetchDRMLicense("/playback/drm-vod/GetWidevineLicense", actorToken, metadata, licenseChallenge, deviceTypeID, handoff)
 }
 
 // fetchDRMLicense is the shared base function for making DRM requests
-func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
+func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string, sessionHandoffToken string) ([]byte, error) {
    payload := map[string]any{
-      "playbackEnvelope": metadata.PlaybackEnvelope,
-      "licenseChallenge": licenseChallenge,
+      "includeHdcpTestKey":  true,
+      "playbackEnvelope":    metadata.PlaybackEnvelope,
+      "licenseChallenge":    licenseChallenge,
+      "sessionHandoffToken": sessionHandoffToken,
    }
 
    body, err := json.Marshal(payload)
@@ -80,6 +116,7 @@ func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExpe
 
    req.URL.RawQuery = query.Encode()
    req.Header.Set("Authorization", "Bearer "+actorToken.Token)
+   req.Header.Set("content-type", "application/json")
 
    resp, err := doRequest(req)
    if err != nil {
@@ -169,7 +206,15 @@ type ActorToken struct {
 func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error) {
    payload := map[string]any{
       "actor_id":             profile.ProfileID,
-      "app_name":             "AIV",
+      "domain":               DeviceDomain,
+      "device_name":          deviceName(),
+      "app_name":             AppName,
+      "app_version":          AppVersion,
+      "device_model":         DeviceModel,
+      "os_version":           OSVersion,
+      "device_type":          deviceTypeID,
+      "device_serial":        DeviceID,
+      "software_version":     SoftwareVersion,
       "requested_token_type": "actor_access_token",
       "source_token_type":    "refresh_token",
       "source_device_tokens": []any{
@@ -248,12 +293,44 @@ type PlaybackExperienceMetadata struct {
    CorrelationId    string `json:"correlationId"`
 }
 
+// findPlaybackExperienceMetadata walks an arbitrary decoded JSON value looking
+// for a playbackExperienceMetadata object that carries a non-empty envelope.
+func findPlaybackExperienceMetadata(v any) *PlaybackExperienceMetadata {
+   switch node := v.(type) {
+   case map[string]any:
+      if raw, ok := node["playbackExperienceMetadata"]; ok {
+         if obj, ok := raw.(map[string]any); ok {
+            b, err := json.Marshal(obj)
+            if err == nil {
+               var pem PlaybackExperienceMetadata
+               if json.Unmarshal(b, &pem) == nil && pem.PlaybackEnvelope != "" {
+                  return &pem
+               }
+            }
+         }
+      }
+      for _, child := range node {
+         if pem := findPlaybackExperienceMetadata(child); pem != nil {
+            return pem
+         }
+      }
+   case []any:
+      for _, child := range node {
+         if pem := findPlaybackExperienceMetadata(child); pem != nil {
+            return pem
+         }
+      }
+   }
+   return nil
+}
+
 func (*PlaybackExperienceMetadata) CachePath() string {
    return "rosso/amazon/PlaybackExperienceMetadata"
 }
 
 // PlaybackUrls is the parent holding the intra-title playlists.
 type PlaybackUrls struct {
+   SessionHandoff     *SessionHandoff `json:"-"`
    IntraTitlePlaylist []struct {
       Type string `json:"type"`
       Urls []struct {
@@ -361,15 +438,24 @@ type Resource struct {
    ApplyHdr       bool `json:"applyHdr"`
    ApplyUhd       bool `json:"applyUhd"`
    PrimaryActions []struct {
+      NavigationAction struct {
+         PlaybackMetadata struct {
+            PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
+         } `json:"playbackMetadata"`
+      } `json:"navigationAction"`
       OfferCards []struct {
          OfferCardDecoration struct {
             TransactionDetail []struct {
                Text string
             }
          }
-      }
-   }
+      } `json:"offerCards"`
+   } `json:"primaryActions"`
    EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
+
+   // raw is the undecoded response body, used as a last-resort search for the
+   // playback envelope when the server relocates it again.
+   raw []byte
 }
 
 // GetItemDetails uses the actor access token to get metadata for a specific title.
@@ -386,6 +472,12 @@ func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource,
    query := url.Values{}
    query.Set("itemId", titleId)
    query.Set("presentationScheme", "android-tv-react")
+   query.Set("widgetScheme", "lrc-detail-v4.2.1.1")
+   query.Set("clientId", "pv-lrc-rust")
+   query.Set("isReactionEnabledInDP", "true")
+   query.Set("newMaturityRatings", "true")
+   query.Set("dynamicBadgingEnabled", "true")
+   query.Set("isMapsV2DatumEnabled", "true")
    // Device parameters
    query.Set("deviceTypeID", deviceTypeID)
    query.Set("deviceID", DeviceID)
@@ -393,8 +485,10 @@ func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource,
    if token != nil {
       // Critical UI and Feature flags to force the V2/V3 BuyBox response with
       // PlaybackEnvelope
-      query.Set("roles", "playback-envelope-supported")
-      // you can get the envelope without this, but it will be trailer:
+      query.Set("roles", detailsATFRoles)
+      query.Set("clientFeatures", detailsATFClientFeatures)
+      query.Set("dynamicFeatures", detailsATFDynamicFeatures)
+      // you can get the envelope without the extra roles, but it will be trailer:
       // resource.secondaryActions[0].presentation.label = "Watch trailer"
       req.Header.Set("authorization", "Bearer "+token.Token)
    } else {
@@ -415,17 +509,25 @@ func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource,
       return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
    }
 
-   // Embed our new Resource struct into the anonymous decoder struct
+   // Keep the body so the envelope search can fall back to a full walk.
+   body, err := io.ReadAll(resp.Body)
+   if err != nil {
+      return nil, fmt.Errorf("failed to read response: %w", err)
+   }
+
    var result struct {
       Resource Resource `json:"resource"`
    }
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+   if err := json.Unmarshal(body, &result); err != nil {
       return nil, err
    }
+   result.Resource.raw = body
    return &result.Resource, nil
 }
 
-// GetPlaybackExperienceMetadata searches the Actions array and returns the first valid PlaybackExperienceMetadata.
+// GetPlaybackExperienceMetadata returns the first playback envelope found in the
+// resource: the legacy "actions" list, then the modern "primaryActions" list,
+// then a full walk of the raw JSON in case the server moved it again.
 func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
    for _, action := range r.Actions {
       pem := action.Metadata.PlaybackExperienceMetadata
@@ -433,7 +535,23 @@ func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata,
          return &pem, nil
       }
    }
-   return nil, fmt.Errorf("playbackExperienceMetadata not found in actions")
+   for _, action := range r.PrimaryActions {
+      pem := action.NavigationAction.PlaybackMetadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   if len(r.raw) > 0 {
+      var tree any
+      if err := json.Unmarshal(r.raw, &tree); err == nil {
+         if pem := findPlaybackExperienceMetadata(tree); pem != nil {
+            return pem, nil
+         }
+      }
+   }
+   return nil, fmt.Errorf(
+      "playbackExperienceMetadata not found in actions, primaryActions or raw response",
+   )
 }
 
 func (r *Resource) String() string {
@@ -476,6 +594,16 @@ func (r *Resource) String() string {
    return data.String()
 }
 
+// SessionHandoff is the token returned by GetVodPlaybackResources. The DRM
+// license request requires it.
+type SessionHandoff struct {
+   Token string `json:"sessionHandoffToken"`
+}
+
+func (*SessionHandoff) CachePath() string {
+   return "rosso/amazon/SessionHandoff"
+}
+
 // TokenPair represents the access and refresh tokens returned upon successful
 // registration
 type TokenPair struct {
@@ -494,14 +622,15 @@ func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
          },
       },
       "registration_data": map[string]string{
-         "app_name":      "AIV",
-         "app_version":   "9",
-         "device_model":  "device_model",
-         "device_serial": DeviceID,
-         "device_type":   deviceTypeID,
-         "os_version":    "Android",
-         // if you change deviceID this is required
-         "device_name": fmt.Sprint(time.Now().Unix()),
+         "domain":           DeviceDomain,
+         "device_name":      deviceName(),
+         "app_name":         AppName,
+         "app_version":      AppVersion,
+         "device_model":     DeviceModel,
+         "os_version":       OSVersion,
+         "device_type":      deviceTypeID,
+         "device_serial":    DeviceID,
+         "software_version": SoftwareVersion,
       },
       "requested_token_type": []string{"bearer"},
    }
@@ -515,6 +644,7 @@ func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
    if err != nil {
       return nil, err
    }
+   req.Header.Set("content-type", "application/json")
 
    resp, err := doRequest(req)
    if err != nil {
@@ -665,8 +795,10 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    query := url.Values{}
    query.Set("deviceID", DeviceID)
    query.Set("deviceTypeID", p.DeviceTypeID)
+   query.Set("titleId", p.TitleId)
    req.URL.RawQuery = query.Encode()
    req.Header.Set("Authorization", "Bearer "+p.ActorToken.Token)
+   req.Header.Set("content-type", "application/json")
 
    resp, err := doRequest(req)
    if err != nil {
@@ -679,6 +811,9 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    }
 
    var result struct {
+      Sessionization struct {
+         SessionHandoffToken string `json:"sessionHandoffToken"`
+      } `json:"sessionization"`
       GlobalError struct {
          Code    string `json:"code"`
          Message string `json:"message"`
@@ -706,7 +841,11 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    }
 
    // Return the parent struct holding the playlists
-   return &result.VodPlaylistedPlaybackUrls.Result.PlaybackUrls, nil
+   playbackUrls := result.VodPlaylistedPlaybackUrls.Result.PlaybackUrls
+   playbackUrls.SessionHandoff = &SessionHandoff{
+      Token: result.Sessionization.SessionHandoffToken,
+   }
+   return &playbackUrls, nil
 }
 
 func (*CodePair) CachePath() string {
@@ -715,8 +854,10 @@ func (*CodePair) CachePath() string {
 
 func (c *CodePair) String() string {
    var data strings.Builder
-   data.WriteString("Please navigate to https://amazon.com/gp/video/ontv\n")
+   data.WriteString("Please navigate to https://amazon.com/gp/ontv\n")
    data.WriteString("Enter the following code: ")
    data.WriteString(c.PublicCode)
    return data.String()
 }
+
+// amazon.go marker preserve
