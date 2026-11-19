@@ -5,8 +5,6 @@ import (
    "encoding/json"
    "errors"
    "fmt"
-   "io"
-   "log"
    "net/http"
    "net/url"
    "strings"
@@ -23,165 +21,6 @@ const (
 )
 
 const deviceID = "deviceID"
-
-const hostATVPS = "https://atv-ps.amazon.com"
-
-const hostAmazonAPI = "https://api.amazon.com"
-
-// 1.go marker preserve
-// the wrong DTID will fail the license request. if you change the DTID you
-// need to relog. also if you get a failed license request try provision again.
-// this might be UHD also
-// > amazon-device -dtid A3GTP8TAF8V3YG
-// manufacturer name: Hisense TV
-// model number: HU43K3110FW
-var Devices = []Device{
-   {
-      manufacturer:  "Hisense",
-      model:         "HE55A7000EUWTS",
-      securityLevel: 3000,
-      deviceTypeID:  "A3REWRVYBYPKUM",
-   },
-   {
-      manufacturer:  "Hisense",
-      model:         "HU50A6100UW",
-      securityLevel: 3000,
-      deviceTypeID:  "AAJ692ZPT1X85",
-   },
-   {
-      manufacturer:  "Hisense",
-      model:         "HU32E5600FHWV",
-      securityLevel: 3000,
-      deviceTypeID:  "A2RGJ95OVLR12U",
-   },
-   {
-      manufacturer:  "EXPRESS LUCK TECHNOLOGY LIMITED",
-      model:         "LE-*",
-      securityLevel: 3000,
-      deviceTypeID:  "A3NM0WFSU3DLT5",
-   },
-}
-
-// GetPlayReadyLicense fetches the PlayReady DRM license for the given title.
-func GetPlayReadyLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
-   return fetchDRMLicense("/playback/drm-vod/GetPlayReadyLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
-}
-
-func GetWidevineLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
-   return fetchDRMLicense("/playback/drm-vod/GetWidevineLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
-}
-
-// doRequest wraps the http.Client Do method to log every outgoing request.
-func doRequest(req *http.Request) (*http.Response, error) {
-   log.Println(req.Method, req.URL)
-   client := &http.Client{}
-   return client.Do(req)
-}
-
-// fetchDRMLicense is the shared base function for making DRM requests
-func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
-   payload := map[string]any{
-      "playbackEnvelope": metadata.PlaybackEnvelope,
-      "licenseChallenge": licenseChallenge,
-   }
-   body, err := json.Marshal(payload)
-   if err != nil {
-      return nil, fmt.Errorf("failed to marshal payload: %w", err)
-   }
-
-   req, err := http.NewRequest(http.MethodPost, hostATVPS+path, bytes.NewReader(body))
-   if err != nil {
-      return nil, fmt.Errorf("failed to create request: %w", err)
-   }
-
-   query := url.Values{}
-   query.Set("deviceTypeID", deviceTypeID)
-   query.Set("deviceID", deviceID)
-   req.URL.RawQuery = query.Encode()
-   req.Header.Set("Authorization", "Bearer "+actorToken.Token)
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, fmt.Errorf("request failed: %w", err)
-   }
-   defer resp.Body.Close()
-
-   // Read the body once so we can attempt multiple unmarshals
-   respBytes, err := io.ReadAll(resp.Body)
-   if err != nil {
-      return nil, fmt.Errorf("failed to read response: %w", err)
-   }
-
-   // 1. Try the standard response format (contains licenses or a nested error object)
-   var standardResp struct {
-      WidevineLicense *struct {
-         License []byte `json:"license"`
-      } `json:"widevineLicense"`
-      PlayReadyLicense *struct {
-         License []byte `json:"license"`
-      } `json:"playReadyLicense"`
-      Message *struct {
-         Body *struct {
-            Code    string `json:"code"`
-            Message string `json:"message"`
-         } `json:"body"`
-      } `json:"message"`
-   }
-
-   if err := json.Unmarshal(respBytes, &standardResp); err == nil {
-      if standardResp.Message != nil && standardResp.Message.Body != nil {
-         return nil, fmt.Errorf("API error [%s]: %s", standardResp.Message.Body.Code, standardResp.Message.Body.Message)
-      }
-      if standardResp.WidevineLicense != nil && len(standardResp.WidevineLicense.License) > 0 {
-         return standardResp.WidevineLicense.License, nil
-      }
-      if standardResp.PlayReadyLicense != nil && len(standardResp.PlayReadyLicense.License) > 0 {
-         return standardResp.PlayReadyLicense.License, nil
-      }
-   }
-
-   // 2. If the first unmarshal fails (e.g., "message" is a string causing a type error), try the flat error format
-   var flatErrorResp struct {
-      Code    string `json:"code"`
-      ID      string `json:"id"`
-      Message string `json:"message"`
-   }
-
-   if err := json.Unmarshal(respBytes, &flatErrorResp); err == nil && flatErrorResp.Message != "" {
-      return nil, fmt.Errorf("code: %s, message: %s, id: %s", flatErrorResp.Code, flatErrorResp.Message, flatErrorResp.ID)
-   }
-
-   // 3. Check for standard HTTP errors if no JSON error message was extracted
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   return nil, fmt.Errorf("license not found in response")
-}
-
-func trimURLPath(rawUrl string) (*url.URL, error) {
-   parsedURL, err := url.Parse(rawUrl)
-   if err != nil {
-      return nil, err
-   }
-
-   parts := strings.Split(parsedURL.Path, "/")
-
-   // Handle "/dm/3$..." structure
-   if len(parts) > 4 && parts[1] == "dm" && strings.HasPrefix(parts[2], "3$") {
-      parsedURL.Path = "/" + strings.Join(parts[4:], "/")
-      // Handle "/3$..." structure
-   } else if len(parts) > 3 && strings.HasPrefix(parts[1], "3$") {
-      parsedURL.Path = "/" + strings.Join(parts[3:], "/")
-   }
-
-   return parsedURL, nil
-}
-
-// ActorToken represents an actor-specific access token.
-type ActorToken struct {
-   Token string `json:"token"`
-}
 
 // GetActorToken exchanges the account refresh token and actor ID for an actor-specific access token.
 func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error) {
@@ -241,15 +80,13 @@ func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*A
    return &token, nil
 }
 
-func (*ActorToken) CachePath() string {
-   return "rosso/amazon/ActorToken"
-}
-
 // CodePair represents the public and private codes used for device linking.
 type CodePair struct {
    PublicCode  string `json:"public_code"`
    PrivateCode string `json:"private_code"`
 }
+
+///
 
 // CreateCodePair requests a public and private code pair for device linking.
 func CreateCodePair(deviceTypeID string) (*CodePair, error) {
@@ -307,11 +144,19 @@ func (c *CodePair) String() string {
    return data.String()
 }
 
+// Device represents the metadata for a supported hardware device.
 type Device struct {
-   manufacturer  string
-   model         string
-   securityLevel int
-   deviceTypeID  string
+   Manufacturer  string
+   Model         string
+   SecurityLevel int
+   DeviceTypeID  string
+}
+
+// EntitlementMessaging holds the "entitlementMessaging" object from the resource.
+type EntitlementMessaging struct {
+   EntitlementMessageSlotDetail struct {
+      Message string `json:"message"`
+   } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
 }
 
 // PlaybackExperienceMetadata contains the envelope and related data needed for playback requests.
@@ -447,7 +292,7 @@ type Resource struct {
          }
       } `json:"offerCards"`
    } `json:"primaryActions"`
-   EntitlementMessaging entitlementMessaging `json:"entitlementMessaging"`
+   EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
 }
 
 // GetItemDetails uses the actor access token to get metadata for a specific title.
@@ -796,9 +641,6 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    return &playbackUrls, nil
 }
 
-// entitlementMessaging holds the "entitlementMessaging" object from the resource.
-type entitlementMessaging struct {
-   EntitlementMessageSlotDetail struct {
-      Message string `json:"message"`
-   } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
+func (*ActorToken) CachePath() string {
+   return "rosso/amazon/ActorToken"
 }
