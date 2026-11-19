@@ -191,6 +191,12 @@ func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*A
    return &token, nil
 }
 
+// CodePair represents the public and private codes used for device linking.
+type CodePair struct {
+   PublicCode  string `json:"public_code"`
+   PrivateCode string `json:"private_code"`
+}
+
 // EntitlementMessaging holds the "entitlementMessaging" object from the resource.
 type EntitlementMessaging struct {
    EntitlementMessageSlotDetail struct {
@@ -235,8 +241,8 @@ func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error)
    query := url.Values{}
    query.Set("deviceTypeID", deviceTypeID)
    query.Set("deviceID", DeviceID)
-   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
    req.URL.RawQuery = query.Encode()
+   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
 
    resp, err := doRequest(req)
    if err != nil {
@@ -364,6 +370,130 @@ func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource,
 type TokenPair struct {
    AccessToken  string `json:"access_token"`
    RefreshToken string `json:"refresh_token"`
+}
+
+// PollRegister attempts to register the device. This should typically be called in a loop
+// until it returns success (after the user links the device on the web).
+func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
+   payload := map[string]any{
+      "auth_data": map[string]any{
+         "code_pair": map[string]string{
+            "public_code":  codes.PublicCode,
+            "private_code": codes.PrivateCode,
+         },
+      },
+      "registration_data": map[string]string{
+         "domain":           DeviceDomain,
+         "device_name":      deviceName(),
+         "app_name":         AppName,
+         "app_version":      AppVersion,
+         "device_model":     DeviceModel,
+         "os_version":       OSVersion,
+         "device_type":      deviceTypeID,
+         "device_serial":    DeviceID,
+         "software_version": SoftwareVersion,
+      },
+      "requested_token_type": []string{"bearer"},
+   }
+   body, err := json.Marshal(payload)
+   if err != nil {
+      return nil, err
+   }
+   req, err := http.NewRequest(
+      "POST", HostAmazonAPI+"/auth/register", bytes.NewBuffer(body),
+   )
+   if err != nil {
+      return nil, err
+   }
+   req.Header.Set("content-type", "application/json")
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+   var result struct {
+      Response struct {
+         Success struct {
+            Tokens struct {
+               Bearer TokenPair `json:"bearer"`
+            } `json:"tokens"`
+         } `json:"success"`
+         Error struct {
+            Code    string `json:"code"`
+            Message string `json:"message"`
+         } `json:"error"`
+      } `json:"response"`
+   }
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+   if result.Response.Error.Code != "" {
+      return nil, fmt.Errorf("amazon API error: %s - %s", result.Response.Error.Code, result.Response.Error.Message)
+   }
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+   bearer := result.Response.Success.Tokens.Bearer
+   return &bearer, nil
+}
+
+// Refresh exchanges the existing refresh token for a new access token
+// using the /auth/token endpoint, mutating the TokenPair in-place.
+func (t *TokenPair) Refresh() error {
+   if t == nil || t.RefreshToken == "" {
+      return fmt.Errorf("invalid token pair or missing refresh token")
+   }
+
+   payload := map[string]string{
+      "app_name":             "AIV",
+      "requested_token_type": "access_token",
+      "source_token":         t.RefreshToken,
+      "source_token_type":    "refresh_token",
+   }
+   body, err := json.Marshal(payload)
+   if err != nil {
+      return err
+   }
+   req, err := http.NewRequest(
+      "POST", HostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
+   )
+   if err != nil {
+      return err
+   }
+
+   req.Header.Set("content-type", "application/json")
+   resp, err := doRequest(req)
+   if err != nil {
+      return err
+   }
+   defer resp.Body.Close()
+
+   // Decode into an anonymous struct handling the expected Python response keys
+   var result struct {
+      AccessToken string `json:"access_token"`
+      TokenType   string `json:"token_type"`
+      Error       string `json:"error"`
+      ErrorDesc   string `json:"error_description"`
+   }
+
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return err
+   }
+
+   // Handle API errors as seen in the Python code
+   if result.Error != "" {
+      return fmt.Errorf("failed to refresh device token: %s [%s]", result.ErrorDesc, result.Error)
+   }
+
+   if result.TokenType != "bearer" {
+      return fmt.Errorf("unexpected returned refreshed token type: %s", result.TokenType)
+   }
+
+   // Mutate the struct in-place with the new access token
+   t.AccessToken = result.AccessToken
+
+   return nil
 }
 
 // VodPlaybackParams holds the configuration for fetching playback resources.
