@@ -1,43 +1,74 @@
-// 1.go marker preserve
 package amazon
 
 import (
    "bytes"
    "encoding/json"
+   "errors"
    "fmt"
    "io"
    "log"
    "net/http"
    "net/url"
+   "strings"
+   "time"
 )
 
 const (
-   AppName         = "AIV"
-   AppVersion      = "3.12.0"
-   DeviceModel     = "sdk_gphone_x86"
-   OSVersion       = "Android"
-   SoftwareVersion = "999"
-   DeviceDomain    = "Device"
+   appName         = "AIV"
+   appVersion      = "3.12.0"
+   deviceModel     = "sdk_gphone_x86"
+   osVersion       = "Android"
+   softwareVersion = "999"
+   deviceDomain    = "Device"
 )
 
-const DeviceID = "deviceID"
+const deviceID = "deviceID"
 
-const HostATVPS = "https://atv-ps.amazon.com"
+const hostATVPS = "https://atv-ps.amazon.com"
 
-const HostAmazonAPI = "https://api.amazon.com"
+const hostAmazonAPI = "https://api.amazon.com"
+
+// 1.go marker preserve
+// the wrong DTID will fail the license request. if you change the DTID you
+// need to relog. also if you get a failed license request try provision again.
+// this might be UHD also
+// > amazon-device -dtid A3GTP8TAF8V3YG
+// manufacturer name: Hisense TV
+// model number: HU43K3110FW
+var Devices = []Device{
+   {
+      manufacturer:  "Hisense",
+      model:         "HE55A7000EUWTS",
+      securityLevel: 3000,
+      deviceTypeID:  "A3REWRVYBYPKUM",
+   },
+   {
+      manufacturer:  "Hisense",
+      model:         "HU50A6100UW",
+      securityLevel: 3000,
+      deviceTypeID:  "AAJ692ZPT1X85",
+   },
+   {
+      manufacturer:  "Hisense",
+      model:         "HU32E5600FHWV",
+      securityLevel: 3000,
+      deviceTypeID:  "A2RGJ95OVLR12U",
+   },
+   {
+      manufacturer:  "EXPRESS LUCK TECHNOLOGY LIMITED",
+      model:         "LE-*",
+      securityLevel: 3000,
+      deviceTypeID:  "A3NM0WFSU3DLT5",
+   },
+}
 
 // GetPlayReadyLicense fetches the PlayReady DRM license for the given title.
 func GetPlayReadyLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
    return fetchDRMLicense("/playback/drm-vod/GetPlayReadyLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
 }
 
-// GetWidevineLicense requests a Widevine DRM license from the Amazon endpoint.
 func GetWidevineLicense(actorToken *ActorToken, metadata *PlaybackExperienceMetadata, licenseChallenge []byte, deviceTypeID string) ([]byte, error) {
    return fetchDRMLicense("/playback/drm-vod/GetWidevineLicense", actorToken, metadata, licenseChallenge, deviceTypeID)
-}
-
-func deviceName() string {
-   return fmt.Sprintf("%%FIRST_NAME%%'s%%DUPE_STRATEGY_1st%% %s", DeviceModel)
 }
 
 // doRequest wraps the http.Client Do method to log every outgoing request.
@@ -58,14 +89,14 @@ func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExpe
       return nil, fmt.Errorf("failed to marshal payload: %w", err)
    }
 
-   req, err := http.NewRequest(http.MethodPost, HostATVPS+path, bytes.NewReader(body))
+   req, err := http.NewRequest(http.MethodPost, hostATVPS+path, bytes.NewReader(body))
    if err != nil {
       return nil, fmt.Errorf("failed to create request: %w", err)
    }
 
    query := url.Values{}
    query.Set("deviceTypeID", deviceTypeID)
-   query.Set("deviceID", DeviceID)
+   query.Set("deviceID", deviceID)
    req.URL.RawQuery = query.Encode()
    req.Header.Set("Authorization", "Bearer "+actorToken.Token)
 
@@ -128,17 +159,36 @@ func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExpe
    return nil, fmt.Errorf("license not found in response")
 }
 
+func trimURLPath(rawUrl string) (*url.URL, error) {
+   parsedURL, err := url.Parse(rawUrl)
+   if err != nil {
+      return nil, err
+   }
+
+   parts := strings.Split(parsedURL.Path, "/")
+
+   // Handle "/dm/3$..." structure
+   if len(parts) > 4 && parts[1] == "dm" && strings.HasPrefix(parts[2], "3$") {
+      parsedURL.Path = "/" + strings.Join(parts[4:], "/")
+      // Handle "/3$..." structure
+   } else if len(parts) > 3 && strings.HasPrefix(parts[1], "3$") {
+      parsedURL.Path = "/" + strings.Join(parts[3:], "/")
+   }
+
+   return parsedURL, nil
+}
+
 // ActorToken represents an actor-specific access token.
 type ActorToken struct {
    Token string `json:"token"`
 }
 
 // GetActorToken exchanges the account refresh token and actor ID for an actor-specific access token.
-func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error) {
+func GetActorToken(tokens *TokenPair, profile *profile, deviceTypeID string) (*ActorToken, error) {
 
    payload := map[string]any{
       "actor_id":             profile.ProfileID,
-      "app_name":             AppName,
+      "app_name":             appName,
       "requested_token_type": "actor_access_token",
       "source_token_type":    "refresh_token",
       "source_device_tokens": []any{
@@ -155,7 +205,7 @@ func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*A
       return nil, err
    }
    req, err := http.NewRequest(
-      "POST", HostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
+      "POST", hostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
    )
    if err != nil {
       return nil, err
@@ -191,17 +241,77 @@ func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*A
    return &token, nil
 }
 
+func (*ActorToken) CachePath() string {
+   return "rosso/amazon/ActorToken"
+}
+
 // CodePair represents the public and private codes used for device linking.
 type CodePair struct {
    PublicCode  string `json:"public_code"`
    PrivateCode string `json:"private_code"`
 }
 
-// EntitlementMessaging holds the "entitlementMessaging" object from the resource.
-type EntitlementMessaging struct {
-   EntitlementMessageSlotDetail struct {
-      Message string `json:"message"`
-   } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
+// CreateCodePair requests a public and private code pair for device linking.
+func CreateCodePair(deviceTypeID string) (*CodePair, error) {
+   if deviceTypeID == "" {
+      return nil, errors.New("deviceTypeID cannot be empty")
+   }
+
+   payload := map[string]any{
+      "code_data": map[string]string{
+         "domain":        deviceDomain,
+         "device_type":   deviceTypeID,
+         "device_serial": deviceID,
+      },
+   }
+   body, err := json.MarshalIndent(payload, "", " ")
+   if err != nil {
+      return nil, err
+   }
+   req, err := http.NewRequest(
+      "POST", hostAmazonAPI+"/auth/create/codepair",
+      bytes.NewBuffer(body),
+   )
+   if err != nil {
+      return nil, err
+   }
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // Decode directly into our new struct type
+   var result CodePair
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+
+   return &result, nil
+}
+
+func (*CodePair) CachePath() string {
+   return "rosso/amazon/CodePair"
+}
+
+func (c *CodePair) String() string {
+   var data strings.Builder
+   data.WriteString("Please navigate to https://amazon.com/gp/video/ontv\n")
+   data.WriteString("Enter the following code: ")
+   data.WriteString(c.PublicCode)
+   return data.String()
+}
+
+type Device struct {
+   manufacturer  string
+   model         string
+   securityLevel int
+   deviceTypeID  string
 }
 
 // PlaybackExperienceMetadata contains the envelope and related data needed for playback requests.
@@ -211,158 +321,8 @@ type PlaybackExperienceMetadata struct {
    CorrelationId    string `json:"correlationId"`
 }
 
-// PlaybackUrls is the parent holding the intra-title playlists.
-type PlaybackUrls struct {
-   IntraTitlePlaylist []struct {
-      Type string `json:"type"`
-      Urls []struct {
-         Url string `json:"url"`
-         Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
-      } `json:"urls"`
-   } `json:"intraTitlePlaylist"`
-}
-
-// Profile represents an Amazon actor profile.
-type Profile struct {
-   ProfileID        string `json:"profileId"`
-   IsDefaultProfile bool   `json:"isDefaultProfile"`
-}
-
-// GetPrimaryProfile uses the account access token to fetch available profiles and returns the primary profile.
-func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error) {
-   req, err := http.NewRequest(
-      "GET",
-      HostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/profiles/profileSelection",
-      nil,
-   )
-   if err != nil {
-      return nil, err
-   }
-   query := url.Values{}
-   query.Set("deviceTypeID", deviceTypeID)
-   query.Set("deviceID", DeviceID)
-   req.URL.RawQuery = query.Encode()
-   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   // Embed our new Profile struct alongside the error Message struct
-   var result struct {
-      Resource struct {
-         Profiles []Profile `json:"profiles"`
-      } `json:"resource"`
-      Message *struct {
-         Body *struct {
-            Code    string `json:"code"`
-            Message string `json:"message"`
-         } `json:"body"`
-      } `json:"message"`
-   }
-
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, fmt.Errorf("failed to decode response (status %d): %w", resp.StatusCode, err)
-   }
-
-   // 1. Check for the structured JSON API error
-   if result.Message != nil && result.Message.Body != nil {
-      return nil, fmt.Errorf("API error [%s]: %s", result.Message.Body.Code, result.Message.Body.Message)
-   }
-
-   // 2. Check for standard HTTP errors if no JSON error message was provided
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   // 3. Extract and return the primary profile
-   for _, profile := range result.Resource.Profiles {
-      if profile.IsDefaultProfile {
-         return &profile, nil
-      }
-   }
-
-   return nil, fmt.Errorf("default profile not found")
-}
-
-// Resource represents the "resource" object returned from the detailsPageATF endpoint.
-type Resource struct {
-   Actions []struct {
-      Metadata struct {
-         PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
-      } `json:"metadata"`
-   } `json:"actions"`
-   ApplyHdr       bool `json:"applyHdr"`
-   ApplyUhd       bool `json:"applyUhd"`
-   PrimaryActions []struct {
-      NavigationAction struct {
-         PlaybackMetadata struct {
-            PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
-         } `json:"playbackMetadata"`
-      } `json:"navigationAction"`
-      OfferCards []struct {
-         OfferCardDecoration struct {
-            TransactionDetail []struct {
-               Text string
-            }
-         }
-      } `json:"offerCards"`
-   } `json:"primaryActions"`
-   EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
-}
-
-// GetItemDetails uses the actor access token to get metadata for a specific title.
-// It explicitly passes UI schema flags to ensure the server returns the PlaybackEnvelope.
-func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource, error) {
-   req, err := http.NewRequest(
-      "GET",
-      HostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/detailsPage/detailsPageATF",
-      nil,
-   )
-   if err != nil {
-      return nil, err
-   }
-   query := url.Values{}
-   query.Set("itemId", titleId)
-   query.Set("presentationScheme", "android-tv-react")
-   // Device parameters
-   query.Set("deviceTypeID", deviceTypeID)
-   query.Set("deviceID", DeviceID)
-
-   if token != nil {
-      // Critical UI and Feature flags to force the V2/V3 BuyBox response with
-      // PlaybackEnvelope
-      query.Set("roles", "playback-envelope-supported")
-      // you can get the envelope without this, but it will be trailer:
-      // resource.secondaryActions[0].presentation.label = "Watch trailer"
-      req.Header.Set("authorization", "Bearer "+token.Token)
-   } else {
-      query.Add("firmware", "")
-      query.Add("roles", "prime-offer-supported,svod-supported,tvod-supported")
-      query.Add("clientFeatures", "EnableBuyBoxV2")
-   }
-   req.URL.RawQuery = query.Encode()
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   // Embed our new Resource struct into the anonymous decoder struct
-   var result struct {
-      Resource Resource `json:"resource"`
-   }
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, err
-   }
-   return &result.Resource, nil
+func (*PlaybackExperienceMetadata) CachePath() string {
+   return "rosso/amazon/PlaybackExperienceMetadata"
 }
 
 // TokenPair represents the access and refresh tokens returned upon successful
@@ -375,6 +335,7 @@ type TokenPair struct {
 // PollRegister attempts to register the device. This should typically be called in a loop
 // until it returns success (after the user links the device on the web).
 func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
+
    payload := map[string]any{
       "auth_data": map[string]any{
          "code_pair": map[string]string{
@@ -383,15 +344,14 @@ func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
          },
       },
       "registration_data": map[string]string{
-         "domain":           DeviceDomain,
-         "device_name":      deviceName(),
-         "app_name":         AppName,
-         "app_version":      AppVersion,
-         "device_model":     DeviceModel,
-         "os_version":       OSVersion,
-         "device_type":      deviceTypeID,
-         "device_serial":    DeviceID,
-         "software_version": SoftwareVersion,
+         "app_name":      appName,
+         "app_version":   appVersion,
+         "device_model":  deviceModel,
+         "device_serial": deviceID,
+         "device_type":   deviceTypeID,
+         "os_version":    osVersion,
+         // if you change deviceID this is required
+         "device_name": fmt.Sprint(time.Now().Unix()),
       },
       "requested_token_type": []string{"bearer"},
    }
@@ -400,12 +360,11 @@ func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
       return nil, err
    }
    req, err := http.NewRequest(
-      "POST", HostAmazonAPI+"/auth/register", bytes.NewBuffer(body),
+      "POST", hostAmazonAPI+"/auth/register", bytes.NewBuffer(body),
    )
    if err != nil {
       return nil, err
    }
-   req.Header.Set("content-type", "application/json")
 
    resp, err := doRequest(req)
    if err != nil {
@@ -438,6 +397,10 @@ func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
    return &bearer, nil
 }
 
+func (*TokenPair) CachePath() string {
+   return "rosso/amazon/TokenPair"
+}
+
 // Refresh exchanges the existing refresh token for a new access token
 // using the /auth/token endpoint, mutating the TokenPair in-place.
 func (t *TokenPair) Refresh() error {
@@ -456,7 +419,7 @@ func (t *TokenPair) Refresh() error {
       return err
    }
    req, err := http.NewRequest(
-      "POST", HostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
+      "POST", hostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
    )
    if err != nil {
       return err
@@ -510,7 +473,7 @@ type VodPlaybackParams struct {
 }
 
 // Fetch requests the final MPD resources for playback from Amazon's API.
-func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
+func (p *VodPlaybackParams) Fetch() (*playbackUrls, error) {
    if p == nil {
       return nil, fmt.Errorf("VodPlaybackParams cannot be nil")
    }
@@ -543,13 +506,13 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    if err != nil {
       return nil, err
    }
-   urlStr := HostATVPS + "/playback/prs/GetVodPlaybackResources"
+   urlStr := hostATVPS + "/playback/prs/GetVodPlaybackResources"
    req, err := http.NewRequest("POST", urlStr, bytes.NewReader(body))
    if err != nil {
       return nil, err
    }
    query := url.Values{}
-   query.Set("deviceID", DeviceID)
+   query.Set("deviceID", deviceID)
    query.Set("deviceTypeID", p.DeviceTypeID)
 
    req.URL.RawQuery = query.Encode()
@@ -572,7 +535,7 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
       } `json:"globalError"`
       VodPlaylistedPlaybackUrls struct {
          Result struct {
-            PlaybackUrls PlaybackUrls `json:"playbackUrls"`
+            PlaybackUrls playbackUrls `json:"playbackUrls"`
          } `json:"result"`
          Error struct {
             Message string `json:"message"`
@@ -597,4 +560,245 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    return &playbackUrls, nil
 }
 
-// 1.go marker preserve
+// entitlementMessaging holds the "entitlementMessaging" object from the resource.
+type entitlementMessaging struct {
+   EntitlementMessageSlotDetail struct {
+      Message string `json:"message"`
+   } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
+}
+
+// playbackUrls is the parent holding the intra-title playlists.
+type playbackUrls struct {
+   IntraTitlePlaylist []struct {
+      Type string `json:"type"`
+      Urls []struct {
+         Url string `json:"url"`
+         Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
+      } `json:"urls"`
+   } `json:"intraTitlePlaylist"`
+}
+
+// Clean extracts the Akamai MPD URL from the main playlist and sanitizes its path.
+// Returns an error if the Main playlist or Akamai CDN is not found.
+func (p *playbackUrls) Clean() (*url.URL, error) {
+   for _, playlist := range p.IntraTitlePlaylist {
+      if playlist.Type == "Main" {
+         if len(playlist.Urls) == 0 {
+            return nil, fmt.Errorf("no urls found in main playlist")
+         }
+
+         // Require Akamai to avoid the 30MB Cloudfront/Amazon MPD bloat
+         for _, u := range playlist.Urls {
+            if u.Cdn == "akamai" {
+               return trimURLPath(u.Url)
+            }
+         }
+
+         return nil, fmt.Errorf("akamai cdn not found in main playlist")
+      }
+   }
+
+   return nil, fmt.Errorf("main playlist not found in response")
+}
+
+// profile represents an Amazon actor profile.
+type profile struct {
+   ProfileID        string `json:"profileId"`
+   IsDefaultProfile bool   `json:"isDefaultProfile"`
+}
+
+// GetPrimaryProfile uses the account access token to fetch available profiles and returns the primary profile.
+func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*profile, error) {
+   req, err := http.NewRequest(
+      "GET",
+      hostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/profiles/profileSelection",
+      nil,
+   )
+   if err != nil {
+      return nil, err
+   }
+   query := url.Values{}
+   query.Set("deviceTypeID", deviceTypeID)
+   query.Set("deviceID", deviceID)
+   req.URL.RawQuery = query.Encode()
+   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   // Embed our new profile struct alongside the error Message struct
+   var result struct {
+      Resource struct {
+         Profiles []profile `json:"profiles"`
+      } `json:"resource"`
+      Message *struct {
+         Body *struct {
+            Code    string `json:"code"`
+            Message string `json:"message"`
+         } `json:"body"`
+      } `json:"message"`
+   }
+
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, fmt.Errorf("failed to decode response (status %d): %w", resp.StatusCode, err)
+   }
+
+   // 1. Check for the structured JSON API error
+   if result.Message != nil && result.Message.Body != nil {
+      return nil, fmt.Errorf("API error [%s]: %s", result.Message.Body.Code, result.Message.Body.Message)
+   }
+
+   // 2. Check for standard HTTP errors if no JSON error message was provided
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // 3. Extract and return the primary profile
+   for _, p := range result.Resource.Profiles {
+      if p.IsDefaultProfile {
+         return &p, nil
+      }
+   }
+
+   return nil, fmt.Errorf("default profile not found")
+}
+
+// resource represents the "resource" object returned from the detailsPageATF endpoint.
+type resource struct {
+   Actions []struct {
+      Metadata struct {
+         PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
+      } `json:"metadata"`
+   } `json:"actions"`
+   ApplyHdr       bool `json:"applyHdr"`
+   ApplyUhd       bool `json:"applyUhd"`
+   PrimaryActions []struct {
+      NavigationAction struct {
+         PlaybackMetadata struct {
+            PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
+         } `json:"playbackMetadata"`
+      } `json:"navigationAction"`
+      OfferCards []struct {
+         OfferCardDecoration struct {
+            TransactionDetail []struct {
+               Text string
+            }
+         }
+      } `json:"offerCards"`
+   } `json:"primaryActions"`
+   EntitlementMessaging entitlementMessaging `json:"entitlementMessaging"`
+}
+
+// GetItemDetails uses the actor access token to get metadata for a specific title.
+// It explicitly passes UI schema flags to ensure the server returns the PlaybackEnvelope.
+func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*resource, error) {
+   req, err := http.NewRequest(
+      "GET",
+      hostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/detailsPage/detailsPageATF",
+      nil,
+   )
+   if err != nil {
+      return nil, err
+   }
+   query := url.Values{}
+   query.Set("itemId", titleId)
+   query.Set("presentationScheme", "android-tv-react")
+   // Device parameters
+   query.Set("deviceTypeID", deviceTypeID)
+   query.Set("deviceID", deviceID)
+
+   if token != nil {
+      // Critical UI and Feature flags to force the V2/V3 BuyBox response with
+      // PlaybackEnvelope
+      query.Set("roles", "playback-envelope-supported")
+      // you can get the envelope without this, but it will be trailer:
+      // resource.secondaryActions[0].presentation.label = "Watch trailer"
+      req.Header.Set("authorization", "Bearer "+token.Token)
+   } else {
+      query.Add("firmware", "")
+      query.Add("roles", "prime-offer-supported,svod-supported,tvod-supported")
+      query.Add("clientFeatures", "EnableBuyBoxV2")
+   }
+   req.URL.RawQuery = query.Encode()
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // Embed our new resource struct into the anonymous decoder struct
+   var result struct {
+      Resource resource `json:"resource"`
+   }
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+   return &result.Resource, nil
+}
+
+// GetPlaybackExperienceMetadata returns the first playback envelope found in the
+// resource: the legacy "actions" list first, then the modern "primaryActions"
+// list.
+func (r *resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
+   for _, action := range r.Actions {
+      pem := action.Metadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   for _, action := range r.PrimaryActions {
+      pem := action.NavigationAction.PlaybackMetadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   return nil, fmt.Errorf("playbackExperienceMetadata not found in actions or primaryActions")
+}
+
+func (r *resource) String() string {
+   var data strings.Builder
+   if r.ApplyHdr {
+      data.WriteString("HDR: true")
+   } else {
+      data.WriteString("HDR: false")
+   }
+   data.WriteByte('\n')
+   if r.ApplyUhd {
+      data.WriteString("UHD: true")
+   } else {
+      data.WriteString("UHD: false")
+   }
+
+   for _, pa := range r.PrimaryActions {
+      for _, oc := range pa.OfferCards {
+         details := oc.OfferCardDecoration.TransactionDetail
+         if len(details) == 0 {
+            continue
+         }
+         data.WriteByte('\n')
+         data.WriteString("offer card: ")
+         for j, td := range details {
+            if j > 0 {
+               data.WriteByte(' ')
+            }
+            data.WriteString(td.Text)
+         }
+      }
+   }
+
+   if r.EntitlementMessaging.EntitlementMessageSlotDetail.Message != "" {
+      data.WriteByte('\n')
+      data.WriteString("entitlement message: ")
+      data.WriteString(r.EntitlementMessaging.EntitlementMessageSlotDetail.Message)
+   }
+
+   return data.String()
+}

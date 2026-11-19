@@ -1,4 +1,0 @@
-
-1 func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error)
-
-2 func CreateCodePair(deviceTypeID string) (*CodePair, error)
