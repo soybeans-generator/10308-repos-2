@@ -3,13 +3,17 @@ package amazon
 import (
    "bytes"
    "encoding/json"
+   "errors"
    "fmt"
    "io"
    "log"
    "net/http"
    "net/url"
    "strings"
+   "time"
 )
+
+const deviceID = "deviceID"
 
 const hostATVPS = "https://atv-ps.amazon.com"
 
@@ -236,6 +240,50 @@ func (*ActorToken) CachePath() string {
 type CodePair struct {
    PublicCode  string `json:"public_code"`
    PrivateCode string `json:"private_code"`
+}
+
+// CreateCodePair requests a public and private code pair for device linking.
+func CreateCodePair(deviceTypeID string) (*CodePair, error) {
+   if deviceTypeID == "" {
+      return nil, errors.New("deviceTypeID cannot be empty")
+   }
+
+   payload := map[string]any{
+      "code_data": map[string]string{
+         "device_type":   deviceTypeID,
+         "device_serial": deviceID,
+         "domain":        "Device",
+      },
+   }
+   body, err := json.MarshalIndent(payload, "", " ")
+   if err != nil {
+      return nil, err
+   }
+   req, err := http.NewRequest(
+      "POST", hostAmazonAPI+"/auth/create/codepair",
+      bytes.NewBuffer(body),
+   )
+   if err != nil {
+      return nil, err
+   }
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // Decode directly into our new struct type
+   var result CodePair
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+
+   return &result, nil
 }
 
 func (*CodePair) CachePath() string {
@@ -465,6 +513,71 @@ func (r *Resource) String() string {
 type TokenPair struct {
    AccessToken  string `json:"access_token"`
    RefreshToken string `json:"refresh_token"`
+}
+
+// PollRegister attempts to register the device. This should typically be called in a loop
+// until it returns success (after the user links the device on the web).
+func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
+
+   payload := map[string]any{
+      "auth_data": map[string]any{
+         "code_pair": map[string]string{
+            "public_code":  codes.PublicCode,
+            "private_code": codes.PrivateCode,
+         },
+      },
+      "registration_data": map[string]string{
+         "app_name":      appName,
+         "app_version":   appVersion,
+         "device_model":  deviceModel,
+         "device_serial": deviceID,
+         "device_type":   deviceTypeID,
+         "os_version":    osVersion,
+         // if you change deviceID this is required
+         "device_name": fmt.Sprint(time.Now().Unix()),
+      },
+      "requested_token_type": []string{"bearer"},
+   }
+   body, err := json.Marshal(payload)
+   if err != nil {
+      return nil, err
+   }
+   req, err := http.NewRequest(
+      "POST", hostAmazonAPI+"/auth/register", bytes.NewBuffer(body),
+   )
+   if err != nil {
+      return nil, err
+   }
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+   var result struct {
+      Response struct {
+         Success struct {
+            Tokens struct {
+               Bearer TokenPair `json:"bearer"`
+            } `json:"tokens"`
+         } `json:"success"`
+         Error struct {
+            Code    string `json:"code"`
+            Message string `json:"message"`
+         } `json:"error"`
+      } `json:"response"`
+   }
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+   if result.Response.Error.Code != "" {
+      return nil, fmt.Errorf("amazon API error: %s - %s", result.Response.Error.Code, result.Response.Error.Message)
+   }
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+   bearer := result.Response.Success.Tokens.Bearer
+   return &bearer, nil
 }
 
 func (*TokenPair) CachePath() string {
