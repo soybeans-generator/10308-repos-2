@@ -23,6 +23,7 @@ var defaultExcludeTypes = []string{
    "application/x-font-ttf",
    "application/x-javascript",
    "application/x-protobuf",
+   "application/x-tar",
    "application/xml",
    "binary/octet-stream",
    "font/ttf",
