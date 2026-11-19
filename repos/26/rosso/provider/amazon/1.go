@@ -169,3 +169,145 @@ func trimURLPath(rawUrl string) (*url.URL, error) {
 type ActorToken struct {
    Token string `json:"token"`
 }
+
+// GetActorToken exchanges the account refresh token and actor ID for an actor-specific access token.
+func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*ActorToken, error) {
+
+   payload := map[string]any{
+      "actor_id":             profile.ProfileID,
+      "app_name":             appName,
+      "requested_token_type": "actor_access_token",
+      "source_token_type":    "refresh_token",
+      "source_device_tokens": []any{
+         map[string]any{
+            "device_type": deviceTypeID,
+            "account_refresh_token": map[string]string{
+               "token": tokens.RefreshToken,
+            },
+         },
+      },
+   }
+   body, err := json.Marshal(payload)
+   if err != nil {
+      return nil, err
+   }
+   req, err := http.NewRequest(
+      "POST", hostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
+   )
+   if err != nil {
+      return nil, err
+   }
+   req.Header.Set("content-type", "application/json")
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // Embed our new ActorToken struct into the anonymous decoder struct
+   var result struct {
+      DeviceTokens []struct {
+         ActorAccessToken ActorToken `json:"actor_access_token"`
+      } `json:"device_tokens"`
+   }
+
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+
+   if len(result.DeviceTokens) == 0 {
+      return nil, fmt.Errorf("no device tokens returned")
+   }
+
+   token := result.DeviceTokens[0].ActorAccessToken
+   return &token, nil
+}
+
+// CodePair represents the public and private codes used for device linking.
+type CodePair struct {
+   PublicCode  string `json:"public_code"`
+   PrivateCode string `json:"private_code"`
+}
+
+func (*CodePair) CachePath() string {
+   return "rosso/amazon/CodePair"
+}
+
+func (c *CodePair) String() string {
+   var data strings.Builder
+   data.WriteString("Please navigate to https://amazon.com/gp/video/ontv\n")
+   data.WriteString("Enter the following code: ")
+   data.WriteString(c.PublicCode)
+   return data.String()
+}
+
+// Device represents the metadata for a supported hardware device.
+type Device struct {
+   Manufacturer  string
+   Model         string
+   SecurityLevel int
+   DeviceTypeID  string
+}
+
+// EntitlementMessaging holds the "entitlementMessaging" object from the resource.
+type EntitlementMessaging struct {
+   EntitlementMessageSlotDetail struct {
+      Message string `json:"message"`
+   } `json:"ENTITLEMENT_MESSAGE_SLOT_DETAIL"`
+}
+
+// PlaybackExperienceMetadata contains the envelope and related data needed for playback requests.
+type PlaybackExperienceMetadata struct {
+   PlaybackEnvelope string `json:"playbackEnvelope"`
+   ExpiryTime       int64  `json:"expiryTime"`
+   CorrelationId    string `json:"correlationId"`
+}
+
+func (*PlaybackExperienceMetadata) CachePath() string {
+   return "rosso/amazon/PlaybackExperienceMetadata"
+}
+
+// PlaybackUrls is the parent holding the intra-title playlists.
+type PlaybackUrls struct {
+   IntraTitlePlaylist []struct {
+      Type string `json:"type"`
+      Urls []struct {
+         Url string `json:"url"`
+         Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
+      } `json:"urls"`
+   } `json:"intraTitlePlaylist"`
+}
+
+// Clean extracts the Akamai MPD URL from the main playlist and sanitizes its path.
+// Returns an error if the Main playlist or Akamai CDN is not found.
+func (p *PlaybackUrls) Clean() (*url.URL, error) {
+   for _, playlist := range p.IntraTitlePlaylist {
+      if playlist.Type == "Main" {
+         if len(playlist.Urls) == 0 {
+            return nil, fmt.Errorf("no urls found in main playlist")
+         }
+
+         // Require Akamai to avoid the 30MB Cloudfront/Amazon MPD bloat
+         for _, u := range playlist.Urls {
+            if u.Cdn == "akamai" {
+               return trimURLPath(u.Url)
+            }
+         }
+
+         return nil, fmt.Errorf("akamai cdn not found in main playlist")
+      }
+   }
+
+   return nil, fmt.Errorf("main playlist not found in response")
+}
+
+// Profile represents an Amazon actor profile.
+type Profile struct {
+   ProfileID        string `json:"profileId"`
+   IsDefaultProfile bool   `json:"isDefaultProfile"`
+}
