@@ -109,6 +109,7 @@ func (c *client) do_complete_login() error {
    }
    return c.cache.Encode(tokenPair)
 }
+
 func (c *client) do_dash_id() error {
    var (
       actor_token amazon.ActorToken
