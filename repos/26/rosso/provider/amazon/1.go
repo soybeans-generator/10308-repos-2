@@ -228,6 +228,10 @@ func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*A
    return &token, nil
 }
 
+func (*ActorToken) CachePath() string {
+   return "rosso/amazon/ActorToken"
+}
+
 // CodePair represents the public and private codes used for device linking.
 type CodePair struct {
    PublicCode  string `json:"public_code"`
@@ -395,4 +399,145 @@ type Resource struct {
       } `json:"offerCards"`
    } `json:"primaryActions"`
    EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
+}
+
+// GetPlaybackExperienceMetadata returns the first playback envelope found in the
+// resource: the legacy "actions" list first, then the modern "primaryActions"
+// list.
+func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
+   for _, action := range r.Actions {
+      pem := action.Metadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   for _, action := range r.PrimaryActions {
+      pem := action.NavigationAction.PlaybackMetadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   return nil, fmt.Errorf("playbackExperienceMetadata not found in actions or primaryActions")
+}
+
+func (r *Resource) String() string {
+   var data strings.Builder
+   if r.ApplyHdr {
+      data.WriteString("HDR: true")
+   } else {
+      data.WriteString("HDR: false")
+   }
+   data.WriteByte('\n')
+   if r.ApplyUhd {
+      data.WriteString("UHD: true")
+   } else {
+      data.WriteString("UHD: false")
+   }
+
+   for _, pa := range r.PrimaryActions {
+      for _, oc := range pa.OfferCards {
+         details := oc.OfferCardDecoration.TransactionDetail
+         if len(details) == 0 {
+            continue
+         }
+         data.WriteByte('\n')
+         data.WriteString("offer card: ")
+         for j, td := range details {
+            if j > 0 {
+               data.WriteByte(' ')
+            }
+            data.WriteString(td.Text)
+         }
+      }
+   }
+
+   if r.EntitlementMessaging.EntitlementMessageSlotDetail.Message != "" {
+      data.WriteByte('\n')
+      data.WriteString("entitlement message: ")
+      data.WriteString(r.EntitlementMessaging.EntitlementMessageSlotDetail.Message)
+   }
+
+   return data.String()
+}
+
+// TokenPair represents the access and refresh tokens returned upon successful
+// registration
+type TokenPair struct {
+   AccessToken  string `json:"access_token"`
+   RefreshToken string `json:"refresh_token"`
+}
+
+func (*TokenPair) CachePath() string {
+   return "rosso/amazon/TokenPair"
+}
+
+// Refresh exchanges the existing refresh token for a new access token
+// using the /auth/token endpoint, mutating the TokenPair in-place.
+func (t *TokenPair) Refresh() error {
+   if t == nil || t.RefreshToken == "" {
+      return fmt.Errorf("invalid token pair or missing refresh token")
+   }
+
+   payload := map[string]string{
+      "app_name":             appName,
+      "requested_token_type": "access_token",
+      "source_token":         t.RefreshToken,
+      "source_token_type":    "refresh_token",
+   }
+   body, err := json.Marshal(payload)
+   if err != nil {
+      return err
+   }
+   req, err := http.NewRequest(
+      "POST", hostAmazonAPI+"/auth/token", bytes.NewBuffer(body),
+   )
+   if err != nil {
+      return err
+   }
+
+   req.Header.Set("content-type", "application/json")
+   resp, err := doRequest(req)
+   if err != nil {
+      return err
+   }
+   defer resp.Body.Close()
+
+   // Decode into an anonymous struct handling the expected Python response keys
+   var result struct {
+      AccessToken string `json:"access_token"`
+      TokenType   string `json:"token_type"`
+      Error       string `json:"error"`
+      ErrorDesc   string `json:"error_description"`
+   }
+
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return err
+   }
+
+   // Handle API errors as seen in the Python code
+   if result.Error != "" {
+      return fmt.Errorf("failed to refresh device token: %s [%s]", result.ErrorDesc, result.Error)
+   }
+
+   if result.TokenType != "bearer" {
+      return fmt.Errorf("unexpected returned refreshed token type: %s", result.TokenType)
+   }
+
+   // Mutate the struct in-place with the new access token
+   t.AccessToken = result.AccessToken
+
+   return nil
+}
+
+// VodPlaybackParams holds the configuration for fetching playback resources.
+type VodPlaybackParams struct {
+   ActorToken                 *ActorToken
+   TitleId                    string
+   PlaybackExperienceMetadata *PlaybackExperienceMetadata
+   DeviceTypeID               string
+   VideoCodec                 string // e.g., "H264" or "H265"
+   DRMType                    string // e.g., "Widevine" or "PlayReady"
+   BitrateAdaptation          string // e.g., "CBR" or "CVBR"
+   DynamicRangeFormat         string // e.g., "None", "DolbyVision", or "HDR10"
+   MaxVideoResolution         string // e.g., "576p" or "2160p"
 }
