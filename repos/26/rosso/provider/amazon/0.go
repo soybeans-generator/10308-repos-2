@@ -65,91 +65,6 @@ func CreateCodePair(deviceTypeID string) (*CodePair, error) {
    return &result, nil
 }
 
-// GetPrimaryProfile uses the account access token to fetch available profiles and returns the primary profile.
-func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error) {
-   req, err := http.NewRequest(
-      "GET",
-      hostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/profiles/profileSelection",
-      nil,
-   )
-   if err != nil {
-      return nil, err
-   }
-   query := url.Values{}
-   query.Set("deviceTypeID", deviceTypeID)
-   query.Set("deviceID", deviceID)
-   req.URL.RawQuery = query.Encode()
-   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-
-   resp, err := doRequest(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   // Embed our new Profile struct alongside the error Message struct
-   var result struct {
-      Resource struct {
-         Profiles []Profile `json:"profiles"`
-      } `json:"resource"`
-      Message *struct {
-         Body *struct {
-            Code    string `json:"code"`
-            Message string `json:"message"`
-         } `json:"body"`
-      } `json:"message"`
-   }
-
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, fmt.Errorf("failed to decode response (status %d): %w", resp.StatusCode, err)
-   }
-
-   // 1. Check for the structured JSON API error
-   if result.Message != nil && result.Message.Body != nil {
-      return nil, fmt.Errorf("API error [%s]: %s", result.Message.Body.Code, result.Message.Body.Message)
-   }
-
-   // 2. Check for standard HTTP errors if no JSON error message was provided
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-   }
-
-   // 3. Extract and return the primary profile
-   for _, profile := range result.Resource.Profiles {
-      if profile.IsDefaultProfile {
-         return &profile, nil
-      }
-   }
-
-   return nil, fmt.Errorf("default profile not found")
-}
-
-// Resource represents the "resource" object returned from the detailsPageATF endpoint.
-type Resource struct {
-   Actions []struct {
-      Metadata struct {
-         PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
-      } `json:"metadata"`
-   } `json:"actions"`
-   ApplyHdr       bool `json:"applyHdr"`
-   ApplyUhd       bool `json:"applyUhd"`
-   PrimaryActions []struct {
-      NavigationAction struct {
-         PlaybackMetadata struct {
-            PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
-         } `json:"playbackMetadata"`
-      } `json:"navigationAction"`
-      OfferCards []struct {
-         OfferCardDecoration struct {
-            TransactionDetail []struct {
-               Text string
-            }
-         }
-      } `json:"offerCards"`
-   } `json:"primaryActions"`
-   EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
-}
-
 // GetItemDetails uses the actor access token to get metadata for a specific title.
 // It explicitly passes UI schema flags to ensure the server returns the PlaybackEnvelope.
 func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource, error) {
@@ -200,65 +115,6 @@ func GetItemDetails(token *ActorToken, titleId, deviceTypeID string) (*Resource,
       return nil, err
    }
    return &result.Resource, nil
-}
-
-// GetPlaybackExperienceMetadata returns the first playback envelope found in the
-// resource: the legacy "actions" list first, then the modern "primaryActions"
-// list.
-func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
-   for _, action := range r.Actions {
-      pem := action.Metadata.PlaybackExperienceMetadata
-      if pem.PlaybackEnvelope != "" {
-         return &pem, nil
-      }
-   }
-   for _, action := range r.PrimaryActions {
-      pem := action.NavigationAction.PlaybackMetadata.PlaybackExperienceMetadata
-      if pem.PlaybackEnvelope != "" {
-         return &pem, nil
-      }
-   }
-   return nil, fmt.Errorf("playbackExperienceMetadata not found in actions or primaryActions")
-}
-
-func (r *Resource) String() string {
-   var data strings.Builder
-   if r.ApplyHdr {
-      data.WriteString("HDR: true")
-   } else {
-      data.WriteString("HDR: false")
-   }
-   data.WriteByte('\n')
-   if r.ApplyUhd {
-      data.WriteString("UHD: true")
-   } else {
-      data.WriteString("UHD: false")
-   }
-
-   for _, pa := range r.PrimaryActions {
-      for _, oc := range pa.OfferCards {
-         details := oc.OfferCardDecoration.TransactionDetail
-         if len(details) == 0 {
-            continue
-         }
-         data.WriteByte('\n')
-         data.WriteString("offer card: ")
-         for j, td := range details {
-            if j > 0 {
-               data.WriteByte(' ')
-            }
-            data.WriteString(td.Text)
-         }
-      }
-   }
-
-   if r.EntitlementMessaging.EntitlementMessageSlotDetail.Message != "" {
-      data.WriteByte('\n')
-      data.WriteString("entitlement message: ")
-      data.WriteString(r.EntitlementMessaging.EntitlementMessageSlotDetail.Message)
-   }
-
-   return data.String()
 }
 
 // TokenPair represents the access and refresh tokens returned upon successful
@@ -494,6 +350,65 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    // Return the parent struct holding the playlists
    playbackUrls := result.VodPlaylistedPlaybackUrls.Result.PlaybackUrls
    return &playbackUrls, nil
+}
+
+// GetPlaybackExperienceMetadata returns the first playback envelope found in the
+// resource: the legacy "actions" list first, then the modern "primaryActions"
+// list.
+func (r *Resource) GetPlaybackExperienceMetadata() (*PlaybackExperienceMetadata, error) {
+   for _, action := range r.Actions {
+      pem := action.Metadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   for _, action := range r.PrimaryActions {
+      pem := action.NavigationAction.PlaybackMetadata.PlaybackExperienceMetadata
+      if pem.PlaybackEnvelope != "" {
+         return &pem, nil
+      }
+   }
+   return nil, fmt.Errorf("playbackExperienceMetadata not found in actions or primaryActions")
+}
+
+func (r *Resource) String() string {
+   var data strings.Builder
+   if r.ApplyHdr {
+      data.WriteString("HDR: true")
+   } else {
+      data.WriteString("HDR: false")
+   }
+   data.WriteByte('\n')
+   if r.ApplyUhd {
+      data.WriteString("UHD: true")
+   } else {
+      data.WriteString("UHD: false")
+   }
+
+   for _, pa := range r.PrimaryActions {
+      for _, oc := range pa.OfferCards {
+         details := oc.OfferCardDecoration.TransactionDetail
+         if len(details) == 0 {
+            continue
+         }
+         data.WriteByte('\n')
+         data.WriteString("offer card: ")
+         for j, td := range details {
+            if j > 0 {
+               data.WriteByte(' ')
+            }
+            data.WriteString(td.Text)
+         }
+      }
+   }
+
+   if r.EntitlementMessaging.EntitlementMessageSlotDetail.Message != "" {
+      data.WriteByte('\n')
+      data.WriteString("entitlement message: ")
+      data.WriteString(r.EntitlementMessaging.EntitlementMessageSlotDetail.Message)
+   }
+
+   return data.String()
 }
 
 func (*ActorToken) CachePath() string {

@@ -311,3 +311,88 @@ type Profile struct {
    ProfileID        string `json:"profileId"`
    IsDefaultProfile bool   `json:"isDefaultProfile"`
 }
+
+// GetPrimaryProfile uses the account access token to fetch available profiles and returns the primary profile.
+func GetPrimaryProfile(tokens *TokenPair, deviceTypeID string) (*Profile, error) {
+   req, err := http.NewRequest(
+      "GET",
+      hostATVPS+"/lrcedge/getDataByJavaTransform/v1/lr/profiles/profileSelection",
+      nil,
+   )
+   if err != nil {
+      return nil, err
+   }
+   query := url.Values{}
+   query.Set("deviceTypeID", deviceTypeID)
+   query.Set("deviceID", deviceID)
+   req.URL.RawQuery = query.Encode()
+   req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+
+   resp, err := doRequest(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   // Embed our new Profile struct alongside the error Message struct
+   var result struct {
+      Resource struct {
+         Profiles []Profile `json:"profiles"`
+      } `json:"resource"`
+      Message *struct {
+         Body *struct {
+            Code    string `json:"code"`
+            Message string `json:"message"`
+         } `json:"body"`
+      } `json:"message"`
+   }
+
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, fmt.Errorf("failed to decode response (status %d): %w", resp.StatusCode, err)
+   }
+
+   // 1. Check for the structured JSON API error
+   if result.Message != nil && result.Message.Body != nil {
+      return nil, fmt.Errorf("API error [%s]: %s", result.Message.Body.Code, result.Message.Body.Message)
+   }
+
+   // 2. Check for standard HTTP errors if no JSON error message was provided
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+   }
+
+   // 3. Extract and return the primary profile
+   for _, profile := range result.Resource.Profiles {
+      if profile.IsDefaultProfile {
+         return &profile, nil
+      }
+   }
+
+   return nil, fmt.Errorf("default profile not found")
+}
+
+// Resource represents the "resource" object returned from the detailsPageATF endpoint.
+type Resource struct {
+   Actions []struct {
+      Metadata struct {
+         PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
+      } `json:"metadata"`
+   } `json:"actions"`
+   ApplyHdr       bool `json:"applyHdr"`
+   ApplyUhd       bool `json:"applyUhd"`
+   PrimaryActions []struct {
+      NavigationAction struct {
+         PlaybackMetadata struct {
+            PlaybackExperienceMetadata PlaybackExperienceMetadata `json:"playbackExperienceMetadata"`
+         } `json:"playbackMetadata"`
+      } `json:"navigationAction"`
+      OfferCards []struct {
+         OfferCardDecoration struct {
+            TransactionDetail []struct {
+               Text string
+            }
+         }
+      } `json:"offerCards"`
+   } `json:"primaryActions"`
+   EntitlementMessaging EntitlementMessaging `json:"entitlementMessaging"`
+}
