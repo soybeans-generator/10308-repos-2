@@ -57,7 +57,7 @@ const dmCLEN = 0x400
 var (
    dmKB  [0x48]byte
    dmARG [0x40]byte
-   dmCB  []byte
+   dmCB  [0x80]byte
 )
 
 // selfPath and selfErr are resolved once at init: three drivers spawn children of
@@ -162,7 +162,7 @@ func dmCall(base uintptr, desc uint32, prv, blob []byte) (uint32, []byte, []byte
    var out [0x20]byte
 
    copy(dmKB[:], prv)
-   dmCB = append(dmCB[:0], blob...)
+   copy(dmCB[:], blob)
    a := dmARG[:0x38]
    binary.LittleEndian.PutUint64(a[0x00:], 3)
    binary.LittleEndian.PutUint64(a[0x08:], uint64(base)+uint64(desc))
