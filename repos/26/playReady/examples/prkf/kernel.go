@@ -11,7 +11,7 @@
 // still returns 0 and a check written as "NTSTATUS != 0" never fires.
 //
 // A FAULT IN A DESCRIPTOR'S CODE IS A WINDOWS SEH EXCEPTION, not a Go panic: recover()
-// never runs. wbVEH turns it into a FAULT line.
+// never runs. wbVEH turns it into a fault row.
 //
 // THE PROFILE is everything derived from one DLL build, keyed by its SHA-256: -1..-3 fill
 // it in, run once per build; -4..-6 read it, run once per sample. Never keyed by the
@@ -195,9 +195,12 @@ func wbPatch(base uintptr, rva uint32, buf []byte) bool {
 // is invoked by Windows' exception dispatcher, not by Go code, so there is no caller to
 // return a code to and no stack of ours to unwind: it cannot return an error (the signature
 // belongs to the OS), cannot panic (a panic in a NewCallback trampoline is a fatal runtime
-// abort that would replace the FAULT line with a crash dump), cannot CONTINUE_SEARCH (the
+// abort that would replace the fault row with a crash dump), cannot CONTINUE_SEARCH (the
 // fault would kill the process anyway) and cannot CONTINUE_EXECUTION (the faulting
 // instruction would retry forever).
+//
+// The row it emits is the same grammar as every other: a fault is not a special channel,
+// it is the last row a child prints before it dies.
 func wbVEH(base uintptr) bool {
    cb := syscall.NewCallback(func(ep *excPointers) uintptr {
       mod := "-"
@@ -214,9 +217,10 @@ func wbVEH(base uintptr) bool {
          raw = hex.EncodeToString(unsafe.Slice((*byte)(wbMemAt(ep.Record.Address)), 16))
       }
 
-      fmt.Printf("FAULT 0x%08x addr=0x%016x off=%+#x module=%s bytes=%s\n",
+      emit(childRow{Kind: "fault", Msg: fmt.Sprintf(
+         "code=0x%08x addr=0x%016x off=%+#x module=%s bytes=%s",
          ep.Record.Code, ep.Record.Address,
-         int64(ep.Record.Address)-int64(base), mod, raw)
+         int64(ep.Record.Address)-int64(base), mod, raw)})
       os.Exit(3)
       return 0
    })

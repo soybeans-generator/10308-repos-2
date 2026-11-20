@@ -8,7 +8,11 @@
 //   prkf -3   nibblemap.go   derive the nibble permutation                 DLL
 //   prkf -4   main.go        carve the CHAI chain, extract key components  BLA
 //   prkf -5   signing.go     decrypt the signing key                       BLA
-//   prkf -6   plainkey.go    derive the encryption key                     BLA
+//   prkf -6   derive.go      derive the encryption key                     BLA
+//
+// Shared by all of them: kernel.go holds the kernel ABI and the DLL profile; child.go holds
+// the wire, the child spec and the spawn plumbing; trials.go holds the child bodies that
+// drive it; warbird.go additionally holds the decrypted image and the patch plan.
 //
 // -1..-3 read only the DLL; -4..-6 read only the sample. Every artefact lives under
 // outDir, every path is declared once at the end of this file, and dllPath is the one

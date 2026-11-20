@@ -6,7 +6,7 @@
 // in kernel.go, and both name the same DLL.
 //
 // -1 scans the DLL for Warbird heap-exec descriptors, then re-executes this binary once per
-// CHUNK of candidates and reads the RESULT line each descriptor produced. Discovery rests
+// CHUNK of candidates and reads the row each descriptor produced. Discovery rests
 // entirely on properties of the routine itself, read from its disassembly - no sample key
 // files:
 //
@@ -18,13 +18,17 @@
 // merely return success. Verification against a real key is -5's job. Zero accepted
 // descriptors, or more than one, is an error to investigate.
 //
+// THE PROBE CHILD LIVES HERE because it drives this file's routine and nothing else:
+// runProbes, runOne, probe and trace. It emits childRow rows like every other child, so
+// the parent reads them with the one parser in child.go.
+//
 // Descriptors are probed in chunks of 64, sequentially: a child pays LoadLibrary before its
 // first call, so one child per descriptor spent 981 module loads on 981 probes. A chunk
 // that dies takes its remaining descriptors with it; a child prints its rows in order, so
-// the first descriptor with no RESULT line is the one that faulted, and the rest are
-// retried as a run. Every child streams its stderr into the log as it arrives, so a hung
-// chunk leaves its last trace line as the final record - there is no deadline, because a
-// timeout would make a hang invisible.
+// the first descriptor with no row is the one that faulted, and the rest are retried as a
+// run. Every child streams its stderr into the log as it arrives, so a hung chunk leaves
+// its last trace line as the final record - there is no deadline, because a timeout would
+// make a hang invisible.
 //
 // Only ONE value differs between DLL builds: the RVA of the heap descriptor holding the
 // signing-key routine, from prsubsPath keyed by the DLL sha256. This step refuses to run if
@@ -45,7 +49,6 @@ import (
    "os"
    "slices"
    "strconv"
-   "strings"
    "time"
 )
 
@@ -152,18 +155,18 @@ func cmdFindSub() error {
    }
    w("self   " + selfPath)
 
-   // One RESULT line per descriptor, keyed by descriptor VA. A descriptor with no line
-   // either faulted its chunk or was never reached; the passes below recover both.
-   results := make([]string, len(descs))
+   // One row per descriptor, keyed by descriptor VA. A descriptor with no row either
+   // faulted its chunk or was never reached; the passes below recover both.
+   results := make([]childRow, len(descs))
    chunks := (len(descs) + probeChunk - 1) / probeChunk
    wf("probing %d descriptors in %d chunks of %d", len(descs), chunks, probeChunk)
 
    tally := func() (done, accepted int) {
       for _, r := range results {
-         if r != "" {
+         if r.Kind != "" {
             done++
          }
-         if strings.Contains(r, " ACCEPT ") {
+         if r.Kind == "accept" {
             accepted++
          }
       }
@@ -184,13 +187,13 @@ func cmdFindSub() error {
    }
 
    // A dead run is retried as a run: the faulting descriptor is recorded and skipped, and
-   // everything behind it goes into the next pass. Recording NO_OUTPUT for the faulting
+   // everything behind it goes into the next pass. Recording a none row for the faulting
    // descriptor is what guarantees the next pass is strictly smaller - a routine that dies
    // on its first call is not the signing-key routine, so this is its verdict, not a gap.
    for pass := 0; ; pass++ {
       var missing []int
       for i, r := range results {
-         if r == "" {
+         if r.Kind == "" {
             missing = append(missing, i)
          }
       }
@@ -215,7 +218,7 @@ func cmdFindSub() error {
                results[i] = r
                continue
             }
-            results[i] = fmt.Sprintf("RESULT %#x NO_OUTPUT exit=no-row", descs[i].descVA)
+            results[i] = childRow{Kind: "none", Desc: descs[i].descVA, Msg: "exit=no-row"}
             break
          }
       }
@@ -226,10 +229,10 @@ func cmdFindSub() error {
 
    var acc []imgDesc
    for i, r := range results {
-      w(r)
-      if strings.Contains(r, " ACCEPT ") {
+      w(r.log())
+      if r.Kind == "accept" {
          acc = append(acc, descs[i])
-         fmt.Println("ACCEPT " + r)
+         fmt.Printf("ACCEPT %#09x\n", descs[i].descVA)
       }
    }
 
@@ -241,7 +244,7 @@ func cmdFindSub() error {
 
    if len(acc) == 0 {
       return errors.New("no descriptor satisfied the signing-key routine's properties\n" +
-         "  See the per-descriptor probe results in " + scanLogPath + "\n" +
+         "  See the per-descriptor probe rows in " + scanLogPath + "\n" +
          "  Either the hardcoded argument layout no longer matches this build,\n" +
          "  or this library does not contain the routine")
    }
@@ -374,8 +377,11 @@ func pubMatches(d, raw []byte) bool {
    return got != nil && want != nil && bytes.Equal(got, want)
 }
 
-// runOne probes one descriptor and prints its RESULT line. A probe that cannot be set up
-// still prints a line, because the parent would otherwise retry this descriptor forever.
+// runOne probes one descriptor and emits its verdict row. A probe that cannot be set up
+// still emits a row, because the parent would otherwise retry this descriptor forever.
+//
+// The verdict row carries everything the log needs: both outputs, all three status dwords
+// and all three NTSTATUS values, so a reject can be read without re-running the probe.
 func runOne(op3 op3Func, descVA uint32) {
    trace("probe %#x begin", descVA)
 
@@ -400,7 +406,7 @@ func runOne(op3 op3Func, descVA uint32) {
       var err error
       if p[i], err = probe(op3, descVA, c.tag, c.data, c.size); err != nil {
          trace("probe %s failed: %v", c.tag, err)
-         fmt.Printf("RESULT %#x NO_OUTPUT exit=setup:%v\n", descVA, err)
+         emit(childRow{Kind: "none", Desc: descVA, Msg: err.Error()})
          return
       }
    }
@@ -410,36 +416,38 @@ func runOne(op3 op3Func, descVA uint32) {
    // consulted, because a routine that refused the size wrote nothing to judge.
    okReject := !(c.ntstatus == 0 && statusOK(c.status))
 
-   verdict := "REJECT"
+   kind := "reject"
    if a.wrote && b.wrote && !bytes.Equal(a.out, b.out) && okReject {
-      verdict = "ACCEPT"
+      kind = "accept"
    }
-   trace("emit %#x verdict=%s", descVA, verdict)
+   trace("emit %#x verdict=%s", descVA, kind)
 
-   fmt.Printf("RESULT %#x %s "+
-      "A(st=%#010x,sv=%s) "+
-      "B(st=%#010x,sv=%s) "+
-      "C(st=%#010x,sv=%s) "+
-      "input_dep=%t size_enforced=%t out=%s\n",
-      descVA, verdict,
-      a.ntstatus, hex.EncodeToString(a.status),
-      b.ntstatus, hex.EncodeToString(b.status),
-      c.ntstatus, hex.EncodeToString(c.status),
-      !bytes.Equal(a.out, b.out), okReject,
-      hex.EncodeToString(a.out))
+   emit(childRow{
+      Kind: kind,
+      Desc: descVA,
+      Buf:  []string{hex.EncodeToString(a.out), hex.EncodeToString(b.out)},
+      St: []string{
+         hex.EncodeToString(a.status),
+         hex.EncodeToString(b.status),
+         hex.EncodeToString(c.status),
+      },
+      Msg: fmt.Sprintf("input_dep=%t size_enforced=%t nt=%#x/%#x/%#x",
+         !bytes.Equal(a.out, b.out), okReject,
+         a.ntstatus, b.ntstatus, c.ntstatus),
+   })
 }
-
-// ------------------------------------------------------------ the -1 probe
 
 // runProbes is the probe child's whole body: one module load, then three calls per
 // descriptor.
 func runProbes(descs []uint32) int {
+   defer emit(childRow{Kind: "end"})
+
    trace("start descriptors=%d keyLen=%#x", len(descs), keyLen)
 
    base, err := loadWarbird()
    if err != nil {
       trace("loadWarbird failed: %v", err)
-      fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
+      emit(childRow{Kind: "err", Msg: err.Error()})
       return 2
    }
    trace("dll loaded base=%#x", base)
@@ -451,6 +459,8 @@ func runProbes(descs []uint32) int {
    trace("done")
    return 0
 }
+
+// ------------------------------------------------------------- descriptors
 
 // spanMapped reports whether [rva, rva+n) lies inside one section's mapped extent, which is
 // the larger of its virtual and raw sizes.
@@ -466,13 +476,12 @@ func spanMapped(secs []imgSection, rva, n uint32) bool {
 
 // trace writes one timestamped line to the child's stderr. Writes to stderr are unbuffered
 // syscalls, so the line is out of this process before the next statement runs - including
-// when the next statement is the kernel call that never returns.
+// when the next statement is the kernel call that never returns. No parser reads it: it is
+// the human record of where a hung chunk stopped.
 func trace(format string, a ...any) {
    fmt.Fprintf(os.Stderr, "[pid %d +%dms] %s\n",
       os.Getpid(), time.Since(childT0).Milliseconds(), fmt.Sprintf(format, a...))
 }
-
-// ------------------------------------------------------------- descriptors
 
 // signingCandidates is the shared census filtered to what -1 can probe: a heap-exec
 // descriptor whose code span is non-empty and lies inside a mapped section.
@@ -511,6 +520,8 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
    })
    return out
 }
+
+// ---- the probe child -----------------------------------------------------
 
 // probeResult is one WB heap-exec call. wrote is NTSTATUS 0, a zero status dword, and an
 // output buffer that is neither the random fill nor the input - the whole success test, so
