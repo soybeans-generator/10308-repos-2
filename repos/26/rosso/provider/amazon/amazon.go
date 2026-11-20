@@ -1,3 +1,4 @@
+// amazon.go marker preserve
 package amazon
 
 import (
@@ -286,7 +287,7 @@ func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
          "device_type":   deviceTypeID,
          "os_version":    "os_version",
          // if you change deviceID this is required
-         "device_name": fmt.Sprint(time.Now().Unix()),
+         "device_name": time.Now().Format(time.DateTime),
       },
       "requested_token_type": []string{"bearer"},
    }
@@ -393,3 +394,5 @@ func (t *TokenPair) Refresh() error {
 
    return nil
 }
+
+// amazon.go marker preserve

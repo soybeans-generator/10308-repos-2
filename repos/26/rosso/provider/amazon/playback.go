@@ -1,3 +1,4 @@
+// playback.go marker preserve
 package amazon
 
 import (
@@ -408,3 +409,5 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
    playbackUrls := result.VodPlaylistedPlaybackUrls.Result.PlaybackUrls
    return &playbackUrls, nil
 }
+
+// playback.go marker preserve
