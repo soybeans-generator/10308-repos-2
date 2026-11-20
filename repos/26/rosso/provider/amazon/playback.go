@@ -352,7 +352,7 @@ func (p *VodPlaybackParams) Fetch() (*PlaybackUrls, error) {
          "deviceCapabilityFamily": "LivingRoomPlayer",
       },
    }
-   body, err := json.Marshal(payload)
+   body, err := json.MarshalIndent(payload, "", " ")
    if err != nil {
       return nil, err
    }
