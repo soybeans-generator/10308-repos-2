@@ -3,6 +3,7 @@ package maya
 
 import (
    "41.neocities.org/luna/dash"
+   "cmp"
    "fmt"
    "slices"
 )
@@ -107,18 +108,20 @@ func listStreamsDash(mpd *dash.Mpd) error {
    groups := mpd.GetRepresentations()
    repsForSorting := make([]*dash.Representation, 0, len(groups))
    for _, group := range groups {
-      representation := group[len(group)/2]
-      repsForSorting = append(repsForSorting, representation)
+      repsForSorting = append(repsForSorting, group[len(group)/2])
    }
+   // Height first so quality tiers group together, bandwidth second to
+   // order within a tier (several codecs at the same resolution).
+   // GetHeight falls back to the AdaptationSet's height, which is where
+   // manifests that omit per-Representation height put it. Audio and text
+   // have no height and sort at 0, ahead of every video tier.
    slices.SortFunc(repsForSorting, func(a, b *dash.Representation) int {
-      return a.Bandwidth - b.Bandwidth
+      return cmp.Or(
+         cmp.Compare(a.GetHeight(), b.GetHeight()),
+         cmp.Compare(a.Bandwidth, b.Bandwidth),
+      )
    })
-   for index, representation := range repsForSorting {
-      if index > 0 {
-         fmt.Println()
-      }
-      fmt.Println(representation)
-   }
+   printStreams(repsForSorting)
    return nil
 }
 

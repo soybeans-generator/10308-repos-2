@@ -12,67 +12,6 @@ import (
    "net/url"
 )
 
-// DashBitrate logs the actual average bitrate of a DASH stream, measured by
-// dividing the total content length of each representation's media file by
-// the total presentation duration. Only representations with a BaseURL
-// and a server that reports content length are supported.
-func DashBitrate(streamId string, manifestData *Manifest) error {
-   mpd, err := dash.Parse(manifestData.Body, manifestData.Url)
-   if err != nil {
-      return err
-   }
-
-   group, ok := mpd.GetRepresentations()[streamId]
-   if !ok {
-      return fmt.Errorf("representation group not found %v", streamId)
-   }
-
-   var totalBytes float64
-   for _, rep := range group {
-      if rep.BaseUrl == "" {
-         return fmt.Errorf("stream %v has no BaseURL", rep.Id)
-      }
-
-      baseUrl, err := rep.ResolveBaseUrl()
-      if err != nil {
-         return err
-      }
-      contentLength, err := fetchContentLength(baseUrl)
-      if err != nil {
-         return err
-      }
-
-      totalBytes += float64(contentLength)
-   }
-
-   // totalSeconds is a property of the whole presentation, not of each entry
-   // in the group (which holds one Representation per Period). Period.GetDuration
-   // falls back to the MPD-wide mediaPresentationDuration, so summing it once
-   // per period over-counts multi-period presentations by a factor of N.
-   var totalSeconds float64
-   if mpd.MediaPresentationDuration != "" {
-      d, err := mpd.Periods[0].GetDuration()
-      if err != nil {
-         return err
-      }
-      totalSeconds = d.Seconds()
-   } else {
-      for _, period := range mpd.Periods {
-         d, err := period.GetDuration()
-         if err != nil {
-            return err
-         }
-         totalSeconds += d.Seconds()
-      }
-   }
-
-   if totalSeconds == 0 {
-      return errors.New("zero presentation duration")
-   }
-   log.Printf("bitrate: %.0f b/s", totalBytes*8/totalSeconds)
-   return nil
-}
-
 func DashDownload(streamId string, manifestData *Manifest, optionsData *Options) error {
    if optionsData == nil {
       optionsData = &Options{}
@@ -107,31 +46,6 @@ func HlsDownload(streamId int, manifestData *Manifest, optionsData *Options) err
    }
 
    return downloadHls(playlist, streamId, kFetcher)
-}
-
-// fetchContentLength sends a HEAD request and returns the reported content
-// length. It is an error if the server does not report one.
-func fetchContentLength(targetUrl *url.URL) (int64, error) {
-   req := &http.Request{
-      Method: http.MethodHead,
-      URL:    targetUrl,
-   }
-   // body is nil for HEAD
-
-   log.Println(req.Method, req.URL)
-   resp, err := http.DefaultClient.Do(req)
-   if err != nil {
-      return 0, err
-   }
-   defer resp.Body.Close()
-
-   if resp.StatusCode != http.StatusOK {
-      return 0, errors.New(resp.Status)
-   }
-   if resp.ContentLength < 0 {
-      return 0, errors.New("response has no content length")
-   }
-   return resp.ContentLength, nil
 }
 
 // fetchData performs a GET and returns the body together with the URL that
@@ -186,6 +100,17 @@ func fetchData(targetUrl *url.URL, headers map[string]string, logReq bool) ([]by
       log.Println("redirected to:", effectiveUrl)
    }
    return body, effectiveUrl, nil
+}
+
+// printStreams prints each stream with a blank line between them. Generic so
+// the DASH lister can hand over its sorted slice without copying it.
+func printStreams[T any](streams []T) {
+   for index, stream := range streams {
+      if index > 0 {
+         fmt.Println()
+      }
+      fmt.Println(stream)
+   }
 }
 
 type DrmSystem int
