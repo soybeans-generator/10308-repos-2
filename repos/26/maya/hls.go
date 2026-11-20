@@ -85,23 +85,14 @@ func getHlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, erro
 // Streams print in manifest order; sorting was dropped when the hls package
 // removed its comparators.
 func listStreamsHls(playlist *hls.MasterPlaylist) error {
-   var firstItemPrinted bool
+   streams := make([]any, 0, len(playlist.Medias)+len(playlist.StreamInfs))
    for _, rendition := range playlist.Medias {
-      if firstItemPrinted {
-         fmt.Println()
-      } else {
-         firstItemPrinted = true
-      }
-      fmt.Println(rendition)
+      streams = append(streams, rendition)
    }
    for _, variant := range playlist.StreamInfs {
-      if firstItemPrinted {
-         fmt.Println()
-      } else {
-         firstItemPrinted = true
-      }
-      fmt.Println(variant)
+      streams = append(streams, variant)
    }
+   printStreams(streams)
    return nil
 }
 
@@ -121,12 +112,7 @@ func determineHlsType(mediaPl *hls.MediaPlaylist) (*typeInfo, error) {
       ext = ".m4a"
    }
 
-   isFmp4 := false
-   if mediaPl.Map != nil {
-      isFmp4 = true
-   } else if ext == ".mp4" || ext == ".m4s" || ext == ".m4a" {
-      isFmp4 = true
-   }
+   isFmp4 := mediaPl.Map != nil || ext == ".mp4" || ext == ".m4s" || ext == ".m4a"
 
    return &typeInfo{
       Extension: ext,

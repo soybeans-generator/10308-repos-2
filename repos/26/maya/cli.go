@@ -188,22 +188,20 @@ func (set FlagSet) Usage(w io.Writer, name string) error {
    data := new(strings.Builder)
 
    // --- 1. Index Section ---
+   // The empty-name check must run before anything indexes item.Name[0]
+   // below, so it stays in this first pass.
    fmt.Fprint(data, "index:\n")
    for _, item := range set {
-      // Validate inside the existing loop (protects the next section from panicking)
       if item.Name == "" {
          return fmt.Errorf("flag name cannot be empty")
       }
 
-      nameAndType := item.Name + " " + item.Value.Type()
-      def := item.Value.Default()
-
-      fmt.Fprintf(data, "     %s\n", nameAndType)
+      fmt.Fprintf(data, "     %s %s\n", item.Name, item.Value.Type())
 
       if item.Usage != "" {
          fmt.Fprintf(data, "          usage: %s\n", item.Usage)
       }
-      if def != "" {
+      if def := item.Value.Default(); def != "" {
          fmt.Fprintf(data, "          default: %s\n", def)
       }
    }
@@ -211,42 +209,31 @@ func (set FlagSet) Usage(w io.Writer, name string) error {
    // --- 2. Examples Section ---
    fmt.Fprint(data, "\nexamples:\n")
 
+   // A flag whose first letter no other flag shares can be abbreviated to
+   // that single letter. Counted once, not once per flag.
+   firstLetterCount := make(map[byte]int, len(set))
+   for _, item := range set {
+      firstLetterCount[item.Name[0]]++
+   }
+
    formatFlag := func(f *Flag) string {
-      firstLetter := f.Name[:1]
-      count := 0
-      for _, x := range set {
-         if strings.HasPrefix(x.Name, firstLetter) {
-            count++
-         }
-      }
-
       prefix := f.Name
-      if count == 1 {
-         prefix = firstLetter
+      if firstLetterCount[f.Name[0]] == 1 {
+         prefix = f.Name[:1]
       }
-
       if ex := f.Value.Example(); ex != "" {
          return prefix + "=" + ex
       }
       return prefix
    }
 
-   // A flag with any needs never prints standalone —
-   // it attaches to each needed flag's example instead.
-   standalone := func(f *Flag) bool {
-      return len(f.Needs) == 0
-   }
-
    for _, item := range set {
-      if standalone(item) {
+      if len(item.Needs) == 0 {
          fmt.Fprintf(data, "     %s %s\n", name, formatFlag(item))
 
          // After a standalone example, print one extra line for each
          // flag that lists it in Needs.
          for _, dep := range set {
-            if standalone(dep) {
-               continue
-            }
             for _, need := range dep.Needs {
                if need == item.Name {
                   fmt.Fprintf(data, "     %s %s %s\n",
@@ -255,18 +242,18 @@ func (set FlagSet) Usage(w io.Writer, name string) error {
                }
             }
          }
-      } else {
-         for _, need := range item.Needs {
-            needed := set.lookup(need)
-            if needed == nil {
-               return fmt.Errorf("flag %q needs undefined flag %q", item.Name, need)
-            }
-            // the needed flag already printed this example
-            // below its own standalone example
-            if !standalone(needed) {
-               fmt.Fprintf(data, "     %s %s %s\n",
-                  name, formatFlag(needed), formatFlag(item))
-            }
+         continue
+      }
+      for _, need := range item.Needs {
+         needed := set.lookup(need)
+         if needed == nil {
+            return fmt.Errorf("flag %q needs undefined flag %q", item.Name, need)
+         }
+         // A standalone needed flag already printed this example below
+         // its own standalone example.
+         if len(needed.Needs) > 0 {
+            fmt.Fprintf(data, "     %s %s %s\n",
+               name, formatFlag(needed), formatFlag(item))
          }
       }
    }

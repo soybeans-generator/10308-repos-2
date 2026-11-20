@@ -14,7 +14,6 @@ import (
    "net/url"
    "os"
    "path/filepath"
-   "strings"
 )
 
 // StopKey enables the interactive stop: press q (plus Enter on a normal
@@ -56,10 +55,7 @@ func orchestrateDownload(job *downloadJob) error {
       log.Println("press q (then Enter) to stop the download cleanly and save resume state")
    }
 
-   var name strings.Builder
-   name.WriteString(job.outputFileNameBase)
-   name.WriteString(job.info.Extension)
-   outputName := name.String()
+   outputName := job.outputFileNameBase + job.info.Extension
 
    file, state, err := openOutput(outputName)
    if err != nil {
@@ -281,8 +277,7 @@ func extractProtection(moov *sofia.MoovBox) (*protectionInfo, error) {
 // then truncated away so new fragments append exactly where the old ones
 // ended.
 func initializeRemuxer(initData []byte, file *os.File, segmentsDone int) (*sofia.Remuxer, *protectionInfo, error) {
-   var remux sofia.Remuxer
-   remux.Writer = file
+   remux := &sofia.Remuxer{Writer: file}
 
    if segmentsDone == 0 {
       if len(initData) > 0 {
@@ -311,15 +306,14 @@ func initializeRemuxer(initData []byte, file *os.File, segmentsDone int) (*sofia
       }
    }
 
-   var initProtection *protectionInfo
-   if remux.Moov != nil {
-      var err error
-      initProtection, err = extractProtection(remux.Moov)
-      if err != nil {
-         return nil, nil, err
-      }
+   if remux.Moov == nil {
+      return remux, nil, nil
    }
-   return &remux, initProtection, nil
+   initProtection, err := extractProtection(remux.Moov)
+   if err != nil {
+      return nil, nil, err
+   }
+   return remux, initProtection, nil
 }
 
 // downloadJob holds all the extracted, manifest-agnostic information needed to run a download.
