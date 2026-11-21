@@ -28,12 +28,12 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher
 
    segments := make([]segment, len(media.Segments))
    for i, entry := range media.Segments {
-      segments[i] = segment{url: entry.Uri.String(), duration: entry.Duration}
+      segments[i] = segment{url: entry.Uri, duration: entry.Duration}
    }
 
    var initData []byte
    if info.IsFmp4 && media.Map != nil {
-      initData, _, err = fetchData(media.Map.String(), nil, true)
+      initData, _, err = fetchData(media.Map, nil, true)
       if err != nil {
          return fmt.Errorf("fetch HLS initialization segment: %w", err)
       }
@@ -49,7 +49,7 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher
 }
 
 // fetchMediaPlaylist fetches and parses an HLS media playlist.
-func fetchMediaPlaylist(mediaUrl string) (*hls.MediaPlaylist, error) {
+func fetchMediaPlaylist(mediaUrl *url.URL) (*hls.MediaPlaylist, error) {
    data, effective, err := fetchData(mediaUrl, nil, true)
    if err != nil {
       return nil, err
@@ -63,18 +63,18 @@ func fetchMediaPlaylist(mediaUrl string) (*hls.MediaPlaylist, error) {
 }
 
 // hlsStreamUrl returns the URI of the variant or rendition with streamId.
-func hlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (string, error) {
+func hlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, error) {
    for _, variant := range playlist.StreamInfs {
       if variant.Id == streamId {
-         return variant.Uri.String(), nil
+         return variant.Uri, nil
       }
    }
    for _, rendition := range playlist.Medias {
       if rendition.Id == streamId {
-         return rendition.Uri.String(), nil
+         return rendition.Uri, nil
       }
    }
-   return "", fmt.Errorf("stream with ID not found: %d", streamId)
+   return nil, fmt.Errorf("stream with ID not found: %d", streamId)
 }
 
 // listStreamsHls prints the renditions, then the variants, in manifest order.
@@ -96,10 +96,7 @@ func detectHlsType(media *hls.MediaPlaylist) (*typeInfo, error) {
    if len(media.Segments) == 0 {
       return nil, errors.New("empty media playlist")
    }
-   firstUrl, err := url.Parse(media.Segments[0].Uri.String())
-   if err != nil {
-      return nil, err
-   }
+   firstUrl := media.Segments[0].Uri
    extension := path.Ext(firstUrl.Path)
    if extension == "" {
       return nil, fmt.Errorf("no file extension found in segment URL: %s", firstUrl)

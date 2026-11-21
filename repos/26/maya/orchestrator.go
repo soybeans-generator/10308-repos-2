@@ -8,6 +8,7 @@ import (
    "fmt"
    "io"
    "log"
+   "net/url"
    "os"
 
    "41.neocities.org/playReady"
@@ -306,7 +307,7 @@ type downloadJob struct {
 
 // segment is one chunk to download.
 type segment struct {
-   url      string
+   url      *url.URL
    headers  map[string]string
    duration float64
 }

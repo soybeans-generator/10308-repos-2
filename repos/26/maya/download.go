@@ -8,6 +8,7 @@ import (
    "io"
    "log"
    "net/http"
+   "net/url"
    "time"
 
    "41.neocities.org/sofia"
@@ -102,8 +103,8 @@ func executeStream(seg segment, offset int64, remux *sofia.Remuxer, stop <-chan 
 
 // fetchStream performs a GET, resuming from offset when it is positive, and
 // returns the body with its content length.
-func fetchStream(target string, offset int64) (io.ReadCloser, int64, error) {
-   req, err := http.NewRequest(http.MethodGet, target, nil)
+func fetchStream(target *url.URL, offset int64) (io.ReadCloser, int64, error) {
+   req, err := http.NewRequest(http.MethodGet, target.String(), nil)
    if err != nil {
       return nil, 0, err
    }
