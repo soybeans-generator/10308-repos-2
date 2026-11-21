@@ -105,7 +105,7 @@ func (c *client) do_dash_id() error {
 }
 
 func (c *client) do_email() error {
-   signIn, err := peacock.SignIn(&peacock.SignInParams{
+   signIn, cookie, err := peacock.SignIn(&peacock.SignInParams{
       UserIdentifier: string(c.email),
       Password:       string(c.password),
       RememberMe:     true,
@@ -113,7 +113,7 @@ func (c *client) do_email() error {
    if err != nil {
       return err
    }
-   authResp, err := peacock.OAuthAuthorize(signIn.Cookie)
+   authResp, err := peacock.OAuthAuthorize(cookie)
    if err != nil {
       return err
    }

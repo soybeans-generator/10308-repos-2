@@ -1,4 +1,4 @@
-// peacock.go marker preserve
+// peacock.go KEEP VERBATIM
 package peacock
 
 import (
@@ -207,11 +207,8 @@ type SignInParams struct {
 }
 
 // SignInResponse is the Siren JSON response from POST /signin/service/international.
-// Cookie is the skyCEsidmesso01 cookie from the Set-Cookie header; it is required
-// as input to OAuthAuthorize.
 type SignInResponse struct {
-   Cookie     *http.Cookie `json:"-"`
-   Class      []string     `json:"class"`
+   Class      []string `json:"class"`
    Properties struct {
       TargetApi string `json:"targetApi"`
       Type      string `json:"type"`
@@ -225,15 +222,15 @@ type SignInResponse struct {
 }
 
 // SignIn authenticates with email and password via POST /signin/service/international.
-// The skyCEsidmesso01 cookie from the response is returned in SignInResponse.Cookie
-// for use by OAuthAuthorize. The device id is available in Properties.Data.DeviceID for
-// use by ExchangeToken.
-func SignIn(params *SignInParams) (*SignInResponse, error) {
+// The skyCEsidmesso01 cookie from the response is returned alongside the parsed
+// body for use by OAuthAuthorize. The device id is available in
+// Properties.Data.DeviceID for use by ExchangeToken.
+func SignIn(params *SignInParams) (*SignInResponse, *http.Cookie, error) {
    if params.UserIdentifier == "" {
-      return nil, fmt.Errorf("sign in: empty userIdentifier")
+      return nil, nil, fmt.Errorf("sign in: empty userIdentifier")
    }
    if params.Password == "" {
-      return nil, fmt.Errorf("sign in: empty password")
+      return nil, nil, fmt.Errorf("sign in: empty password")
    }
    signInUrl := idBase + "/signin/service/international"
    form := url.Values{}
@@ -241,7 +238,7 @@ func SignIn(params *SignInParams) (*SignInResponse, error) {
    form.Set("userIdentifier", params.UserIdentifier)
    req, err := http.NewRequest(http.MethodPost, signInUrl, strings.NewReader(form.Encode()))
    if err != nil {
-      return nil, fmt.Errorf("sign in: create request: %w", err)
+      return nil, nil, fmt.Errorf("sign in: create request: %w", err)
    }
    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
    req.Header.Set("x-skyott-territory", "US")
@@ -249,30 +246,25 @@ func SignIn(params *SignInParams) (*SignInResponse, error) {
    req.Header.Set("user-agent", user_agent)
    resp, err := doRequest(http.DefaultClient, req)
    if err != nil {
-      return nil, fmt.Errorf("sign in: %w", err)
+      return nil, nil, fmt.Errorf("sign in: %w", err)
    }
    defer resp.Body.Close()
 
    var out SignInResponse
    if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-      return nil, fmt.Errorf("sign in: decode: %w", err)
+      return nil, nil, fmt.Errorf("sign in: decode: %w", err)
    }
 
    if out.Properties.Errors.HasErrors() {
-      return nil, fmt.Errorf("sign in: %w", &out.Properties.Errors)
+      return nil, nil, fmt.Errorf("sign in: %w", &out.Properties.Errors)
    }
 
    for _, cookie := range resp.Cookies() {
       if cookie.Name == "skyCEsidmesso01" {
-         out.Cookie = cookie
-         break
+         return &out, cookie, nil
       }
    }
-   if out.Cookie == nil {
-      return nil, fmt.Errorf("sign in: skyCEsidmesso01 cookie not found in response")
-   }
-
-   return &out, nil
+   return nil, nil, fmt.Errorf("sign in: skyCEsidmesso01 cookie not found in response")
 }
 
 func (*SignInResponse) CachePath() string {
@@ -382,4 +374,4 @@ func (p *PlayoutVodResponse) AcquireLicense(challenge []byte) ([]byte, error) {
    return license, nil
 }
 
-// peacock.go marker preserve
+// peacock.go KEEP VERBATIM

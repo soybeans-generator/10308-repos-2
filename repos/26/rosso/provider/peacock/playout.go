@@ -1,4 +1,4 @@
-// playout.go marker preserve
+// playout.go KEEP VERBATIM
 package peacock
 
 import (
@@ -177,4 +177,4 @@ type playoutRequest struct {
    PersonaParentalControlRating string        `json:"personaParentalControlRating"`
 }
 
-// playout.go marker preserve
+// playout.go KEEP VERBATIM

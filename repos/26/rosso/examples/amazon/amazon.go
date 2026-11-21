@@ -189,11 +189,11 @@ func (c *client) do_playback() error {
    if err != nil {
       return fmt.Errorf("failed to get VOD playback resources: %v", err)
    }
-   clean, err := resources.Clean()
+   manifestUrl, err := resources.DashUrl()
    if err != nil {
       return err
    }
-   manifest, err := maya.DashList(clean)
+   manifest, err := maya.DashList(manifestUrl)
    if err != nil {
       return err
    }
