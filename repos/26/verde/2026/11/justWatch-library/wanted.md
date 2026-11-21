@@ -6,7 +6,7 @@ https://justwatch.com/us/movie/woman-unknown
 
 ## 2026
 
-- https://justwatch.com/us/movie/backrooms
+- https://justwatch.com/us/movie/all-you-need-is-kill
 - https://justwatch.com/us/movie/carolina-caroline
 - https://justwatch.com/us/movie/crime-101
 - https://justwatch.com/us/movie/digger-2026
@@ -383,6 +383,7 @@ https://justwatch.com/us/movie/the-color-of-money
 
 ## 1985
 
+- https://justwatch.com/us/movie/angels-egg
 - https://justwatch.com/us/movie/back-to-the-future-part-i
 - https://justwatch.com/us/movie/come-and-see
 - https://justwatch.com/us/movie/witness

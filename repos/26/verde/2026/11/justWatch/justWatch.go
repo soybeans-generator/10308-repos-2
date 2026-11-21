@@ -1,6 +1,13 @@
+// justWatch.go KEEP THIS LINE
 package main
 
-// 2025-11-04
+import (
+   _ "embed"
+   "encoding/json"
+   "net/url"
+)
+
+// EnUs is the locale table hreflang tags get resolved against.
 var EnUs = Locales{
    {FullLocale: "en_US", Country: "US", CountryName: "United States"},
    {FullLocale: "de_DE", Country: "DE", CountryName: "Germany"},
@@ -142,3 +149,74 @@ var EnUs = Locales{
    {FullLocale: "en_BM", Country: "BM", CountryName: "Bermuda"},
    {FullLocale: "ar_YE", Country: "YE", CountryName: "Yemen"},
 }
+
+//go:embed GetUrlTitleDetails.gql
+var getUrlTitleDetails string
+
+type Content struct {
+   HrefLangTags []HrefLangTag `json:"href_lang_tags"`
+}
+
+func (c *Content) Fetch(path string) error {
+   body, err := api.get("/content/urls?" + url.Values{"path": {path}}.Encode())
+   if err != nil {
+      return err
+   }
+   return json.Unmarshal(body, c)
+}
+
+type EnrichedOffer struct {
+   Locale *Locale
+   Offer  *Offer
+}
+
+type HrefLangTag struct {
+   Href   string // /ar/pelicula/mulholland-drive
+   Locale string // es_AR
+}
+
+func (h *HrefLangTag) Offers(locale *Locale) ([]Offer, error) {
+   data, err := api.graphql(getUrlTitleDetails, map[string]string{
+      "country":  locale.Country,
+      "fullPath": h.Href,
+   })
+   if err != nil {
+      return nil, err
+   }
+   var reply struct {
+      URL struct {
+         Node struct {
+            Offers []Offer
+         }
+      }
+   }
+   if err := json.Unmarshal(data, &reply); err != nil {
+      return nil, err
+   }
+   return reply.URL.Node.Offers, nil
+}
+
+type Locale struct {
+   FullLocale  string
+   Country     string
+   CountryName string
+}
+
+type Locales []Locale
+
+func (l Locales) Locale(tag *HrefLangTag) (*Locale, bool) {
+   for _, locale := range l {
+      if locale.FullLocale == tag.Locale {
+         return &locale, true
+      }
+   }
+   return nil, false
+}
+
+type Offer struct {
+   ElementCount     int
+   MonetizationType string
+   StandardWebUrl   string
+}
+
+// justWatch.go KEEP THIS LINE
