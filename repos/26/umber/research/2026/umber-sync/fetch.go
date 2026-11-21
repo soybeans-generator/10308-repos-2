@@ -1,9 +1,9 @@
-// fetch.go marker preserve
+// fetch.go KEEP THIS LINE
 package main
 
 import (
    "bytes"
-   "context"
+   "errors"
    "fmt"
    "io"
    "log"
@@ -12,280 +12,267 @@ import (
    "os"
    "os/exec"
    "path/filepath"
+   "strconv"
    "strings"
    "sync"
+   "sync/atomic"
    "time"
 )
 
-var errETASkipped = fmt.Errorf("skipped due to ETA")
+func baseStem(path string) string {
+   return strings.TrimSuffix(filepath.Base(path), ".part")
+}
 
-// downloadFile downloads url to filename, using a Range-request probe to
-// split the transfer across threads parallel chunks when the server
-// supports ranges, and falling back to downloadFileSingle otherwise.
-// Items whose estimated time to completion exceeds maxETA are abandoned;
-// a maxETA of 0 or less disables the check. Only the YouTube path calls
-// this — Bandcamp and SoundCloud always download through
-// downloadFileSingle with no limit.
-func downloadFile(url, filename string, threads int, maxETA time.Duration) error {
-   probeReq, err := http.NewRequest("GET", url, nil)
-   if err != nil {
-      return fmt.Errorf("create probe request: %w", err)
+func commit(rawPath, taggedPath, finalPath string) error {
+   if err := os.Remove(rawPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+      return fmt.Errorf("remove raw file: %w", err)
    }
-   probeReq.Header.Set("Range", "bytes=0-0")
-
-   probeResp, err := http.DefaultClient.Do(probeReq)
-   if err != nil {
-      return fmt.Errorf("probe request: %w", err)
+   if err := os.Rename(taggedPath, finalPath); err != nil {
+      return fmt.Errorf("rename output: %w", err)
    }
-   contentRange := probeResp.Header.Get("Content-Range")
-   if _, err := io.Copy(io.Discard, probeResp.Body); err != nil {
-      probeResp.Body.Close()
-      return fmt.Errorf("drain probe body: %w", err)
-   }
-   if err := probeResp.Body.Close(); err != nil {
-      return fmt.Errorf("close probe body: %w", err)
-   }
-
-   if contentRange == "" {
-      return downloadFileSingle(url, filename, maxETA)
-   }
-
-   parts := strings.Split(contentRange, "/")
-   if len(parts) != 2 {
-      return downloadFileSingle(url, filename, maxETA)
-   }
-   var total int64
-   if _, err := fmt.Sscanf(parts[1], "%d", &total); err != nil {
-      return downloadFileSingle(url, filename, maxETA)
-   }
-
-   chunkSize := (total + int64(threads) - 1) / int64(threads)
-   type result struct {
-      data []byte
-      err  error
-   }
-   results := make([]result, threads)
-   var wg sync.WaitGroup
-
-   ctx, cancel := context.WithCancel(context.Background())
-   defer cancel()
-
-   start := time.Now()
-   lastLog := time.Now()
-   var downloaded int64
-   var mu sync.Mutex
-   var skipped bool
-
-   logProgress := func() {
-      now := time.Now()
-      if now.Sub(lastLog) < time.Second {
-         return
-      }
-      elapsed := now.Sub(start).Round(time.Millisecond)
-      var etaDuration time.Duration
-      if downloaded > 0 {
-         speed := float64(downloaded) / elapsed.Seconds()
-         if speed > 0 {
-            remaining := float64(total - downloaded)
-            if remaining < 0 {
-               remaining = 0
-            }
-            etaDuration = time.Duration(remaining / speed * float64(time.Second))
-         }
-      }
-      etaStr := "unknown"
-      if etaDuration > 0 {
-         etaStr = etaDuration.Round(time.Millisecond).String()
-      }
-      log.Printf("%s  %s / %s  elapsed %s  eta %s",
-         filepath.Base(filename), formatBytes(downloaded), formatBytes(total), elapsed.String(), etaStr)
-      lastLog = now
-      if maxETA > 0 && etaDuration > maxETA && now.Sub(start) > 2*time.Second {
-         skipped = true
-         cancel()
-      }
-   }
-
-   for i := range threads {
-      wg.Go(func() {
-         startByte := int64(i) * chunkSize
-         endByte := startByte + chunkSize - 1
-         if endByte > total-1 {
-            endByte = total - 1
-         }
-         if startByte > endByte {
-            return
-         }
-         chunkReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-         if err != nil {
-            results[i].err = err
-            return
-         }
-         chunkReq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", startByte, endByte))
-         chunkResp, err := http.DefaultClient.Do(chunkReq)
-         if err != nil {
-            results[i].err = err
-            return
-         }
-         defer chunkResp.Body.Close()
-         if chunkResp.StatusCode != http.StatusOK && chunkResp.StatusCode != http.StatusPartialContent {
-            results[i].err = fmt.Errorf("chunk %d returned status %d", i, chunkResp.StatusCode)
-            return
-         }
-         buf := make([]byte, 32*1024)
-         for {
-            n, rerr := chunkResp.Body.Read(buf)
-            if n > 0 {
-               results[i].data = append(results[i].data, buf[:n]...)
-               mu.Lock()
-               downloaded += int64(n)
-               logProgress()
-               mu.Unlock()
-            }
-            if rerr == io.EOF {
-               break
-            }
-            if rerr != nil {
-               results[i].err = rerr
-               return
-            }
-         }
-      })
-   }
-   wg.Wait()
-
-   if skipped {
-      return fmt.Errorf("%w: ETA exceeds max %s", errETASkipped, maxETA)
-   }
-   for i := range results {
-      if results[i].err != nil {
-         return fmt.Errorf("thread %d: %w", i, results[i].err)
-      }
-   }
-
-   out, err := os.Create(filename)
-   if err != nil {
-      return fmt.Errorf("create file: %w", err)
-   }
-   defer out.Close()
-   for i := range results {
-      if len(results[i].data) > 0 {
-         if _, err := out.Write(results[i].data); err != nil {
-            return fmt.Errorf("write file: %w", err)
-         }
-      }
-   }
-   log.Printf("%s  done  %s in %s", strings.TrimSuffix(filepath.Base(filename), ".tmp"), formatBytes(total), time.Since(start).Round(time.Millisecond).String())
    return nil
 }
 
-// downloadFileSingle streams url to filename in one request, the fallback
-// for servers without range support. As in downloadFile, items whose
-// estimated time to completion exceeds maxETA are abandoned mid-transfer;
-// a maxETA of 0 or less disables the check — which is how the ETA-free
-// Bandcamp and SoundCloud paths call it.
-func downloadFileSingle(url, filename string, maxETA time.Duration) error {
-   resp, err := http.Get(url)
+// downloadFile fetches with parallel range requests when the server allows
+// them, and falls back to a single-stream download otherwise.
+func downloadFile(streamURL, path string, threads int, maxETA time.Duration) error {
+   total, ranged, err := remoteSize(streamURL)
    if err != nil {
-      return fmt.Errorf("download request: %w", err)
+      return err
+   }
+   if !ranged || threads < 2 {
+      return downloadFileSingle(streamURL, path, maxETA)
+   }
+   return downloadRanged(streamURL, path, total, threads, maxETA)
+}
+
+// downloadFileSingle streams the whole body in one request. A maxETA of 0
+// or less disables the ETA limit.
+func downloadFileSingle(streamURL, path string, maxETA time.Duration) error {
+   resp, err := http.Get(streamURL)
+   if err != nil {
+      return fmt.Errorf("request: %w", err)
    }
    defer resp.Body.Close()
    if resp.StatusCode != http.StatusOK {
-      return fmt.Errorf("download returned status %d", resp.StatusCode)
+      return fmt.Errorf("download: %s", resp.Status)
    }
 
-   total := resp.ContentLength
-   out, err := os.Create(filename)
+   f, err := os.Create(path)
    if err != nil {
       return fmt.Errorf("create file: %w", err)
    }
-   defer out.Close()
+   defer f.Close()
 
+   total := resp.ContentLength
    start := time.Now()
-   lastLog := time.Now()
-   buf := make([]byte, 32*1024)
-   var downloaded int64
-
+   last := start
+   var received int64
+   buf := make([]byte, 32<<10)
    for {
-      n, err := resp.Body.Read(buf)
+      n, rerr := resp.Body.Read(buf)
       if n > 0 {
-         if _, werr := out.Write(buf[:n]); werr != nil {
+         if _, werr := f.Write(buf[:n]); werr != nil {
             return fmt.Errorf("write file: %w", werr)
          }
-         downloaded += int64(n)
-         now := time.Now()
-         if now.Sub(lastLog) >= time.Second {
-            elapsed := now.Sub(start).Round(time.Millisecond)
-            var etaDuration time.Duration
-            if total > 0 && downloaded > 0 {
-               speed := float64(downloaded) / elapsed.Seconds()
-               if speed > 0 {
-                  remaining := float64(total - downloaded)
-                  if remaining < 0 {
-                     remaining = 0
-                  }
-                  etaDuration = time.Duration(remaining / speed * float64(time.Second))
-               }
-            }
-            etaStr := "unknown"
-            if etaDuration > 0 {
-               etaStr = etaDuration.Round(time.Millisecond).String()
-            }
-            log.Printf("%s  %s / %s  elapsed %s  eta %s",
-               strings.TrimSuffix(filepath.Base(filename), ".tmp"), formatBytes(downloaded), formatBytes(total), elapsed.String(), etaStr)
-            lastLog = now
-            if maxETA > 0 && etaDuration > maxETA && now.Sub(start) > 2*time.Second {
-               return fmt.Errorf("%w: ETA %s exceeds max %s", errETASkipped, etaDuration.Round(time.Millisecond), maxETA)
+         received += int64(n)
+         if now := time.Now(); now.Sub(last) >= time.Second {
+            last = now
+            elapsed := now.Sub(start)
+            logTransfer(path, received, total, elapsed)
+            eta, known := etaFor(received, total, elapsed)
+            if maxETA > 0 && known && eta > maxETA && elapsed > 2*time.Second {
+               return fmt.Errorf("eta limit exceeded: projected %s over %s", eta.Round(time.Millisecond), maxETA)
             }
          }
       }
-      if err == io.EOF {
+      if rerr == io.EOF {
          break
       }
-      if err != nil {
-         return fmt.Errorf("read body: %w", err)
+      if rerr != nil {
+         return fmt.Errorf("read body: %w", rerr)
       }
    }
-   log.Printf("%s  done  %s in %s", strings.TrimSuffix(filepath.Base(filename), ".tmp"), formatBytes(downloaded), time.Since(start).Round(time.Millisecond).String())
+   log.Printf("%s  done  %s in %s", baseStem(path), formatBytes(received), time.Since(start).Round(time.Millisecond))
    return nil
 }
 
-func formatBytes(b int64) string {
-   if b < 0 {
-      return "?"
+func downloadRanged(streamURL, path string, total int64, threads int, maxETA time.Duration) error {
+   f, err := os.Create(path)
+   if err != nil {
+      return fmt.Errorf("create file: %w", err)
    }
-   if b < 1024 {
-      return fmt.Sprintf("%d B", b)
+   defer f.Close()
+   if err := f.Truncate(total); err != nil {
+      return fmt.Errorf("size file: %w", err)
    }
-   const unit = 1024
-   div, exp := int64(unit), 0
-   for n := b / unit; n >= unit; n /= unit {
-      div *= unit
-      exp++
+
+   stop := make(chan struct{})
+   var once sync.Once
+   halt := func() { once.Do(func() { close(stop) }) }
+   defer halt()
+
+   var (
+      received atomic.Int64
+      skipETA  atomic.Bool
+      workers  sync.WaitGroup
+      watcher  sync.WaitGroup
+      errOnce  sync.Once
+      fetchErr error
+   )
+   fail := func(err error) {
+      errOnce.Do(func() { fetchErr = err })
+      halt()
    }
-   return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+
+   start := time.Now()
+   width := (total + int64(threads) - 1) / int64(threads)
+   for i := 0; i < threads; i++ {
+      first := int64(i) * width
+      last := min(first+width-1, total-1)
+      if first > last {
+         break
+      }
+      workers.Add(1)
+      go func(first, last int64) {
+         defer workers.Done()
+         if err := fetchRange(f, streamURL, first, last, &received, stop); err != nil {
+            fail(err)
+         }
+      }(first, last)
+   }
+
+   watcher.Add(1)
+   go func() {
+      defer watcher.Done()
+      ticker := time.NewTicker(time.Second)
+      defer ticker.Stop()
+      for {
+         select {
+         case <-stop:
+            return
+         case now := <-ticker.C:
+            elapsed := now.Sub(start)
+            done := received.Load()
+            logTransfer(path, done, total, elapsed)
+            eta, known := etaFor(done, total, elapsed)
+            if maxETA > 0 && known && eta > maxETA && elapsed > 2*time.Second {
+               skipETA.Store(true)
+               halt()
+               return
+            }
+         }
+      }
+   }()
+
+   workers.Wait()
+   halt()
+   watcher.Wait()
+
+   if skipETA.Load() {
+      return fmt.Errorf("eta limit exceeded: over %s", maxETA)
+   }
+   if fetchErr != nil {
+      return fetchErr
+   }
+   log.Printf("%s  done  %s in %s", baseStem(path), formatBytes(total), time.Since(start).Round(time.Millisecond))
+   return nil
 }
 
-// recordID returns the URL-derived identifier used to disambiguate records
-// whose filename stems collide: the YouTube video ID, or the final path
-// segment of a Bandcamp URL (e.g. "waiting" in .../track/waiting) or a
-// SoundCloud URL (e.g. "flickermood" in .../forss/flickermood). p must
-// be the record's platform as classified by platformOf.
-func recordID(p platform, raw string) (string, error) {
+func etaFor(done, total int64, elapsed time.Duration) (time.Duration, bool) {
+   if done <= 0 || total <= 0 || done >= total || elapsed <= 0 {
+      return 0, false
+   }
+   rate := float64(done) / elapsed.Seconds()
+   if rate <= 0 {
+      return 0, false
+   }
+   return time.Duration(float64(total-done) / rate * float64(time.Second)), true
+}
+
+// fetchRange writes one byte range into f at its own offset. It stops
+// early, returning nil, once stop is closed: a canceled transfer's cause
+// is reported by whoever closed stop, not by the worker.
+func fetchRange(f *os.File, streamURL string, first, last int64, received *atomic.Int64, stop <-chan struct{}) error {
+   req, err := http.NewRequest(http.MethodGet, streamURL, nil)
+   if err != nil {
+      return err
+   }
+   req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", first, last))
+
+   resp, err := http.DefaultClient.Do(req)
+   if err != nil {
+      return err
+   }
+   defer resp.Body.Close()
+   if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+      return fmt.Errorf("range %d-%d: %s", first, last, resp.Status)
+   }
+
+   buf := make([]byte, 32<<10)
+   offset := first
+   for {
+      select {
+      case <-stop:
+         return nil
+      default:
+      }
+
+      n, rerr := resp.Body.Read(buf)
+      if n > 0 {
+         if _, werr := f.WriteAt(buf[:n], offset); werr != nil {
+            return fmt.Errorf("write file: %w", werr)
+         }
+         offset += int64(n)
+         received.Add(int64(n))
+      }
+      if rerr == io.EOF {
+         return nil
+      }
+      if rerr != nil {
+         return fmt.Errorf("read body: %w", rerr)
+      }
+   }
+}
+
+func formatBytes(n int64) string {
+   if n < 0 {
+      return "?"
+   }
+   const units = "KMGTPE"
+   div, exp := int64(1), 0
+   for n/div >= 1024 && exp < len(units) {
+      div *= 1024
+      exp++
+   }
+   if exp == 0 {
+      return fmt.Sprintf("%d B", n)
+   }
+   return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), units[exp-1])
+}
+
+func logTransfer(path string, done, total int64, elapsed time.Duration) {
+   eta := "unknown"
+   if d, ok := etaFor(done, total, elapsed); ok {
+      eta = d.Round(time.Millisecond).String()
+   }
+   log.Printf("%s  %s / %s  elapsed %s  eta %s",
+      baseStem(path), formatBytes(done), formatBytes(total), elapsed.Round(time.Millisecond), eta)
+}
+
+// recordID is the URL-derived disambiguator: the video ID for YouTube, the
+// last path segment for Bandcamp and SoundCloud.
+func recordID(p platform, rawURL string) (string, error) {
    switch p {
    case platformYouTube:
-      id, err := videoIDFromURL(raw)
-      if err != nil {
-         return "", err
-      }
-      return id, nil
+      return videoID(rawURL)
    case platformBandcamp, platformSoundCloud:
-      u, err := url.Parse(raw)
+      u, err := url.Parse(rawURL)
       if err != nil {
          return "", fmt.Errorf("parse url: %w", err)
       }
       path := strings.Trim(u.Path, "/")
-      if i := strings.LastIndex(path, "/"); i >= 0 {
+      if i := strings.LastIndexByte(path, '/'); i >= 0 {
          return path[i+1:], nil
       }
       return path, nil
@@ -293,65 +280,112 @@ func recordID(p platform, raw string) (string, error) {
    return "", nil
 }
 
-// remuxTagged remuxes src to dst with ffmpeg, stream-copying the audio
-// and tagging artist and title from the record's R and T values — both
-// are never empty, so both tags are always written. The artist tag goes
-// through the record's author(), so a YouTube topic channel's
-// " - Topic" suffix is stripped from the metadata exactly as it is from
-// the filename stem. The title tag goes through the record's metaTitle(),
-// which drops a leading or trailing author credit ("Daft Punk - Face to
-// Face" tags "Face to Face"); a title without such a credit is tagged
-// unchanged. mp3 output gets ID3 tags; m4a/opus get their native tag
-// formats. The muxer is picked from dst's extension, same contract as
-// the downloaders' remux temps.
+func remoteSize(streamURL string) (total int64, ranged bool, err error) {
+   req, err := http.NewRequest(http.MethodGet, streamURL, nil)
+   if err != nil {
+      return 0, false, err
+   }
+   req.Header.Set("Range", "bytes=0-0")
+
+   resp, err := http.DefaultClient.Do(req)
+   if err != nil {
+      return 0, false, fmt.Errorf("probe: %w", err)
+   }
+   defer resp.Body.Close()
+   io.Copy(io.Discard, resp.Body)
+
+   _, size, ok := strings.Cut(resp.Header.Get("Content-Range"), "/")
+   if !ok {
+      return 0, false, nil
+   }
+   total, err = strconv.ParseInt(size, 10, 64)
+   if err != nil || total <= 0 {
+      return 0, false, nil
+   }
+   return total, true, nil
+}
+
+func removeFiles(paths ...string) {
+   for _, path := range paths {
+      if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+         log.Printf("cannot remove %s: %v", path, err)
+      }
+   }
+}
+
+// remuxTagged stream-copies src to dst while writing artist and title
+// tags. The muxer follows dst's extension.
 func remuxTagged(src, dst string, r *Record) error {
-   args := []string{
+   cmd := exec.Command("ffmpeg",
       "-i", src,
       "-c", "copy",
-      "-metadata", "artist=" + r.author(),
-      "-metadata", "title=" + r.metaTitle(),
+      "-metadata", "artist="+r.artist(),
+      "-metadata", "title="+r.trackTitle(),
       dst,
-   }
-
-   cmd := exec.Command("ffmpeg", args...)
+   )
    var stderr bytes.Buffer
    cmd.Stderr = &stderr
    if err := cmd.Run(); err != nil {
-      return fmt.Errorf("ffmpeg tag: %w\n%s", err, stderr.String())
+      return fmt.Errorf("ffmpeg: %w\n%s", err, stderr.String())
    }
    return nil
 }
 
-// platform identifies which service a record's I URL points at.
+// saveTrack runs the shared pipeline: download the stream, tag it with
+// ffmpeg, then move the result into place.
+func saveTrack(streamURL string, r *Record, title, ext, outputDir string, download func(url, path string) error) (err error) {
+   name := sanitizeFilename(title, outputDir)
+   finalPath := filepath.Join(outputDir, name+ext)
+   rawPath := filepath.Join(outputDir, name+".part")
+   taggedPath := filepath.Join(outputDir, name+".remux."+ext)
+
+   defer func() {
+      if err != nil {
+         removeFiles(rawPath, taggedPath)
+      }
+   }()
+
+   if err = download(streamURL, rawPath); err != nil {
+      return err
+   }
+   if err = remuxTagged(rawPath, taggedPath, r); err != nil {
+      return err
+   }
+   if err = commit(rawPath, taggedPath, finalPath); err != nil {
+      return err
+   }
+   log.Printf("%s  ready", filepath.Base(finalPath))
+   return nil
+}
+
+func supported(p platform) bool {
+   return p == platformBandcamp || p == platformYouTube || p == platformSoundCloud
+}
+
 type platform int
 
 const (
-   platformBandcamp platform = iota
+   platformOther platform = iota
+   platformBandcamp
    platformYouTube
    platformSoundCloud
-   platformOther
 )
 
-// platformOf classifies a record URL by host: bandcamp.com (or a
-// *.bandcamp.com subdomain) is bandcamp, soundcloud.com (or a
-// *.soundcloud.com subdomain) is soundcloud, youtube.com exactly is
-// YouTube, and anything else is other. A URL that does not parse is an
-// error; callers must not silently treat it as platformOther.
-func platformOf(raw string) (platform, error) {
-   u, err := url.Parse(raw)
+func platformOf(rawURL string) (platform, error) {
+   u, err := url.Parse(rawURL)
    if err != nil {
       return platformOther, fmt.Errorf("parse url: %w", err)
    }
    host := strings.ToLower(u.Hostname())
    switch {
+   case host == "youtube.com":
+      return platformYouTube, nil
    case host == "bandcamp.com" || strings.HasSuffix(host, ".bandcamp.com"):
       return platformBandcamp, nil
    case host == "soundcloud.com" || strings.HasSuffix(host, ".soundcloud.com"):
       return platformSoundCloud, nil
-   case host == "youtube.com":
-      return platformYouTube, nil
    }
    return platformOther, nil
 }
 
-// fetch.go marker preserve
+// fetch.go KEEP THIS LINE

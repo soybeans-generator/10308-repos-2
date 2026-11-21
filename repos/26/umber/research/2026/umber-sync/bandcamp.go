@@ -1,132 +1,71 @@
-// bandcamp.go marker preserve
+// bandcamp.go KEEP THIS LINE
 package main
 
 import (
+   "bytes"
    "encoding/json"
    "errors"
    "fmt"
    "html"
    "io"
-   "log"
    "net/http"
-   "os"
-   "path/filepath"
-   "strings"
 )
 
-// downloadBandcamp downloads the mp3-128 stream for a bandcamp.com track URL
-// such as https://intlanthem.bandcamp.com/track/waiting, then remuxes it
-// with ffmpeg to tag artist and title from the record. The track page is
-// fetched once; its data-tralbum attribute embeds the streaming URL, so no separate
-// ID-resolution or mobile-API request is needed. title is the record's
-// filename stem. The max-eta limit does not apply here — it is
-// YouTube-only.
 func downloadBandcamp(r *Record, title, outputDir string) error {
-   details, err := fetch_tralbum(r.I)
+   track, err := fetchTralbum(r.URL)
    if err != nil {
-      return fmt.Errorf("resolve tralbum from %s: %w", r.I, err)
+      return fmt.Errorf("bandcamp page: %w", err)
    }
-   if len(details.TrackInfo) == 0 {
-      return fmt.Errorf("no tracks in bandcamp response")
+   if len(track.TrackInfo) == 0 {
+      return errors.New("bandcamp: no tracks in page")
    }
-
-   audioURL := details.TrackInfo[0].File["mp3-128"]
-   if audioURL == "" {
-      return fmt.Errorf("no mp3-128 stream URL found")
+   stream := track.TrackInfo[0].File["mp3-128"]
+   if stream == "" {
+      return errors.New("bandcamp: no mp3-128 stream")
    }
-
-   const ext = ".mp3"
-   name := sanitizeFilename(title, outputDir)
-   finalPath := filepath.Join(outputDir, name+ext)
-   dlPath := filepath.Join(outputDir, name+".t")
-   // Same ".remux." temp marker as YouTube's, so isTempFile covers it.
-   ffTmp := filepath.Join(outputDir, name+".remux."+ext)
-
-   // maxETA 0 disables the ETA check: Bandcamp items are never skipped
-   // for slow transfers.
-   if err := downloadFileSingle(audioURL, dlPath, 0); err != nil {
-      if err := os.Remove(dlPath); err != nil && !os.IsNotExist(err) {
-         return fmt.Errorf("remove download tmp: %w", err)
-      }
-      return err
-   }
-
-   if err := remuxTagged(dlPath, ffTmp, r); err != nil {
-      if err := os.Remove(dlPath); err != nil && !os.IsNotExist(err) {
-         return fmt.Errorf("remove download tmp: %w", err)
-      }
-      if err := os.Remove(ffTmp); err != nil && !os.IsNotExist(err) {
-         return fmt.Errorf("remove ff tmp: %w", err)
-      }
-      return err
-   }
-
-   if err := os.Remove(dlPath); err != nil && !os.IsNotExist(err) {
-      return fmt.Errorf("remove download tmp: %w", err)
-   }
-   if err := os.Rename(ffTmp, finalPath); err != nil {
-      if err := os.Remove(ffTmp); err != nil && !os.IsNotExist(err) {
-         return fmt.Errorf("remove ff tmp after rename fail: %w", err)
-      }
-      return fmt.Errorf("rename file: %w", err)
-   }
-
-   log.Printf("%s  done", filepath.Base(finalPath))
-   return nil
+   return saveTrack(stream, r, title, ".mp3", outputDir, func(streamURL, path string) error {
+      return downloadFileSingle(streamURL, path, 0)
+   })
 }
 
-// bandcampTrack mirrors one entry of the trackinfo array in the
-// data-tralbum blob; File carries the mp3-128 streaming URL.
 type bandcampTrack struct {
    File map[string]string `json:"file"`
 }
 
-// tralbum mirrors the subset of the data-tralbum JSON blob embedded in a
-// Bandcamp track page that is needed to stream the audio.
 type tralbum struct {
    TrackInfo []bandcampTrack `json:"trackinfo"`
 }
 
-// fetch_tralbum fetches a Bandcamp track page and extracts the track data
-// from its data-tralbum attribute in a single request. The blob carries
-// everything the old two-request flow gathered — including the mp3-128
-// stream URL in trackinfo[0].file.
-func fetch_tralbum(address string) (*tralbum, error) {
-   resp, err := http.Get(address)
+// fetchTralbum reads the data-tralbum attribute of a track page, which
+// already carries the streaming URL.
+func fetchTralbum(pageURL string) (*tralbum, error) {
+   resp, err := http.Get(pageURL)
    if err != nil {
       return nil, err
    }
    defer resp.Body.Close()
    if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("tralbum page: %s", resp.Status)
+      return nil, fmt.Errorf("track page: %s", resp.Status)
    }
-
-   var page strings.Builder
-   if _, err := io.Copy(&page, resp.Body); err != nil {
+   body, err := io.ReadAll(resp.Body)
+   if err != nil {
       return nil, err
    }
 
-   // The tralbum data is attached to a <script> tag as an HTML-entity-
-   // encoded JSON attribute. The attribute value ends at the next double
-   // quote. Note that data-tralbum-collect-info doesn't match this cut,
-   // because of the required quote right after the attribute name.
-   rest := page.String()
-
-   _, rest, found := strings.Cut(rest, `data-tralbum="`)
-   if !found {
-      return nil, errors.New("data-tralbum not found")
+   _, rest, ok := bytes.Cut(body, []byte(`data-tralbum="`))
+   if !ok {
+      return nil, errors.New(`data-tralbum attribute not found`)
+   }
+   attr, _, ok := bytes.Cut(rest, []byte(`"`))
+   if !ok {
+      return nil, errors.New(`data-tralbum: missing closing quote`)
    }
 
-   attr, _, found := strings.Cut(rest, `"`)
-   if !found {
-      return nil, errors.New("data-tralbum: closing quote not found")
+   var t tralbum
+   if err := json.Unmarshal([]byte(html.UnescapeString(string(attr))), &t); err != nil {
+      return nil, fmt.Errorf("decode data-tralbum: %w", err)
    }
-
-   result := new(tralbum)
-   if err := json.Unmarshal([]byte(html.UnescapeString(attr)), result); err != nil {
-      return nil, err
-   }
-   return result, nil
+   return &t, nil
 }
 
-// bandcamp.go marker preserve
+// bandcamp.go KEEP THIS LINE
