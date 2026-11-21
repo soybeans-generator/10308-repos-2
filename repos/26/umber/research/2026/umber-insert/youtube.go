@@ -1,9 +1,8 @@
-// youtube.go marker preserve
+// youtube.go KEEP THIS LINE
 package main
 
 import (
    "bytes"
-   "cmp"
    "encoding/json"
    "errors"
    "fmt"
@@ -11,17 +10,16 @@ import (
    "log"
    "net/http"
    "net/url"
-   "slices"
    "strings"
    "time"
 )
 
-const sep = "\nytcfg.set("
+var errVisitorExpired = errors.New("visitor ID expired")
 
-// errVisitorExpired is returned when the visitor ID has expired and needs refresh.
-var errVisitorExpired = fmt.Errorf("visitor ID expired")
-
-var yt_imgs = []string{
+// thumbnailNames is a probe order: the earliest file YouTube serves wins, so
+// the indices are the algorithm. Index 0 is the auto-generated image every
+// upload has — a hit there means "no artwork" and the record gets no image.
+var thumbnailNames = [...]string{
    0:  "sddefault.webp",
    1:  "sddefault.jpg",
    2:  "sd1.webp",
@@ -58,162 +56,136 @@ var yt_imgs = []string{
    33: "3.jpg",
 }
 
-func do_video_id(video_id, name, visitorID string) error {
-   watch := "https://youtube.com/watch?v=" + video_id
+func addYouTube(videoID, songsPath, visitorID string) error {
+   watchURL := "https://youtube.com/watch?v=" + videoID
 
-   songs, err := read_songs(name)
+   songs, err := loadSongs(songsPath)
+   if err != nil {
+      return err
+   }
+   if hasAddress(songs, watchURL) {
+      return fmt.Errorf("%s is already listed in %s", watchURL, songsPath)
+   }
+
+   info, err := fetchPlayer(videoID, visitorID)
+   if err != nil {
+      return err
+   }
+   fmt.Println(info.VideoDetails.ShortDescription)
+   if info.VideoDetails.Title == "" {
+      return fmt.Errorf("%s: player response carries no title", watchURL)
+   }
+
+   thumb, err := findThumbnail(videoID)
    if err != nil {
       return err
    }
 
-   if contains_song(songs, watch) {
-      return fmt.Errorf("duplicate found: '%s' already exists in %s", watch, name)
-   }
-
-   play, err := fetch_player(video_id, visitorID)
-   if err != nil {
-      return err
-   }
-   fmt.Println(play.VideoDetails.ShortDescription)
-
-   video_title := play.VideoDetails.Title
-   if video_title == "" {
-      return fmt.Errorf("%s: player response has empty title", watch)
-   }
-
-   image, err := get_image(video_id)
-   if err != nil {
-      return err
-   }
-
-   // image is "" when the video only has YouTube's default thumbnail;
-   // new_song then leaves B three elements long.
-   song_data := new_song(
-      play.VideoDetails.Author,
-      video_title,
-      watch,
-      image,
-      time.Now().Unix(),
-      play.Microformat.PlayerMicroformatRenderer.PublishDate.Year(),
-   )
-
-   songs = append(songs, song_data)
-   slices.SortFunc(songs, func(a, b *song) int {
-      return cmp.Compare(b.timestamp(), a.timestamp())
-   })
-
-   return write_songs(name, songs)
+   songs = append(songs, newSong(songFields{
+      artist:  info.VideoDetails.Author,
+      title:   info.VideoDetails.Title,
+      address: watchURL,
+      image:   thumb,
+      year:    info.Microformat.PlayerMicroformatRenderer.PublishDate.Year(),
+   }))
+   sortNewestFirst(songs)
+   return saveSongs(songsPath, songs)
 }
 
-// extractJSON isolates the JSON payload by balancing curly braces
-// directly on a byte slice to avoid memory allocations.
-func extractJSON(content []byte, prefix []byte) ([]byte, error) {
-   _, after, found := bytes.Cut(content, prefix)
-   if !found {
-      return nil, fmt.Errorf("prefix %q not found in file", prefix)
-   }
-   if len(after) == 0 {
-      return nil, fmt.Errorf("content ends abruptly after prefix")
-   }
-   if after[0] != '{' {
-      return nil, fmt.Errorf("expected '{' at the start of JSON, got %c", after[0])
-   }
-   openBraces := 0
-   inString := false
-   escapeNext := false
-   for i, char := range after {
-      if escapeNext {
-         escapeNext = false
-         continue
-      }
-      if char == '\\' {
-         escapeNext = true
-         continue
-      }
-      if char == '"' {
-         inString = !inString
-         continue
-      }
-      if !inString {
-         if char == '{' {
-            openBraces++
-         } else if char == '}' {
-            openBraces--
-            if openBraces == 0 {
-               return after[:i+1], nil
-            }
-         }
-      }
-   }
-   return nil, fmt.Errorf("could not find the matching closing brace for the JSON object")
-}
-
-// fetchVisitorID retrieves the X-Goog-Visitor-Id from YouTube's homepage
-// by parsing the ytcfg JSON embedded in the HTML.
 func fetchVisitorID() (string, error) {
-   targetUrl := &url.URL{Scheme: "https", Host: "www.youtube.com"}
-   req := &http.Request{
-      Method: http.MethodGet,
-      URL:    targetUrl,
-   }
-   log.Println("fetching visitor ID from", req.URL)
-   resp, err := http.DefaultClient.Do(req)
+   log.Print("fetching a visitor ID")
+   resp, err := http.Get("https://www.youtube.com/")
    if err != nil {
       return "", err
    }
    defer resp.Body.Close()
 
-   data, err := io.ReadAll(resp.Body)
+   page, err := io.ReadAll(resp.Body)
    if err != nil {
       return "", err
    }
-
-   data, err = extractJSON(data, []byte(sep))
+   payload, err := objectAfter(page, []byte("\nytcfg.set("))
    if err != nil {
-      return "", err
+      return "", fmt.Errorf("locate ytcfg: %w", err)
    }
 
-   var result ytCfg
-   if err := json.Unmarshal(data, &result); err != nil {
-      return "", err
+   var cfg struct {
+      Context struct {
+         Client struct {
+            VisitorData string `json:"visitorData"`
+         }
+      } `json:"INNERTUBE_CONTEXT"`
    }
-
-   return string(result.InnertubeContext.Client.VisitorData), nil
+   if err := json.Unmarshal(payload, &cfg); err != nil {
+      return "", fmt.Errorf("decode ytcfg: %w", err)
+   }
+   return url.PathUnescape(cfg.Context.Client.VisitorData)
 }
 
-func get_image(video_id string) (string, error) {
-   for index, name := range yt_imgs {
-      var address string
+// findThumbnail returns the first candidate YouTube actually serves, or "" for
+// a video with no artwork of its own.
+func findThumbnail(videoID string) (string, error) {
+   for i, name := range thumbnailNames {
+      link := "https://i.ytimg.com/vi/" + videoID + "/" + name
       if strings.HasSuffix(name, ".webp") {
-         address = "https://i.ytimg.com/vi_webp/" + video_id + "/" + name
-      } else {
-         address = "https://i.ytimg.com/vi/" + video_id + "/" + name
+         link = "https://i.ytimg.com/vi_webp/" + videoID + "/" + name
       }
-      status, err := head(address)
+      fmt.Println(link)
+
+      resp, err := http.Head(link)
       if err != nil {
          return "", err
       }
-      if status == http.StatusOK {
-         if index == 0 {
-            return "", nil
-         }
-         return address, nil
+      _ = resp.Body.Close()
+      if resp.StatusCode != http.StatusOK {
+         continue
       }
+      if i == 0 {
+         return "", nil
+      }
+      return link, nil
    }
    return "", nil
 }
 
-func head(address string) (int, error) {
-   fmt.Println(address)
-   resp, err := http.Head(address)
-   if err != nil {
-      return 0, err
+// objectAfter returns the JSON object that starts right after marker, finding
+// its end by counting braces on the raw bytes while skipping string literals.
+func objectAfter(data, marker []byte) ([]byte, error) {
+   at := bytes.Index(data, marker)
+   if at < 0 {
+      return nil, fmt.Errorf("marker %q is missing", marker)
    }
-   defer resp.Body.Close()
-   return resp.StatusCode, nil
+   start := at + len(marker)
+   if start == len(data) {
+      return nil, errors.New("input ends after the marker")
+   }
+   if data[start] != '{' {
+      return nil, fmt.Errorf("object expected, found %q", data[start])
+   }
+
+   var depth int
+   var inStr, escaped bool
+   for i := start; i < len(data); i++ {
+      switch c := data[i]; {
+      case escaped:
+         escaped = false
+      case inStr && c == '\\':
+         escaped = true
+      case c == '"':
+         inStr = !inStr
+      case inStr:
+      case c == '{':
+         depth++
+      case c == '}':
+         if depth--; depth == 0 {
+            return data[start : i+1], nil
+         }
+      }
+   }
+   return nil, errors.New("no closing brace for the object")
 }
 
-type player struct {
+type playerResponse struct {
    Microformat struct {
       PlayerMicroformatRenderer struct {
          PublishDate time.Time
@@ -225,77 +197,51 @@ type player struct {
    }
    VideoDetails struct {
       Author           string
-      LengthSeconds    int64 `json:",string"`
       ShortDescription string
       Title            string
-      VideoId          string
-      ViewCount        int64 `json:",string"`
    }
 }
 
-func fetch_player(video_id, visitorID string) (*player, error) {
-   data, err := json.Marshal(map[string]any{
+func fetchPlayer(videoID, visitorID string) (*playerResponse, error) {
+   body, err := json.Marshal(map[string]any{
       "contentCheckOk": true,
+      "racyCheckOk":    true,
+      "videoId":        videoID,
       "context": map[string]any{
          "client": map[string]string{
             "clientName":    "WEB",
             "clientVersion": "2.20231219.04.00",
          },
       },
-      "racyCheckOk": true,
-      "videoId":     video_id,
    })
    if err != nil {
       return nil, err
    }
-   req, err := http.NewRequest(
-      "POST", "https://www.youtube.com/youtubei/v1/player",
-      bytes.NewReader(data),
-   )
+
+   req, err := http.NewRequest(http.MethodPost, "https://www.youtube.com/youtubei/v1/player", bytes.NewReader(body))
    if err != nil {
       return nil, err
    }
    req.Header.Set("X-Goog-Visitor-Id", visitorID)
+
    resp, err := http.DefaultClient.Do(req)
    if err != nil {
       return nil, err
    }
    defer resp.Body.Close()
    if resp.StatusCode != http.StatusOK {
-      return nil, errors.New(resp.Status)
+      return nil, fmt.Errorf("player request: %s", resp.Status)
    }
-   result := &player{}
-   err = json.NewDecoder(resp.Body).Decode(result)
-   if err != nil {
-      return nil, err
+
+   var info playerResponse
+   if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+      return nil, fmt.Errorf("decode player response: %w", err)
    }
-   if result.PlayabilityStatus.Status == "LOGIN_REQUIRED" && strings.Contains(result.PlayabilityStatus.Reason, "not a bot") {
-      return nil, fmt.Errorf("%w: %s — %s", errVisitorExpired, result.PlayabilityStatus.Status, result.PlayabilityStatus.Reason)
+   if st := info.PlayabilityStatus; st.Status == "LOGIN_REQUIRED" &&
+      strings.Contains(st.Reason, "not a bot") {
+      return nil, fmt.Errorf("%w (%s: %s)", errVisitorExpired, st.Status, st.Reason)
    }
-   return result, nil
+   return &info, nil
 }
 
-type visitorData string
-
-func (v *visitorData) UnmarshalText(data []byte) error {
-   visitor, err := url.PathUnescape(string(data))
-   if err != nil {
-      return err
-   }
-   *v = visitorData(visitor)
-   return nil
-}
-
-type ytCfg struct {
-   InnertubeClientName    string `json:"INNERTUBE_CLIENT_NAME"`
-   InnertubeClientVersion string `json:"INNERTUBE_CLIENT_VERSION"`
-   InnertubeContext       struct {
-      Client struct {
-         VisitorData visitorData
-      }
-   } `json:"INNERTUBE_CONTEXT"`
-   InnertubeContextClientName    int    `json:"INNERTUBE_CONTEXT_CLIENT_NAME"`
-   InnertubeContextClientVersion string `json:"INNERTUBE_CONTEXT_CLIENT_VERSION"`
-}
-
-// youtube.go marker preserve
+// youtube.go KEEP THIS LINE

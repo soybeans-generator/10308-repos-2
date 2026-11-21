@@ -1,31 +1,43 @@
-// main.go marker preserve
+// main.go KEEP THIS LINE
 package main
 
 import (
    "bytes"
+   "cmp"
    "encoding/json"
    "errors"
    "flag"
+   "fmt"
    "log"
    "net/url"
    "os"
    "path/filepath"
+   "slices"
+   "time"
 )
 
-// Field positions inside the positional record. A is [timestamp, year];
-// B is [artist, title, address, image?]. The image slot is optional, so
-// B is three elements long for tracks without artwork.
-const (
-   posTime    = 0 // A[0]: unix timestamp
-   posYear    = 1 // A[1]: release year
-   posArtist  = 0 // B[0]
-   posTitle   = 1 // B[1]
-   posAddress = 2 // B[2]
-   posImage   = 3 // B[3]: optional
-)
+// addYouTubeURL adds a watch URL. A rejected visitor ID is dropped from the
+// config so the next run starts over with a fresh one.
+func addYouTubeURL(rawURL, songsPath, cfgPath string, cfg *config) error {
+   parsed, err := url.Parse(rawURL)
+   if err != nil {
+      return fmt.Errorf("parse video URL: %w", err)
+   }
+   videoID := parsed.Query().Get("v")
+   if videoID == "" {
+      return errors.New("video URL has no 'v' query parameter")
+   }
 
-// contains_song reports whether a song with the given address already exists.
-func contains_song(songs []*song, address string) bool {
+   if err := addYouTube(videoID, songsPath, cfg.VisitorID); !errors.Is(err, errVisitorExpired) {
+      return err
+   } else {
+      log.Printf("visitor ID rejected (%v); discarding it", err)
+   }
+   cfg.VisitorID = ""
+   return saveConfig(cfgPath, cfg)
+}
+
+func hasAddress(songs []*song, address string) bool {
    for _, s := range songs {
       if s.address() == address {
          return true
@@ -37,171 +49,145 @@ func contains_song(songs []*song, address string) bool {
 func main() {
    log.SetFlags(log.Ltime)
 
-   address := flag.String("b", "", "Bandcamp address")
-   name := flag.String("n", "", "input JSON file path (required on first run)")
-   soundcloud_url := flag.String("s", "", "SoundCloud address")
-   video_url := flag.String("y", "", "YouTube video URL")
-
+   bandcampAddr := flag.String("b", "", "Bandcamp track address")
+   fileName := flag.String("n", "", "songs JSON file (required on the first run)")
+   soundcloudAddr := flag.String("s", "", "SoundCloud track address")
+   videoURL := flag.String("y", "", "YouTube video URL")
    flag.Parse()
 
-   // ── Config ───────────────────────────────────────────────────────
-
-   configDir, err := os.UserConfigDir()
+   dir, err := os.UserConfigDir()
    if err != nil {
-      log.Fatalf("cannot determine config dir: %v", err)
+      log.Fatalf("locate config dir: %v", err)
    }
-   configPath := filepath.Join(configDir, "umber", "umber.json")
+   cfgPath := filepath.Join(dir, "umber", "umber.json")
+   cfg, err := loadConfig(cfgPath)
+   if err != nil {
+      log.Fatal(err)
+   }
 
-   var cfg config
-   data, err := os.ReadFile(configPath)
+   // Only the YouTube path needs a visitor ID, so fetch it on demand and keep
+   // it for later runs.
+   if cfg.VisitorID == "" && *videoURL != "" {
+      if cfg.VisitorID, err = fetchVisitorID(); err != nil {
+         log.Fatalf("fetch visitor ID: %v", err)
+      }
+      log.Print("visitor ID fetched")
+      if err := saveConfig(cfgPath, cfg); err != nil {
+         log.Fatal(err)
+      }
+   }
+
+   if *fileName != "" {
+      cfg.InputFile = *fileName
+      if err := saveConfig(cfgPath, cfg); err != nil {
+         log.Fatal(err)
+      }
+   }
+   if cfg.InputFile == "" {
+      log.Fatal("-n is required on the first run")
+   }
+
+   var runErr error
    switch {
-   case err == nil:
-      if err := json.Unmarshal(data, &cfg); err != nil {
-         log.Fatalf("cannot parse config: %v", err)
-      }
-   case errors.Is(err, os.ErrNotExist):
-      // first run, no config yet
-   default:
-      log.Fatalf("cannot read config: %v", err)
-   }
-
-   // ── Visitor ID ──────────────────────────────────────────────────
-
-   if cfg.VisitorID == "" && *video_url != "" {
-      visitorId, err := fetchVisitorID()
-      if err != nil {
-         log.Fatalf("cannot fetch visitor ID: %v", err)
-      }
-      cfg.VisitorID = visitorId
-      log.Printf("visitor ID fetched")
-      saveConfig(configPath, &cfg)
-   }
-
-   // ── Input file ──────────────────────────────────────────────────
-
-   var inputPath string
-   if *name != "" {
-      inputPath = *name
-      cfg.InputFile = inputPath
-      saveConfig(configPath, &cfg)
-   } else if cfg.InputFile != "" {
-      inputPath = cfg.InputFile
-   } else {
-      log.Fatal("-n is required on first run")
-   }
-
-   // ── Dispatch ────────────────────────────────────────────────────
-
-   switch {
-   case *address != "":
-      if err := do_bandcamp(*address, inputPath); err != nil {
-         log.Fatal(err)
-      }
-   case *soundcloud_url != "":
-      if err := do_soundcloud(*soundcloud_url, inputPath); err != nil {
-         log.Fatal(err)
-      }
-   case *video_url != "":
-      u, err := url.Parse(*video_url)
-      if err != nil {
-         log.Fatal("Invalid URL:", err)
-      }
-
-      video_id := u.Query().Get("v")
-      if video_id == "" {
-         log.Fatal("Could not extract 'v' parameter from URL")
-      }
-
-      err = do_video_id(video_id, inputPath, cfg.VisitorID)
-      if err != nil {
-         if errors.Is(err, errVisitorExpired) {
-            log.Printf("visitor ID expired, clearing from config: %v", err)
-            cfg.VisitorID = ""
-            saveConfig(configPath, &cfg)
-            return
-         }
-         log.Fatal(err)
-      }
+   case *bandcampAddr != "":
+      runErr = addBandcamp(*bandcampAddr, cfg.InputFile)
+   case *soundcloudAddr != "":
+      runErr = addSoundcloud(*soundcloudAddr, cfg.InputFile)
+   case *videoURL != "":
+      runErr = addYouTubeURL(*videoURL, cfg.InputFile, cfgPath, cfg)
    default:
       flag.Usage()
    }
+   if runErr != nil {
+      log.Fatal(runErr)
+   }
 }
 
-// saveConfig writes the config to disk.
-func saveConfig(configPath string, cfg *config) {
-   if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-      log.Fatalf("cannot create config dir: %v", err)
+func saveConfig(path string, cfg *config) error {
+   if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+      return fmt.Errorf("create config dir: %w", err)
    }
-   data, err := json.MarshalIndent(cfg, "", "  ")
+   raw, err := json.MarshalIndent(cfg, "", "  ")
    if err != nil {
-      log.Fatalf("cannot marshal config: %v", err)
+      return err
    }
-   if err := os.WriteFile(configPath, data, 0644); err != nil {
-      log.Fatalf("cannot write config: %v", err)
-   }
+   return os.WriteFile(path, raw, 0o644)
 }
 
-func write_file(name string, data []byte) error {
-   log.Println("WriteFile", name)
-   return os.WriteFile(name, data, os.ModePerm)
-}
-
-// Helper to handle the repeating logic of formatting and writing JSON
-func write_songs(name string, songs []*song) error {
+func saveSongs(path string, songs []*song) error {
    var buf bytes.Buffer
    enc := json.NewEncoder(&buf)
    enc.SetEscapeHTML(false)
    enc.SetIndent("", " ")
-   err := enc.Encode(songs)
-   if err != nil {
+   if err := enc.Encode(songs); err != nil {
       return err
    }
-   return write_file(name, buf.Bytes())
+   log.Printf("writing %s", path)
+   return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
-// config is persisted to os.UserConfigDir()/umber/umber.json.
+func sortNewestFirst(songs []*song) {
+   slices.SortFunc(songs, func(a, b *song) int { return cmp.Compare(b.addedAt(), a.addedAt()) })
+}
+
+// config lives at <user config dir>/umber/umber.json.
 type config struct {
    VisitorID string `json:"visitor_id"`
    InputFile string `json:"input_file"`
 }
 
-// song is the on-disk record:
+func loadConfig(path string) (*config, error) {
+   raw, err := os.ReadFile(path)
+   switch {
+   case errors.Is(err, os.ErrNotExist):
+      return &config{}, nil
+   case err != nil:
+      return nil, fmt.Errorf("read config: %w", err)
+   }
+   var cfg config
+   if err := json.Unmarshal(raw, &cfg); err != nil {
+      return nil, fmt.Errorf("parse config: %w", err)
+   }
+   return &cfg, nil
+}
+
+// song is one on-disk record:
 //
-//   {"A": [<unix timestamp>, <release year>],
+//   {"A": [<unix time added>, <release year>],
 //    "B": [<artist>, <title>, <address>, <image?>]}
 type song struct {
    A [2]int64 `json:"A"`
    B []string `json:"B"`
 }
 
-// new_song builds a record. The image is appended only when non-empty,
-// so the JSON carries no trailing null for tracks without artwork.
-func new_song(artist, title, address, image string, timestamp int64, year int) *song {
-   b := make([]string, 0, 4)
-   b = append(b, artist, title, address)
-   if image != "" {
-      b = append(b, image)
-   }
-   return &song{
-      A: [2]int64{timestamp, int64(year)},
-      B: b,
-   }
-}
-
-func read_songs(name string) ([]*song, error) {
-   data, err := os.ReadFile(name)
+func loadSongs(path string) ([]*song, error) {
+   raw, err := os.ReadFile(path)
    if err != nil {
       return nil, err
    }
    var songs []*song
-   err = json.Unmarshal(data, &songs)
-   if err != nil {
-      return nil, err
+   if err := json.Unmarshal(raw, &songs); err != nil {
+      return nil, fmt.Errorf("parse %s: %w", path, err)
    }
    return songs, nil
 }
-func (s *song) address() string { return s.B[posAddress] }
 
-func (s *song) timestamp() int64 { return s.A[posTime] }
+// newSong leaves the image slot off entirely when there is no artwork.
+func newSong(f songFields) *song {
+   b := []string{f.artist, f.title, f.address}
+   if f.image != "" {
+      b = append(b, f.image)
+   }
+   return &song{A: [2]int64{time.Now().Unix(), int64(f.year)}, B: b}
+}
+func (s *song) addedAt() int64 { return s.A[0] }
 
-// main.go marker preserve
+func (s *song) address() string { return s.B[2] }
+
+// songFields is the provider-supplied part of a record; addedAt is always now.
+type songFields struct {
+   artist, title, address, image string
+   year                          int
+}
+
+// main.go KEEP THIS LINE
