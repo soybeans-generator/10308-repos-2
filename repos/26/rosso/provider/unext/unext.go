@@ -2,7 +2,9 @@ package unext
 
 import (
    "bytes"
+   "crypto/sha256"
    _ "embed"
+   "encoding/base64"
    "encoding/json"
    "fmt"
    "io"
@@ -11,6 +13,9 @@ import (
    "net/url"
    "strings"
 )
+
+// Japan
+const x_forwarded_for = "133.0.0.0"
 
 //go:embed mad_all_episodes.graphql
 var allEpisodesQuery string
@@ -61,6 +66,90 @@ func GetEpisodeCodes(titleCode string) ([]string, error) {
    }
 
    return codes, nil
+}
+
+// Step2Login authenticates with email/password and returns the post_auth_endpoint
+func Step2Login(email, password, challengeID string) (string, error) {
+   loginURL := "https://oauth.unext.jp/oauth2/login"
+   body := map[string]any{
+      "id":           email,
+      "password":     password,
+      "challenge_id": challengeID,
+      "scope": []string{
+         "offline",
+         "unext",
+      },
+   }
+   jsonBody, err := json.Marshal(body)
+   if err != nil {
+      return "", fmt.Errorf("step2: marshalling body: %w", err)
+   }
+   req, err := http.NewRequest("POST", loginURL, bytes.NewReader(jsonBody))
+   if err != nil {
+      return "", fmt.Errorf("step2: creating request: %w", err)
+   }
+   req.Header.Set("x-forwarded-for", x_forwarded_for)
+   resp, err := clientDo(req)
+   if err != nil {
+      return "", fmt.Errorf("step2: sending request: %w", err)
+   }
+   defer resp.Body.Close()
+
+   if resp.StatusCode != http.StatusOK {
+      return "", fmt.Errorf("step2: expected 200, got %d", resp.StatusCode)
+   }
+
+   var loginResp LoginResponse
+   if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
+      return "", fmt.Errorf("step2: parsing response: %w", err)
+   }
+
+   if loginResp.PostAuthEndpoint == "" {
+      return "", fmt.Errorf("step2: post_auth_endpoint is empty")
+   }
+
+   return loginResp.PostAuthEndpoint, nil
+}
+
+// Step3GetAuthCode sends the code_challenge to the post_auth_endpoint and
+// extracts the authorization code from the 302 redirect Location header.
+func Step3GetAuthCode(postAuthEndpoint string, auth *AuthState) (string, error) {
+   fullURL := "https://oauth.unext.jp" + postAuthEndpoint
+   h := sha256.Sum256([]byte(auth.CodeVerifier))
+   challenge := base64.RawURLEncoding.EncodeToString(h[:])
+   form := url.Values{}
+   form.Set("code_challenge", challenge)
+   form.Set("code_challenge_method", "S256")
+   req, err := http.NewRequest("POST", fullURL, strings.NewReader(form.Encode()))
+   if err != nil {
+      return "", fmt.Errorf("step3: creating request: %w", err)
+   }
+   req.Header.Set("content-type", "application/x-www-form-urlencoded")
+   resp, err := clientDoNoRedirect(req)
+   if err != nil {
+      return "", fmt.Errorf("step3: sending request: %w", err)
+   }
+   defer resp.Body.Close()
+
+   if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+      return "", fmt.Errorf("step3: draining response body: %w", err)
+   }
+
+   if resp.StatusCode != http.StatusFound {
+      return "", fmt.Errorf("step3: expected 302, got %d", resp.StatusCode)
+   }
+
+   locURL, err := resp.Location()
+   if err != nil {
+      return "", fmt.Errorf("step3: getting Location header: %w", err)
+   }
+
+   code := locURL.Query().Get("code")
+   if code == "" {
+      return "", fmt.Errorf("step3: code not found in Location: %s", locURL)
+   }
+
+   return code, nil
 }
 
 // Step6GetLicense POSTs a Widevine license challenge to the U-NEXT license
@@ -146,6 +235,11 @@ type GraphQLError struct {
 type LicenseUrl struct {
    Type       string `json:"type"`
    LicenseUrl string `json:"licenseUrl"`
+}
+
+// LoginResponse is the JSON returned by /oauth2/login.
+type LoginResponse struct {
+   PostAuthEndpoint string `json:"post_auth_endpoint"`
 }
 
 // MovieAudio describes the audio codec type.
