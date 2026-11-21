@@ -1,89 +1,83 @@
-// hls.go marker preserve
+// hls.go KEEP THIS LINE
 package maya
 
 import (
-   "41.neocities.org/luna/hls"
    "errors"
    "fmt"
    "net/url"
    "path"
    "strconv"
+
+   "41.neocities.org/luna/hls"
 )
 
-// downloadHls parses an HLS manifest, extracts all necessary data, and passes it to the central orchestrator.
+// downloadHls downloads streamId from an HLS master playlist.
 func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher) error {
-   targetUri, err := getHlsStreamUrl(playlist, streamId)
+   mediaUrl, err := hlsStreamUrl(playlist, streamId)
    if err != nil {
       return err
    }
-   mediaPl, err := fetchMediaPlaylist(targetUri)
+   media, err := fetchMediaPlaylist(mediaUrl)
+   if err != nil {
+      return err
+   }
+   info, err := detectHlsType(media)
    if err != nil {
       return err
    }
 
-   info, err := determineHlsType(mediaPl)
-   if err != nil {
-      return err
-   }
-
-   allRequests := make([]segment, len(mediaPl.Segments))
-   for index, hlsSeg := range mediaPl.Segments {
-      allRequests[index] = segment{
-         url:      hlsSeg.Uri,
-         duration: hlsSeg.Duration,
-      }
+   segments := make([]segment, len(media.Segments))
+   for i, entry := range media.Segments {
+      segments[i] = segment{url: entry.Uri.String(), duration: entry.Duration}
    }
 
    var initData []byte
-   if info.IsFmp4 && mediaPl.Map != nil {
-      initData, _, err = fetchData(mediaPl.Map, nil, true)
+   if info.IsFmp4 && media.Map != nil {
+      initData, _, err = fetchData(media.Map.String(), nil, true)
       if err != nil {
-         return fmt.Errorf("failed to get HLS initialization segment: %w", err)
+         return fmt.Errorf("fetch HLS initialization segment: %w", err)
       }
    }
-   job := &downloadJob{
+
+   return orchestrateDownload(&downloadJob{
       outputFileNameBase: strconv.Itoa(streamId),
       info:               info,
-      allRequests:        allRequests,
+      allRequests:        segments,
       initSegmentData:    initData,
-      manifestProtection: nil,
       fetchKey:           fetchKey,
-   }
-   return orchestrateDownload(job)
+   })
 }
 
 // fetchMediaPlaylist fetches and parses an HLS media playlist.
-func fetchMediaPlaylist(mediaUrl *url.URL) (*hls.MediaPlaylist, error) {
-   data, _, err := fetchData(mediaUrl, nil, true)
+func fetchMediaPlaylist(mediaUrl string) (*hls.MediaPlaylist, error) {
+   data, effective, err := fetchData(mediaUrl, nil, true)
    if err != nil {
       return nil, err
    }
-   mediaPl, err := hls.DecodeMedia(string(data))
+   media, err := hls.DecodeMedia(string(data))
    if err != nil {
       return nil, err
    }
-   mediaPl.ResolveUris(mediaUrl)
-   return mediaPl, nil
+   media.ResolveUris(effective)
+   return media, nil
 }
 
-// getHlsStreamUrl finds the correct stream in an HLS playlist by its ID and returns its URI.
-func getHlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, error) {
+// hlsStreamUrl returns the URI of the variant or rendition with streamId.
+func hlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (string, error) {
    for _, variant := range playlist.StreamInfs {
       if variant.Id == streamId {
-         return variant.Uri, nil
+         return variant.Uri.String(), nil
       }
    }
    for _, rendition := range playlist.Medias {
       if rendition.Id == streamId {
-         return rendition.Uri, nil
+         return rendition.Uri.String(), nil
       }
    }
-   return nil, fmt.Errorf("stream with ID not found: %d", streamId)
+   return "", fmt.Errorf("stream with ID not found: %d", streamId)
 }
 
-// listStreamsHls is an internal helper to print streams from a parsed playlist.
-// Streams print in manifest order; sorting was dropped when the hls package
-// removed its comparators.
+// listStreamsHls prints the renditions, then the variants, in manifest order.
 func listStreamsHls(playlist *hls.MasterPlaylist) error {
    streams := make([]any, 0, len(playlist.Medias)+len(playlist.StreamInfs))
    for _, rendition := range playlist.Medias {
@@ -96,28 +90,25 @@ func listStreamsHls(playlist *hls.MasterPlaylist) error {
    return nil
 }
 
-// determineHlsType extracts the file extension directly from the segment URL.
-func determineHlsType(mediaPl *hls.MediaPlaylist) (*typeInfo, error) {
-   if len(mediaPl.Segments) == 0 {
+// detectHlsType derives the extension and container type from the first
+// segment URL.
+func detectHlsType(media *hls.MediaPlaylist) (*typeInfo, error) {
+   if len(media.Segments) == 0 {
       return nil, errors.New("empty media playlist")
    }
-
-   firstSegUrl := mediaPl.Segments[0].Uri
-   ext := path.Ext(firstSegUrl.Path)
-   if ext == "" {
-      return nil, fmt.Errorf("no file extension found in segment URL: %s", firstSegUrl.String())
+   firstUrl, err := url.Parse(media.Segments[0].Uri.String())
+   if err != nil {
+      return nil, err
    }
-
-   if ext == ".mp4a" {
-      ext = ".m4a"
+   extension := path.Ext(firstUrl.Path)
+   if extension == "" {
+      return nil, fmt.Errorf("no file extension found in segment URL: %s", firstUrl)
    }
-
-   isFmp4 := mediaPl.Map != nil || ext == ".mp4" || ext == ".m4s" || ext == ".m4a"
-
-   return &typeInfo{
-      Extension: ext,
-      IsFmp4:    isFmp4,
-   }, nil
+   if extension == ".mp4a" {
+      extension = ".m4a"
+   }
+   isFmp4 := media.Map != nil || extension == ".mp4" || extension == ".m4s" || extension == ".m4a"
+   return &typeInfo{Extension: extension, IsFmp4: isFmp4}, nil
 }
 
-// hls.go marker preserve
+// hls.go KEEP THIS LINE

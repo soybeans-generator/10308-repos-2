@@ -1,81 +1,65 @@
-// api.go marker preserve
+// api.go KEEP THIS LINE
 package maya
 
 import (
-   "41.neocities.org/luna/dash"
-   "41.neocities.org/luna/hls"
    "errors"
    "fmt"
    "io"
    "log"
    "net/http"
    "net/url"
+
+   "41.neocities.org/luna/dash"
+   "41.neocities.org/luna/hls"
 )
 
-func DashDownload(streamId string, manifestData *Manifest, optionsData *Options) error {
-   if optionsData == nil {
-      optionsData = &Options{}
+// DashDownload downloads streamId from a DASH manifest.
+func DashDownload(streamId string, m *Manifest, options *Options) error {
+   if options == nil {
+      options = &Options{}
    }
-
-   mpd, err := dash.Parse(manifestData.Body, manifestData.Url)
+   mpd, err := dash.Parse(m.Body, m.Url)
    if err != nil {
       return err
    }
-
-   kFetcher, err := optionsData.getKeyFetcher()
+   fetchKey, err := options.keyFetcher()
    if err != nil {
       return err
    }
-
-   return downloadDash(mpd, streamId, kFetcher)
+   return downloadDash(mpd, streamId, fetchKey)
 }
 
-func HlsDownload(streamId int, manifestData *Manifest, optionsData *Options) error {
-   if optionsData == nil {
-      optionsData = &Options{}
+// HlsDownload downloads streamId from an HLS master playlist.
+func HlsDownload(streamId int, m *Manifest, options *Options) error {
+   if options == nil {
+      options = &Options{}
    }
-
-   playlist, err := hls.DecodeMaster(string(manifestData.Body), manifestData.Url)
+   playlist, err := hls.DecodeMaster(string(m.Body), m.Url)
    if err != nil {
       return err
    }
-
-   kFetcher, err := optionsData.getKeyFetcher()
+   fetchKey, err := options.keyFetcher()
    if err != nil {
       return err
    }
-
-   return downloadHls(playlist, streamId, kFetcher)
+   return downloadHls(playlist, streamId, fetchKey)
 }
 
-// fetchData performs a GET and returns the body together with the URL that
-// actually served it. Callers that resolve relative URLs found in the body
-// MUST use the returned URL, not targetUrl.
-//
-// DO NOT drop the second return value, and do not "simplify" this to return
-// targetUrl. http.Client.Do follows redirects and replaces resp.Request on
-// every hop, so resp.Request.URL is the final URL — not the one passed in. A
-// manifest served from a redirected URL resolves its relative BaseURLs and
-// segment URLs against the FINAL URL; using the requested URL instead points
-// every media request at the wrong host or path, and caching Manifest.Url
-// with the requested URL spreads that corruption to later runs. This was lost
-// once already — that is why the warning lives here, not only in a commit
-// message.
-func fetchData(targetUrl *url.URL, headers map[string]string, logReq bool) ([]byte, *url.URL, error) {
-   reqHeader := make(http.Header)
-   for k, v := range headers {
-      reqHeader.Set(k, v)
+// fetchData performs a GET and returns the body with the URL that actually
+// served it. After a redirect the returned URL differs from target, and any
+// relative URL found in the body must be resolved against it.
+func fetchData(target string, headers map[string]string, logRequest bool) ([]byte, *url.URL, error) {
+   req, err := http.NewRequest(http.MethodGet, target, nil)
+   if err != nil {
+      return nil, nil, err
    }
-   req := &http.Request{
-      Method: http.MethodGet,
-      URL:    targetUrl,
-      Header: reqHeader,
+   for key, value := range headers {
+      req.Header.Set(key, value)
    }
-   // body is nil for GET
-
-   if logReq {
+   if logRequest {
       log.Println(req.Method, req.URL)
    }
+
    resp, err := http.DefaultClient.Do(req)
    if err != nil {
       return nil, nil, err
@@ -90,29 +74,27 @@ func fetchData(targetUrl *url.URL, headers map[string]string, logReq bool) ([]by
       return nil, nil, err
    }
 
-   // resp.Request is set by Client.Do, but a nil check costs nothing and
-   // keeps this from panicking if that ever stops holding.
-   effectiveUrl := targetUrl
+   effective := req.URL
    if resp.Request != nil && resp.Request.URL != nil {
-      effectiveUrl = resp.Request.URL
+      effective = resp.Request.URL
    }
-   if logReq && effectiveUrl.String() != targetUrl.String() {
-      log.Println("redirected to:", effectiveUrl)
+   if logRequest && effective.String() != req.URL.String() {
+      log.Println("redirected to:", effective)
    }
-   return body, effectiveUrl, nil
+   return body, effective, nil
 }
 
-// printStreams prints each stream with a blank line between them. Generic so
-// the DASH lister can hand over its sorted slice without copying it.
+// printStreams prints each stream, separating them with a blank line.
 func printStreams[T any](streams []T) {
-   for index, stream := range streams {
-      if index > 0 {
+   for i, stream := range streams {
+      if i > 0 {
          fmt.Println()
       }
       fmt.Println(stream)
    }
 }
 
+// DrmSystem identifies the DRM scheme used to obtain decryption keys.
 type DrmSystem int
 
 const (
@@ -121,60 +103,55 @@ const (
    DrmWidevine
 )
 
+// Manifest is a downloaded manifest together with the URL that served it.
 type Manifest struct {
    Url  *url.URL
    Body []byte
 }
 
-func DashList(baseUrl *url.URL) (*Manifest, error) {
-   body, effectiveUrl, err := fetchData(baseUrl, nil, true)
+// DashList downloads a DASH manifest and prints the streams it offers.
+func DashList(manifestUrl string) (*Manifest, error) {
+   body, effective, err := fetchData(manifestUrl, nil, true)
    if err != nil {
       return nil, err
    }
-
-   // Parse against the URL that served the manifest, not the one asked for:
-   // after a redirect the MPD's relative BaseURLs resolve against the final
-   // URL. See fetchData.
-   mpd, err := dash.Parse(body, effectiveUrl)
+   // Parse against the URL that actually served the manifest: after a
+   // redirect, relative BaseURLs resolve against the final URL.
+   mpd, err := dash.Parse(body, effective)
    if err != nil {
       return nil, err
    }
-
    if err := listStreamsDash(mpd); err != nil {
       return nil, err
    }
-
-   // Store the effective URL too: this Manifest is cached to disk and
-   // re-feeds DashDownload, which re-parses Body with Manifest.Url. A cached
-   // pre-redirect URL would break resolution on every later run.
-   return &Manifest{Url: effectiveUrl, Body: body}, nil
+   return &Manifest{Url: effective, Body: body}, nil
 }
 
-func HlsList(baseUrl *url.URL) (*Manifest, error) {
-   body, effectiveUrl, err := fetchData(baseUrl, nil, true)
+// HlsList downloads an HLS master playlist and prints the streams it offers.
+func HlsList(manifestUrl string) (*Manifest, error) {
+   body, effective, err := fetchData(manifestUrl, nil, true)
    if err != nil {
       return nil, err
    }
-
-   playlist, err := hls.DecodeMaster(string(body), effectiveUrl)
+   playlist, err := hls.DecodeMaster(string(body), effective)
    if err != nil {
       return nil, err
    }
    if err := listStreamsHls(playlist); err != nil {
       return nil, err
    }
-
-   return &Manifest{Url: effectiveUrl, Body: body}, nil
+   return &Manifest{Url: effective, Body: body}, nil
 }
 
 func (*Manifest) CachePath() string {
    return "maya/Manifest"
 }
 
+// Options configures a download.
 type Options struct {
    Drm     DrmSystem
    Device  string
    License func([]byte) ([]byte, error)
 }
 
-// api.go marker preserve
+// api.go KEEP THIS LINE
