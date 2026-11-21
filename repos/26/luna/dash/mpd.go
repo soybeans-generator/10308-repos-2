@@ -31,18 +31,11 @@ type Mpd struct {
 }
 
 // Parse decodes an MPD document, links its tree and normalizes representation
-// IDs. mpdUrl is the manifest location and may be empty.
-func Parse(data []byte, mpdUrl string) (*Mpd, error) {
-   m := &Mpd{}
+// IDs. mpdUrl is the manifest location and may be nil.
+func Parse(data []byte, mpdUrl *url.URL) (*Mpd, error) {
+   m := &Mpd{mpdUrl: mpdUrl}
    if err := xml.Unmarshal(data, m); err != nil {
       return nil, err
-   }
-   if mpdUrl != "" {
-      u, err := url.Parse(mpdUrl)
-      if err != nil {
-         return nil, err
-      }
-      m.mpdUrl = u
    }
    m.link()
    m.normalizeIds()
@@ -66,10 +59,6 @@ func (m *Mpd) GetRepresentations() map[string][]*Representation {
    return grouped
 }
 
-func (m *Mpd) ResolveBaseUrl() (*url.URL, error) {
-   return resolveRef(m.mpdUrl, m.BaseUrl)
-}
-
 func (m *Mpd) eachRep(fn func(*Representation)) {
    for _, p := range m.Periods {
       for _, set := range p.AdaptationSets {
@@ -82,7 +71,7 @@ func (m *Mpd) eachRep(fn func(*Representation)) {
 
 func (m *Mpd) link() {
    for _, p := range m.Periods {
-      p.Parent = m
+      p.parent = m
       p.link()
    }
 }
@@ -115,6 +104,10 @@ func (m *Mpd) normalizeIds() {
       }
       r.Id = id
    })
+}
+
+func (m *Mpd) resolveBaseUrl() (*url.URL, error) {
+   return resolveRef(m.mpdUrl, m.BaseUrl)
 }
 
 // mpd.go KEEP THIS LINE

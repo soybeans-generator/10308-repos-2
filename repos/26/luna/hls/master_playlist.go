@@ -17,8 +17,8 @@ type MasterPlaylist struct {
 }
 
 // DecodeMaster parses a master playlist. base is the location it was loaded from
-// and may be empty; every relative URI is resolved against it.
-func DecodeMaster(content, base string) (*MasterPlaylist, error) {
+// and may be nil; every relative URI is resolved against it.
+func DecodeMaster(content string, base *url.URL) (*MasterPlaylist, error) {
    lines := splitLines(content)
    if err := checkHeader(lines); err != nil {
       return nil, err
@@ -27,9 +27,7 @@ func DecodeMaster(content, base string) (*MasterPlaylist, error) {
    if err != nil {
       return nil, err
    }
-   if err := master.ResolveUris(base); err != nil {
-      return nil, err
-   }
+   master.resolveUris(base)
    return master, nil
 }
 
@@ -84,46 +82,40 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
          }
          // The lowest bandwidth tag is the primary description of the URI
          // and may overwrite what an earlier tag set.
-         primary := stream.Bandwidth == 0 || bandwidth < stream.Bandwidth
+         primary := stream.bandwidth == 0 || bandwidth < stream.bandwidth
          if primary && bandwidth > 0 {
-            stream.Bandwidth = bandwidth
+            stream.bandwidth = bandwidth
          }
          if err := stream.applyAttributes(attrs, primary); err != nil {
             return nil, err
          }
-         if audio := attrs["AUDIO"]; audio != "" && !slices.Contains(stream.Audio, audio) {
-            stream.Audio = append(stream.Audio, audio)
+         if audio := attrs["AUDIO"]; audio != "" && !slices.Contains(stream.audio, audio) {
+            stream.audio = append(stream.audio, audio)
          }
       }
    }
    return master, nil
 }
 
-// ResolveUris makes every URI absolute. An unparsable base is an error and leaves
-// the playlist untouched; an empty base leaves URIs as written.
-func (mp *MasterPlaylist) ResolveUris(base string) error {
-   baseUrl, err := parseBase(base)
-   if err != nil {
-      return err
-   }
+// resolveUris makes every URI absolute. A nil base leaves URIs as written.
+func (mp *MasterPlaylist) resolveUris(base *url.URL) {
    for _, stream := range mp.StreamInfs {
-      stream.Uri = resolveReference(baseUrl, stream.Uri)
+      stream.Uri = resolveReference(base, stream.Uri)
    }
    for _, media := range mp.Medias {
-      media.Uri = resolveReference(baseUrl, media.Uri)
+      media.Uri = resolveReference(base, media.Uri)
    }
-   return nil
 }
 
 // Media is an #EXT-X-MEDIA tag.
 type Media struct {
-   AutoSelect bool
-   Channels   string
-   GroupId    string
+   autoSelect bool
+   channels   string
+   groupId    string
    Id         int
-   Language   string
-   Name       string
-   Type       string
+   language   string
+   name       string
+   mediaType  string
    Uri        *url.URL
 }
 
@@ -134,12 +126,12 @@ func parseMediaTag(line string) (*Media, error) {
    }
 
    media := &Media{
-      Type:       attrs["TYPE"],
-      GroupId:    attrs["GROUP-ID"],
-      Name:       attrs["NAME"],
-      Language:   attrs["LANGUAGE"],
-      Channels:   attrs["CHANNELS"],
-      AutoSelect: attrs["AUTOSELECT"] == "YES",
+      mediaType:  attrs["TYPE"],
+      groupId:    attrs["GROUP-ID"],
+      name:       attrs["NAME"],
+      language:   attrs["LANGUAGE"],
+      channels:   attrs["CHANNELS"],
+      autoSelect: attrs["AUTOSELECT"] == "YES",
    }
    if uri := attrs["URI"]; uri != "" {
       if media.Uri, err = url.Parse(uri); err != nil {
@@ -152,15 +144,15 @@ func parseMediaTag(line string) (*Media, error) {
 // String returns a multi-line summary of the Media.
 func (m *Media) String() string {
    var b strings.Builder
-   fmt.Fprintln(&b, "type:", m.Type)
-   if m.Name != "" {
-      fmt.Fprintln(&b, "name:", m.Name)
+   fmt.Fprintln(&b, "type:", m.mediaType)
+   if m.name != "" {
+      fmt.Fprintln(&b, "name:", m.name)
    }
-   if m.Language != "" {
-      fmt.Fprintln(&b, "lang:", m.Language)
+   if m.language != "" {
+      fmt.Fprintln(&b, "lang:", m.language)
    }
-   if m.GroupId != "" {
-      fmt.Fprintln(&b, "group:", m.GroupId)
+   if m.groupId != "" {
+      fmt.Fprintln(&b, "group:", m.groupId)
    }
    fmt.Fprint(&b, "id: ", m.Id)
    return b.String()
@@ -170,29 +162,29 @@ func (m *Media) String() string {
 // the same URI. Values come from the variant with the lowest bandwidth; whatever
 // that variant omits is filled in from the others.
 type StreamInf struct {
-   Audio            []string
-   AverageBandwidth int
-   Bandwidth        int
-   Codecs           string
-   FrameRate        string
+   audio            []string
+   averageBandwidth int
+   bandwidth        int
+   codecs           string
+   frameRate        string
    Id               int
-   Resolution       string
-   Subtitles        string
+   resolution       string
+   subtitles        string
    Uri              *url.URL
 }
 
 // String returns a multi-line summary of the StreamInf.
 func (s *StreamInf) String() string {
    var b strings.Builder
-   if s.AverageBandwidth > 0 {
-      fmt.Fprintln(&b, "average bandwidth:", s.AverageBandwidth)
+   if s.averageBandwidth > 0 {
+      fmt.Fprintln(&b, "average bandwidth:", s.averageBandwidth)
    }
-   fmt.Fprintln(&b, "bandwidth:", s.Bandwidth)
-   if s.Resolution != "" {
-      fmt.Fprintln(&b, "resolution:", s.Resolution)
+   fmt.Fprintln(&b, "bandwidth:", s.bandwidth)
+   if s.resolution != "" {
+      fmt.Fprintln(&b, "resolution:", s.resolution)
    }
-   if s.Codecs != "" {
-      videoCodec, _, _ := strings.Cut(s.Codecs, ",")
+   if s.codecs != "" {
+      videoCodec, _, _ := strings.Cut(s.codecs, ",")
       fmt.Fprintln(&b, "codecs:", videoCodec)
    }
    fmt.Fprint(&b, "id: ", s.Id)
@@ -204,10 +196,10 @@ func (s *StreamInf) String() string {
 // primary variant declared.
 func (s *StreamInf) applyAttributes(attrs map[string]string, primary bool) error {
    fields := map[string]*string{
-      "CODECS":     &s.Codecs,
-      "RESOLUTION": &s.Resolution,
-      "FRAME-RATE": &s.FrameRate,
-      "SUBTITLES":  &s.Subtitles,
+      "CODECS":     &s.codecs,
+      "RESOLUTION": &s.resolution,
+      "FRAME-RATE": &s.frameRate,
+      "SUBTITLES":  &s.subtitles,
    }
    for key, target := range fields {
       if value := attrs[key]; value != "" && (primary || *target == "") {
@@ -219,8 +211,8 @@ func (s *StreamInf) applyAttributes(attrs map[string]string, primary bool) error
    if err != nil {
       return err
    }
-   if average > 0 && (primary || s.AverageBandwidth == 0) {
-      s.AverageBandwidth = average
+   if average > 0 && (primary || s.averageBandwidth == 0) {
+      s.averageBandwidth = average
    }
    return nil
 }
