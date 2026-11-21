@@ -2,68 +2,55 @@
 package main
 
 import (
-   "cmp"
+   "bytes"
    "encoding/json"
    "errors"
    "fmt"
    "html"
    "io"
    "net/http"
-   "slices"
-   "strings"
    "time"
 )
 
-// do_bandcamp adds a Bandcamp track to the songs file. The address the
-// user pasted is what gets stored as the address slot, so the duplicate
-// check runs first, before any network request.
-func do_bandcamp(address, name string) error {
-   songs, err := read_songs(name)
+func addBandcamp(address, songsPath string) error {
+   songs, err := loadSongs(songsPath)
+   if err != nil {
+      return err
+   }
+   if hasAddress(songs, address) {
+      return fmt.Errorf("%s is already listed in %s", address, songsPath)
+   }
+
+   info, err := fetchTralbum(address)
    if err != nil {
       return err
    }
 
-   if contains_song(songs, address) {
-      return fmt.Errorf("duplicate found: '%s' already exists in %s", address, name)
+   // Standalone tracks carry no album_release_date; fall back to the track's
+   // own release date. Both look like "12 Jun 2026 00:00:00 GMT".
+   date := info.AlbumReleaseDate
+   if date == "" {
+      date = info.Current.ReleaseDate
    }
-
-   details, err := fetch_tralbum(address)
+   released, err := time.Parse("02 Jan 2006 15:04:05 GMT", date)
    if err != nil {
-      return err
+      return fmt.Errorf("%s: release date %q: %w", address, date, err)
    }
 
-   // Tracks not on an album have album_release_date = null; fall back to
-   // the track's own release date. Dates look like "12 Jun 2026 00:00:00 GMT".
-   release_date := details.AlbumReleaseDate
-   if release_date == "" {
-      release_date = details.Current.ReleaseDate
-   }
-   release, err := time.Parse("02 Jan 2006 15:04:05 GMT", release_date)
-   if err != nil {
-      return err
-   }
-
-   songs = append(songs, new_song(
-      details.Artist,
-      details.Current.Title,
-      address,
-      // 700 x 700
-      fmt.Sprintf("https://f4.bcbits.com/img/a%d_5", details.ArtId),
-      time.Now().Unix(),
-      release.Year(),
-   ))
-   slices.SortFunc(songs, func(a, b *song) int {
-      return cmp.Compare(b.timestamp(), a.timestamp())
-   })
-
-   return write_songs(name, songs)
+   songs = append(songs, newSong(songFields{
+      artist:  info.Artist,
+      title:   info.Current.Title,
+      address: address,
+      image:   fmt.Sprintf("https://f4.bcbits.com/img/a%d_5", info.ArtID), // 700x700
+      year:    released.Year(),
+   }))
+   sortNewestFirst(songs)
+   return saveSongs(songsPath, songs)
 }
 
-// tralbum mirrors the fields we need from the data-tralbum JSON blob
-// embedded in a Bandcamp track page.
 type tralbum struct {
    Artist           string `json:"artist"`
-   ArtId            int    `json:"art_id"`
+   ArtID            int    `json:"art_id"`
    AlbumReleaseDate string `json:"album_release_date"`
    Current          struct {
       Title       string `json:"title"`
@@ -71,10 +58,7 @@ type tralbum struct {
    } `json:"current"`
 }
 
-// fetch_tralbum fetches a Bandcamp track page and extracts the track
-// details from its data-tralbum attribute in a single request. The JSON
-// blob carries artist, title, art ID and the release date.
-func fetch_tralbum(address string) (*tralbum, error) {
+func fetchTralbum(address string) (*tralbum, error) {
    resp, err := http.Get(address)
    if err != nil {
       return nil, err
@@ -84,32 +68,27 @@ func fetch_tralbum(address string) (*tralbum, error) {
       return nil, fmt.Errorf("tralbum page: %s", resp.Status)
    }
 
-   var page strings.Builder
-   if _, err := io.Copy(&page, resp.Body); err != nil {
+   page, err := io.ReadAll(resp.Body)
+   if err != nil {
       return nil, err
    }
 
-   // The tralbum data is attached to a <script> tag as an HTML-entity-
-   // encoded JSON attribute. The attribute value ends at the next double
-   // quote. Note that data-tralbum-collect-info doesn't match this cut,
-   // because of the required quote right after the attribute name.
-   rest := page.String()
-
-   _, rest, found := strings.Cut(rest, `data-tralbum="`)
-   if !found {
-      return nil, errors.New("data-tralbum not found")
+   // The blob is an HTML-entity-encoded JSON attribute on a <script> tag. The
+   // quote right after the name keeps data-tralbum-collect-info from matching.
+   _, rest, ok := bytes.Cut(page, []byte(`data-tralbum="`))
+   if !ok {
+      return nil, errors.New(`attribute "data-tralbum" is missing`)
+   }
+   raw, _, ok := bytes.Cut(rest, []byte(`"`))
+   if !ok {
+      return nil, errors.New("data-tralbum value is not terminated")
    }
 
-   attr, _, found := strings.Cut(rest, `"`)
-   if !found {
-      return nil, errors.New("data-tralbum: closing quote not found")
+   var info tralbum
+   if err := json.Unmarshal([]byte(html.UnescapeString(string(raw))), &info); err != nil {
+      return nil, fmt.Errorf("decode data-tralbum: %w", err)
    }
-
-   result := new(tralbum)
-   if err := json.Unmarshal([]byte(html.UnescapeString(attr)), result); err != nil {
-      return nil, err
-   }
-   return result, nil
+   return &info, nil
 }
 
 // bandcamp.go KEEP THIS LINE
