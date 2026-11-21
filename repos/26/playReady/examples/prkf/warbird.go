@@ -2,7 +2,8 @@
 //go:build windows
 
 // The Warbird descriptor format, the PE census that finds descriptors in a DLL on disk,
-// the span and block carving, and -2, the op=1 segment decrypt.
+// the span and block carving, and -2, the op=1 segment decrypt. It also holds the decrypted
+// image and the patch plan (pfImage, pfPrep, apply), because that plan IS the carving.
 //
 //   +0x00  32-byte SHA-256 over [0x20, size)
 //   +0x20  u32 total size   (0xF0 => heap-exec, anything else => segment)
@@ -33,6 +34,7 @@ import (
    "cmp"
    "crypto/sha256"
    "encoding/binary"
+   "encoding/json"
    "fmt"
    "os"
    "slices"
@@ -464,6 +466,95 @@ func peSections(fb []byte) (sizeImg uint32, secs []imgSection) {
       p += 40
    }
    return sizeImg, secs
+}
+
+// ------------------------------------------------------------- the trial prep
+
+// pfImage is everything a trial child or a -3 sweep needs: the decrypted image, the
+// census, the patch plan, and the profile those came from. It deliberately does NOT
+// include the module: a child used to read the DLL and re-run scanDescs, which hashes
+// several gigabytes.
+//
+// prof is the parse pfPrep already performed, carried so the BLA-phase steps do not read
+// and unmarshal dllprof.json a second time just to reach Map and Stages.
+type pfImage struct {
+   sha    string
+   size   uint32
+   img    []byte
+   heaps  []imgDesc
+   spans  []imgRun
+   merged []imgRun
+   prof   *dllProfile
+}
+
+// pfPrep loads the census and the image. The size check is what proves the image on disk
+// came from this build: the image's own hash changes every run, because LoadLibraryW bakes
+// the load base into relocated fields, but SizeOfImage is a per-build constant.
+func pfPrep() (*pfImage, error) {
+   raw, err := os.ReadFile(profilePath)
+   if err != nil {
+      return nil, fmt.Errorf("no %s - run prkf -2 first", profilePath)
+   }
+   var p dllProfile
+   if err := json.Unmarshal(raw, &p); err != nil {
+      return nil, fmt.Errorf("%s: %v", profilePath, err)
+   }
+   if p.Census == nil || len(p.Census.Heaps) == 0 {
+      return nil, fmt.Errorf("%s has no census - re-run prkf -2", profilePath)
+   }
+
+   pi := &pfImage{sha: p.DLLSHA256, size: p.SizeOfImage, prof: &p}
+   if pi.img, err = os.ReadFile(imgPath); err != nil {
+      return nil, err
+   }
+   if uint32(len(pi.img)) != pi.size {
+      return nil, fmt.Errorf("%s is %d bytes but this build's SizeOfImage is 0x%x - run prkf -2",
+         imgPath, len(pi.img), pi.size)
+   }
+
+   for _, h := range p.Census.Heaps {
+      d := imgDesc{va: h[0], descVA: h[1], rva: h[2], ln: h[3]}
+      pi.heaps = append(pi.heaps, d)
+      if d.ln != 0 {
+         pi.merged = append(pi.merged, imgRun{d.rva, d.ln})
+      }
+   }
+   for _, s := range p.Census.Spans {
+      pi.spans = append(pi.spans, imgRun{s[0], s[1]})
+   }
+   pi.merged = mergeRuns(pi.merged)
+   return pi, nil
+}
+
+// apply patches the segment plaintext into the loaded image, carving around the heap-exec
+// blocks the kernel decrypts itself.
+//
+// Every span is written, not just the ones that differ from the file: writing the image's
+// own bytes over an unencrypted span is a no-op, and skipping the comparison is what lets
+// a child avoid reading the module at all. The runs are coalesced first, so the protection
+// flips number in the dozens.
+func (p *pfImage) apply(base uintptr) (patched, skipped int) {
+   var runs []imgRun
+   for _, s := range p.spans {
+      if uint64(s.start)+uint64(s.length) > uint64(len(p.img)) {
+         continue
+      }
+      r := carveRuns(p.merged, s.start, s.length)
+      if len(r) == 0 {
+         skipped++
+         continue
+      }
+      runs = append(runs, r...)
+   }
+
+   for _, r := range mergeRuns(runs) {
+      if wbPatch(base, r.start, p.img[r.start:r.start+r.length]) {
+         patched++
+      } else {
+         skipped++
+      }
+   }
+   return patched, skipped
 }
 
 // warbird.go end

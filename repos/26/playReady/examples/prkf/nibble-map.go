@@ -19,8 +19,8 @@
 // and each live one is cached.
 //
 // ONE CHILD FOR ALL THREE FAMILIES, because the module load, image read and span patch that
-// precede its first probe dwarf the rest. The census comes from the profile, so this step
-// never reads the DLL.
+// precede its first probe dwarf the rest. The child itself is dmWorker in trials.go; the
+// census comes from the profile, so this step never reads the DLL.
 //
 // OUTPUT IS HEX, ALWAYS: a raw-bytes %s would let a result containing 0x20 corrupt the
 // driver's whitespace split, and only for some values.
@@ -55,6 +55,10 @@ import (
 
    "filippo.io/nistec"
 )
+
+// dmCLEN is one full bijection set: 64 blocks of 16 bytes, 0x400 in all. It is read by
+// both the scan below and the sweep's patch, so it lives at package scope.
+const dmCLEN = 0x400
 
 // dmFams is every routine family the consumer dispatches on: key[0x40] % 3. It is one
 // value read by both the sweep and the loop that consumes its rows, so the count cannot
@@ -233,8 +237,8 @@ func dmDeriveMap() (code int) {
    for _, m := range r.meta {
       logf("  %s", m)
    }
-   if r.loadfail != "" {
-      return fail("%s", r.loadfail)
+   if r.err != nil {
+      return fail("%v", r.err)
    }
    if r.fault != "" {
       logf("  %s", r.fault)
