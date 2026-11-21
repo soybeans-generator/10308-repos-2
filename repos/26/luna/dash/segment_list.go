@@ -1,4 +1,4 @@
-// segment_list.go marker preserve
+// segment_list.go KEEP THIS LINE
 package dash
 
 import "net/url"
@@ -50,4 +50,4 @@ func (su *SegmentUrl) ResolveMedia() (*url.URL, error) {
    return resolveRef(base, su.Media)
 }
 
-// segment_list.go marker preserve
+// segment_list.go KEEP THIS LINE

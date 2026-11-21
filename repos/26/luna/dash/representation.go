@@ -1,4 +1,4 @@
-// representation.go marker preserve
+// representation.go KEEP THIS LINE
 package dash
 
 import (
@@ -176,4 +176,4 @@ func (r *Representation) requiresOriginalId() bool {
    return strings.Contains(currentTemplate.Media, "$RepresentationID$")
 }
 
-// representation.go marker preserve
+// representation.go KEEP THIS LINE

@@ -1,4 +1,4 @@
-// segment_base.go marker preserve
+// segment_base.go KEEP THIS LINE
 package dash
 
 import (
@@ -57,4 +57,4 @@ type SegmentBase struct {
    Initialization *Initialization `xml:"Initialization"`
 }
 
-// segment_base.go marker preserve
+// segment_base.go KEEP THIS LINE

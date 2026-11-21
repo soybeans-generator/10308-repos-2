@@ -1,4 +1,4 @@
-// adaptation_set.go marker preserve
+// adaptation_set.go KEEP THIS LINE
 package dash
 
 import (
@@ -43,4 +43,4 @@ type Role struct {
    Value string `xml:"value,attr"`
 }
 
-// adaptation_set.go marker preserve
+// adaptation_set.go KEEP THIS LINE

@@ -1,4 +1,4 @@
-// mpd.go marker preserve
+// mpd.go KEEP THIS LINE
 package dash
 
 import (
@@ -123,4 +123,4 @@ func (m *Mpd) normalizeIds() {
    }
 }
 
-// mpd.go marker preserve
+// mpd.go KEEP THIS LINE

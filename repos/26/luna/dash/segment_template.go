@@ -1,4 +1,4 @@
-// segment_template.go marker preserve
+// segment_template.go KEEP THIS LINE
 package dash
 
 import (
@@ -235,4 +235,4 @@ type SegmentTimeline struct {
    S []*S `xml:"S"`
 }
 
-// segment_template.go marker preserve
+// segment_template.go KEEP THIS LINE

@@ -1,4 +1,4 @@
-// period.go marker preserve
+// period.go KEEP THIS LINE
 package dash
 
 import (
@@ -45,4 +45,4 @@ func (p *Period) link() {
    }
 }
 
-// period.go marker preserve
+// period.go KEEP THIS LINE

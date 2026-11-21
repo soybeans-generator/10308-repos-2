@@ -1,4 +1,4 @@
-// content_protection.go marker preserve
+// content_protection.go KEEP THIS LINE
 package dash
 
 import "encoding/base64"
@@ -18,4 +18,4 @@ func (cp *ContentProtection) GetPssh() ([]byte, error) {
    return base64.StdEncoding.DecodeString(cp.Pssh)
 }
 
-// content_protection.go marker preserve
+// content_protection.go KEEP THIS LINE
