@@ -1,4 +1,5 @@
-// media_playlist.go marker preserve
+// media_playlist.go KEEP THIS LINE
+
 package hls
 
 import (
@@ -9,26 +10,35 @@ import (
    "strings"
 )
 
-// checkHeader verifies the mandatory #EXTM3U prologue.
-func checkHeader(lines []string) error {
-   if len(lines) == 0 || lines[0] != "#EXTM3U" {
-      return errors.New("not an HLS playlist: missing #EXTM3U")
+// segmentUri finds the URI belonging to the #EXTINF at index i. Tags such as
+// #EXT-X-BYTERANGE may sit in between, but the search stops at the next entry so
+// a URI-less #EXTINF cannot consume its neighbour's URI.
+func segmentUri(lines []string, i int) (string, int, error) {
+   for j := i + 1; j < len(lines); j++ {
+      line := lines[j]
+      if !strings.HasPrefix(line, "#") {
+         return line, j, nil
+      }
+      if strings.HasPrefix(line, extInfTag) || strings.HasPrefix(line, "#EXT-X-ENDLIST") {
+         break
+      }
    }
-   return nil
+   return "", i, errors.New("malformed EXTINF: missing segment URI")
 }
 
+// MediaPlaylist is a playlist of media segments.
 type MediaPlaylist struct {
    TargetDuration int
    MediaSequence  int
    Version        int
    PlaylistType   string
    Segments       []*Segment
-   Keys           []*Key   // A slice of all keys found in the playlist
-   Map            *url.URL // The playlist's initialization map
+   Keys           []*Key
+   Map            *url.URL
    EndList        bool
 }
 
-// DecodeMedia parses a Media Playlist.
+// DecodeMedia parses a media playlist. Use ResolveUris to make its URIs absolute.
 func DecodeMedia(content string) (*MediaPlaylist, error) {
    lines := splitLines(content)
    if err := checkHeader(lines); err != nil {
@@ -38,119 +48,108 @@ func DecodeMedia(content string) (*MediaPlaylist, error) {
 }
 
 func parseMedia(lines []string) (*MediaPlaylist, error) {
-   mediaPlaylist := &MediaPlaylist{}
+   playlist := &MediaPlaylist{}
+   // Integer tags map directly onto a field, so they share one parse path.
+   intTags := map[string]*int{
+      "#EXT-X-VERSION:":        &playlist.Version,
+      "#EXT-X-TARGETDURATION:": &playlist.TargetDuration,
+      "#EXT-X-MEDIA-SEQUENCE:": &playlist.MediaSequence,
+   }
 
    for i := 0; i < len(lines); i++ {
       line := lines[i]
+      if tag, value, found := strings.Cut(line, ":"); found {
+         if target, ok := intTags[tag+":"]; ok {
+            n, err := strconv.Atoi(value)
+            if err != nil {
+               return nil, fmt.Errorf("invalid %s tag: %w", tag, err)
+            }
+            *target = n
+            continue
+         }
+      }
+
       switch {
-      case strings.HasPrefix(line, "#EXT-X-VERSION:"):
-         version, err := strconv.Atoi(strings.TrimPrefix(line, "#EXT-X-VERSION:"))
-         if err != nil {
-            return nil, fmt.Errorf("invalid EXT-X-VERSION: %w", err)
-         }
-         mediaPlaylist.Version = version
-      case strings.HasPrefix(line, "#EXT-X-TARGETDURATION:"):
-         duration, err := strconv.Atoi(strings.TrimPrefix(line, "#EXT-X-TARGETDURATION:"))
-         if err != nil {
-            return nil, fmt.Errorf("invalid EXT-X-TARGETDURATION: %w", err)
-         }
-         mediaPlaylist.TargetDuration = duration
-      case strings.HasPrefix(line, "#EXT-X-MEDIA-SEQUENCE:"):
-         sequence, err := strconv.Atoi(strings.TrimPrefix(line, "#EXT-X-MEDIA-SEQUENCE:"))
-         if err != nil {
-            return nil, fmt.Errorf("invalid EXT-X-MEDIA-SEQUENCE: %w", err)
-         }
-         mediaPlaylist.MediaSequence = sequence
       case strings.HasPrefix(line, "#EXT-X-PLAYLIST-TYPE:"):
-         mediaPlaylist.PlaylistType = strings.TrimPrefix(line, "#EXT-X-PLAYLIST-TYPE:")
+         playlist.PlaylistType = strings.TrimPrefix(line, "#EXT-X-PLAYLIST-TYPE:")
+
       case strings.HasPrefix(line, "#EXT-X-ENDLIST"):
-         mediaPlaylist.EndList = true
-      case strings.HasPrefix(line, "#EXT-X-KEY:"):
-         newKey, err := parseKey(line)
+         playlist.EndList = true
+
+      case strings.HasPrefix(line, keyTag):
+         key, err := parseKey(line)
          if err != nil {
             return nil, err
          }
-         mediaPlaylist.Keys = append(mediaPlaylist.Keys, newKey)
-      case strings.HasPrefix(line, "#EXT-X-MAP:"):
-         attrs := parseAttributes(line, "#EXT-X-MAP:")
-         if value, ok := attrs["URI"]; ok && value != "" {
-            parsedUrl, err := url.Parse(value)
-            if err != nil {
+         playlist.Keys = append(playlist.Keys, key)
+
+      case strings.HasPrefix(line, mapTag):
+         attrs, err := parseAttributes(line, mapTag)
+         if err != nil {
+            return nil, fmt.Errorf("invalid EXT-X-MAP: %w", err)
+         }
+         if uri := attrs["URI"]; uri != "" {
+            if playlist.Map, err = url.Parse(uri); err != nil {
                return nil, fmt.Errorf("invalid URI in EXT-X-MAP: %w", err)
             }
-            mediaPlaylist.Map = parsedUrl
          }
-      case strings.HasPrefix(line, "#EXTINF:"):
-         // Parse duration and title
-         // Format: #EXTINF:duration,[title]
-         raw := strings.TrimPrefix(line, "#EXTINF:")
-         durationStr, title, _ := strings.Cut(raw, ",")
-         duration, err := strconv.ParseFloat(durationStr, 64)
+
+      case strings.HasPrefix(line, extInfTag):
+         segment, uriLine, err := parseSegment(lines, i)
          if err != nil {
-            return nil, fmt.Errorf("invalid EXTINF duration: %w", err)
+            return nil, err
          }
-         newSegment := &Segment{
-            Duration: duration,
-            Title:    strings.TrimSpace(title),
-         }
-         // The URI may not be on the immediately following line; intermediate
-         // tags such as #EXT-X-BYTERANGE are allowed between #EXTINF and the
-         // segment URI. Scan forward for the URI, but stop at the start of the
-         // next entry so a URI-less #EXTINF cannot consume another entry's URI.
-         var uri string
-         for j := i + 1; j < len(lines); j++ {
-            nextLine := lines[j]
-            if nextLine == "" {
-               continue
-            }
-            if strings.HasPrefix(nextLine, "#EXTINF:") ||
-               strings.HasPrefix(nextLine, "#EXT-X-ENDLIST") {
-               break // next entry begins here; this EXTINF has no URI
-            }
-            if strings.HasPrefix(nextLine, "#") {
-               continue // comments, BYTERANGE, and similar tags
-            }
-            uri = nextLine
-            i = j // advance outer loop past consumed lines
-            break
-         }
-         if uri == "" {
-            return nil, errors.New("malformed EXTINF: missing segment URI")
-         }
-         parsedUrl, err := url.Parse(uri)
-         if err != nil {
-            return nil, fmt.Errorf("invalid segment URI: %w", err)
-         }
-         newSegment.Uri = parsedUrl
-         mediaPlaylist.Segments = append(mediaPlaylist.Segments, newSegment)
+         i = uriLine
+         playlist.Segments = append(playlist.Segments, segment)
       }
    }
-   return mediaPlaylist, nil
+   return playlist, nil
 }
 
-func (mp *MediaPlaylist) ResolveUris(base *url.URL) {
-   for _, keyItem := range mp.Keys {
-      keyItem.resolve(base)
+// ResolveUris makes every URI absolute. An unparsable base is an error and leaves
+// the playlist untouched; an empty base leaves URIs as written.
+func (mp *MediaPlaylist) ResolveUris(base string) error {
+   baseUrl, err := parseBase(base)
+   if err != nil {
+      return err
    }
-   for _, segmentItem := range mp.Segments {
-      segmentItem.resolve(base)
+   for _, key := range mp.Keys {
+      key.Uri = resolveReference(baseUrl, key.Uri)
    }
-   if mp.Map != nil {
-      mp.Map = base.ResolveReference(mp.Map)
+   for _, segment := range mp.Segments {
+      segment.Uri = resolveReference(baseUrl, segment.Uri)
    }
+   mp.Map = resolveReference(baseUrl, mp.Map)
+   return nil
 }
 
+// Segment is one media segment of a media playlist.
 type Segment struct {
    Uri      *url.URL
    Duration float64
    Title    string
 }
 
-// resolve updates the Segment's URI to be absolute.
-func (s *Segment) resolve(base *url.URL) {
-   if s.Uri != nil {
-      s.Uri = base.ResolveReference(s.Uri)
+// parseSegment parses the #EXTINF at index i and the URI that follows it,
+// returning the segment and the index of the URI line.
+func parseSegment(lines []string, i int) (*Segment, int, error) {
+   durationStr, title, _ := strings.Cut(strings.TrimPrefix(lines[i], extInfTag), ",")
+   duration, err := strconv.ParseFloat(durationStr, 64)
+   if err != nil {
+      return nil, i, fmt.Errorf("invalid EXTINF duration: %w", err)
    }
+
+   uri, uriLine, err := segmentUri(lines, i)
+   if err != nil {
+      return nil, i, err
+   }
+   parsed, err := url.Parse(uri)
+   if err != nil {
+      return nil, i, fmt.Errorf("invalid segment URI: %w", err)
+   }
+
+   segment := &Segment{Uri: parsed, Duration: duration, Title: strings.TrimSpace(title)}
+   return segment, uriLine, nil
 }
 
-// media_playlist.go marker preserve
+// media_playlist.go KEEP THIS LINE
