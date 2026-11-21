@@ -1,4 +1,4 @@
-// youtube.go marker preserve
+// youtube.go KEEP THIS LINE
 package main
 
 import (
@@ -298,4 +298,4 @@ type ytCfg struct {
    InnertubeContextClientVersion string `json:"INNERTUBE_CONTEXT_CLIENT_VERSION"`
 }
 
-// youtube.go marker preserve
+// youtube.go KEEP THIS LINE

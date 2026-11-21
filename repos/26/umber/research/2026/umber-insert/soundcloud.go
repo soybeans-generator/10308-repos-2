@@ -1,4 +1,4 @@
-// soundcloud.go marker preserve
+// soundcloud.go KEEP THIS LINE
 package main
 
 import (
@@ -184,4 +184,4 @@ type transcoding struct {
    } `json:"format"`
 }
 
-// soundcloud.go marker preserve
+// soundcloud.go KEEP THIS LINE

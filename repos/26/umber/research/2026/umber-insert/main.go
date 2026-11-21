@@ -1,4 +1,4 @@
-// main.go marker preserve
+// main.go KEEP THIS LINE
 package main
 
 import (
@@ -204,4 +204,4 @@ func (s *song) address() string { return s.B[posAddress] }
 
 func (s *song) timestamp() int64 { return s.A[posTime] }
 
-// main.go marker preserve
+// main.go KEEP THIS LINE

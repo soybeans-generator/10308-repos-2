@@ -1,4 +1,4 @@
-// bandcamp.go marker preserve
+// bandcamp.go KEEP THIS LINE
 package main
 
 import (
@@ -112,4 +112,4 @@ func fetch_tralbum(address string) (*tralbum, error) {
    return result, nil
 }
 
-// bandcamp.go marker preserve
+// bandcamp.go KEEP THIS LINE
