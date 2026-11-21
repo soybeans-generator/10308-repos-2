@@ -1,36 +1,51 @@
 // representation.go KEEP THIS LINE
+
 package dash
 
 import (
+   "encoding/base64"
    "fmt"
    "net/url"
    "strings"
 )
 
-// Representation describes a version of the media content.
+// ContentProtection describes a DRM scheme applied to a Representation.
+type ContentProtection struct {
+   SchemeIdUri string `xml:"schemeIdUri,attr"`
+   DefaultKid  string `xml:"default_KID,attr"`
+   Pssh        string `xml:"pssh"`
+}
+
+// GetPssh decodes the base64 encoded PSSH box.
+func (cp *ContentProtection) GetPssh() ([]byte, error) {
+   if cp.Pssh == "" {
+      return nil, nil
+   }
+   return base64.StdEncoding.DecodeString(cp.Pssh)
+}
+
+// Representation is one encoding of a media stream.
 type Representation struct {
    Bandwidth         int                  `xml:"bandwidth,attr"`
    BaseUrl           string               `xml:"BaseURL"`
    Codecs            string               `xml:"codecs,attr"`
+   ContentProtection []*ContentProtection `xml:"ContentProtection"`
    Height            int                  `xml:"height,attr"`
    Id                string               `xml:"id,attr"`
    MimeType          string               `xml:"mimeType,attr"`
+   SegmentBase       *SegmentBase         `xml:"SegmentBase"`
    SegmentList       *SegmentList         `xml:"SegmentList"`
    SegmentTemplate   *SegmentTemplate     `xml:"SegmentTemplate"`
    Width             int                  `xml:"width,attr"`
-   SegmentBase       *SegmentBase         `xml:"SegmentBase"`
-   ContentProtection []*ContentProtection `xml:"ContentProtection"`
-   Parent            *AdaptationSet       `xml:"-"`
+
+   Parent *AdaptationSet `xml:"-"`
 }
 
 func (r *Representation) GetCodecs() string {
-   if r.Codecs != "" {
-      return r.Codecs
-   }
-   if r.Parent != nil {
+   if r.Codecs == "" && r.Parent != nil {
       return r.Parent.Codecs
    }
-   return ""
+   return r.Codecs
 }
 
 func (r *Representation) GetContentProtection() []*ContentProtection {
@@ -44,60 +59,56 @@ func (r *Representation) GetContentProtection() []*ContentProtection {
 }
 
 func (r *Representation) GetHeight() int {
-   if r.Height != 0 {
-      return r.Height
-   }
-   if r.Parent != nil {
+   if r.Height == 0 && r.Parent != nil {
       return r.Parent.Height
    }
-   return 0
+   return r.Height
 }
 
 func (r *Representation) GetLabel() string {
-   if r.Parent != nil {
-      return r.Parent.Label
+   if r.Parent == nil {
+      return ""
    }
-   return ""
+   return r.Parent.Label
 }
 
 func (r *Representation) GetLang() string {
-   if r.Parent != nil {
-      return r.Parent.Lang
+   if r.Parent == nil {
+      return ""
    }
-   return ""
+   return r.Parent.Lang
 }
 
 func (r *Representation) GetMimeType() string {
-   if r.MimeType != "" {
-      return r.MimeType
-   }
-   if r.Parent != nil {
+   if r.MimeType == "" && r.Parent != nil {
       return r.Parent.MimeType
    }
-   return ""
+   return r.MimeType
 }
 
 func (r *Representation) GetPeriodDuration() string {
-   if r.Parent != nil && r.Parent.Parent != nil {
-      return r.Parent.Parent.Duration
+   if r.Parent == nil || r.Parent.Parent == nil {
+      return ""
    }
-   return ""
+   return r.Parent.Parent.Duration
 }
 
 func (r *Representation) GetPeriodId() string {
-   if r.Parent != nil && r.Parent.Parent != nil {
-      return r.Parent.Parent.Id
+   if r.Parent == nil || r.Parent.Parent == nil {
+      return ""
    }
-   return ""
+   return r.Parent.Parent.Id
 }
 
 func (r *Representation) GetRole() string {
-   if r.Parent != nil && r.Parent.Role != nil {
-      return r.Parent.Role.Value
+   if r.Parent == nil || r.Parent.Role == nil {
+      return ""
    }
-   return ""
+   return r.Parent.Role.Value
 }
 
+// GetSegmentTemplate returns the representation's own template, falling back to
+// the one declared on its AdaptationSet.
 func (r *Representation) GetSegmentTemplate() *SegmentTemplate {
    if r.SegmentTemplate != nil {
       return r.SegmentTemplate
@@ -109,52 +120,53 @@ func (r *Representation) GetSegmentTemplate() *SegmentTemplate {
 }
 
 func (r *Representation) GetWidth() int {
-   if r.Width != 0 {
-      return r.Width
-   }
-   if r.Parent != nil {
+   if r.Width == 0 && r.Parent != nil {
       return r.Parent.Width
    }
-   return 0
+   return r.Width
 }
 
-// ResolveBaseUrl resolves the Representation's BaseURL against the parent hierarchy.
 func (r *Representation) ResolveBaseUrl() (*url.URL, error) {
-   parentBase, err := r.Parent.getAbsoluteBaseUrl()
+   if r.Parent == nil {
+      return resolveRef(nil, r.BaseUrl)
+   }
+   base, err := r.Parent.resolveBaseUrl()
    if err != nil {
       return nil, err
    }
-   return resolveRef(parentBase, r.BaseUrl)
+   return resolveRef(base, r.BaseUrl)
 }
 
 // String returns a multi-line summary of the Representation.
 func (r *Representation) String() string {
-   data := &strings.Builder{}
-   fmt.Fprintln(data, "bandwidth:", r.Bandwidth)
+   var b strings.Builder
+
+   fmt.Fprintln(&b, "bandwidth:", r.Bandwidth)
    if width := r.GetWidth(); width != 0 {
-      fmt.Fprintln(data, "width:", width)
+      fmt.Fprintln(&b, "width:", width)
    }
    if height := r.GetHeight(); height != 0 {
-      fmt.Fprintln(data, "height:", height)
+      fmt.Fprintln(&b, "height:", height)
    }
    if codecs := r.GetCodecs(); codecs != "" {
-      fmt.Fprintln(data, "codecs:", codecs)
+      fmt.Fprintln(&b, "codecs:", codecs)
    }
-   fmt.Fprintln(data, "mimeType:", r.GetMimeType())
+   fmt.Fprintln(&b, "mimeType:", r.GetMimeType())
    if label := r.GetLabel(); label != "" {
-      fmt.Fprintln(data, "label:", label)
+      fmt.Fprintln(&b, "label:", label)
    } else if lang := r.GetLang(); lang != "" {
-      fmt.Fprintln(data, "lang:", lang)
+      fmt.Fprintln(&b, "lang:", lang)
    }
    if role := r.GetRole(); role != "" {
-      fmt.Fprintln(data, "role:", role)
+      fmt.Fprintln(&b, "role:", role)
    }
-   if periodDuration := r.GetPeriodDuration(); periodDuration != "" {
-      fmt.Fprintln(data, "period duration:", periodDuration)
+   if duration := r.GetPeriodDuration(); duration != "" {
+      fmt.Fprintln(&b, "period duration:", duration)
    }
-   data.WriteString("id: ")
-   data.WriteString(r.Id)
-   return data.String()
+   b.WriteString("id: ")
+   b.WriteString(r.Id)
+
+   return b.String()
 }
 
 func (r *Representation) link() {
@@ -167,13 +179,14 @@ func (r *Representation) link() {
    }
 }
 
-// requiresOriginalId checks if the Representation ID should be preserved.
+// requiresOriginalId reports whether the media template references the ID and
+// therefore cannot have it rewritten.
 func (r *Representation) requiresOriginalId() bool {
-   currentTemplate := r.GetSegmentTemplate()
-   if currentTemplate == nil {
+   tmpl := r.GetSegmentTemplate()
+   if tmpl == nil {
       return true
    }
-   return strings.Contains(currentTemplate.Media, "$RepresentationID$")
+   return strings.Contains(tmpl.Media, "$RepresentationID$")
 }
 
 // representation.go KEEP THIS LINE

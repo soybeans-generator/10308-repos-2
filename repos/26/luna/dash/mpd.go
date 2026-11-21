@@ -1,4 +1,5 @@
 // mpd.go KEEP THIS LINE
+
 package dash
 
 import (
@@ -7,120 +8,113 @@ import (
    "strconv"
 )
 
-func resolveRef(base *url.URL, relStr string) (*url.URL, error) {
-   if relStr == "" {
+// resolveRef resolves ref against base; an empty ref keeps base, a nil base
+// keeps ref.
+func resolveRef(base *url.URL, ref string) (*url.URL, error) {
+   if ref == "" {
       return base, nil
    }
-   rel, err := url.Parse(relStr)
-   if err != nil {
-      return nil, err
+   u, err := url.Parse(ref)
+   if err != nil || base == nil {
+      return u, err
    }
-   if base == nil {
-      return rel, nil
-   }
-   return base.ResolveReference(rel), nil
+   return base.ResolveReference(u), nil
 }
 
-// Mpd represents the root element of the DASH MPD file.
+// Mpd is the root element of a DASH media presentation description.
 type Mpd struct {
    MediaPresentationDuration string    `xml:"mediaPresentationDuration,attr"`
    BaseUrl                   string    `xml:"BaseURL"`
    Periods                   []*Period `xml:"Period"`
-   mpdUrl                    *url.URL
+
+   mpdUrl *url.URL
 }
 
-// Parse takes a byte slice of an MPD file, unmarshals it,
-// links navigation parents, and normalizes Representation IDs.
-func Parse(data []byte, mpdUrl *url.URL) (*Mpd, error) {
-   var manifest Mpd
-   err := xml.Unmarshal(data, &manifest)
-   if err != nil {
+// Parse decodes an MPD document, links its tree and normalizes representation
+// IDs. mpdUrl is the manifest location and may be empty.
+func Parse(data []byte, mpdUrl string) (*Mpd, error) {
+   m := &Mpd{}
+   if err := xml.Unmarshal(data, m); err != nil {
       return nil, err
    }
-   manifest.mpdUrl = mpdUrl
-   manifest.link()
-   manifest.normalizeIds()
-   return &manifest, nil
+   if mpdUrl != "" {
+      u, err := url.Parse(mpdUrl)
+      if err != nil {
+         return nil, err
+      }
+      m.mpdUrl = u
+   }
+   m.link()
+   m.normalizeIds()
+   return m, nil
 }
 
-// GetRepresentations returns a map of all Representations keyed by their Id.
-// It automatically deduplicates identical Representations within the same Period.
+// GetRepresentations groups all Representations by ID, one entry per Period.
 func (m *Mpd) GetRepresentations() map[string][]*Representation {
    grouped := make(map[string][]*Representation)
-   for _, manifestPeriod := range m.Periods {
-      for _, currentSet := range manifestPeriod.AdaptationSets {
-         for _, mediaRep := range currentSet.Representations {
-
-            reps := grouped[mediaRep.Id]
-
-            // If the last added representation belongs to the current Period,
-            // we've already captured this track for this period. Skip the duplicate.
-            if len(reps) > 0 && reps[len(reps)-1].Parent.Parent == manifestPeriod {
+   for _, p := range m.Periods {
+      for _, set := range p.AdaptationSets {
+         for _, rep := range set.Representations {
+            reps := grouped[rep.Id]
+            if len(reps) > 0 && reps[len(reps)-1].Parent.Parent == p {
                continue
             }
-
-            grouped[mediaRep.Id] = append(grouped[mediaRep.Id], mediaRep)
+            grouped[rep.Id] = append(reps, rep)
          }
       }
    }
    return grouped
 }
 
-// ResolveBaseUrl resolves the MPD's BaseURL against the mpdUrl.
 func (m *Mpd) ResolveBaseUrl() (*url.URL, error) {
    return resolveRef(m.mpdUrl, m.BaseUrl)
 }
 
-func (m *Mpd) link() {
-   for _, manifestPeriod := range m.Periods {
-      manifestPeriod.Parent = m
-      manifestPeriod.link()
+func (m *Mpd) eachRep(fn func(*Representation)) {
+   for _, p := range m.Periods {
+      for _, set := range p.AdaptationSets {
+         for _, rep := range set.Representations {
+            fn(rep)
+         }
+      }
    }
 }
 
-// normalizeIds iterates through the MPD and rewrites Representation IDs using
-// sequential integers converted to strings.
+func (m *Mpd) link() {
+   for _, p := range m.Periods {
+      p.Parent = m
+      p.link()
+   }
+}
+
+// normalizeIds rewrites representation IDs as sequential integers, except where
+// the media template references the ID. Representations sharing a media
+// template share one ID.
 func (m *Mpd) normalizeIds() {
-   reservedIds := make(map[string]bool)
-   for _, manifestPeriod := range m.Periods {
-      for _, currentSet := range manifestPeriod.AdaptationSets {
-         for _, mediaRep := range currentSet.Representations {
-            if mediaRep.requiresOriginalId() {
-               reservedIds[mediaRep.Id] = true
-            }
-         }
+   reserved := make(map[string]bool)
+   m.eachRep(func(r *Representation) {
+      if r.requiresOriginalId() {
+         reserved[r.Id] = true
       }
-   }
-   counter := 0
-   patternToId := make(map[string]string)
-   for _, manifestPeriod := range m.Periods {
-      for _, currentSet := range manifestPeriod.AdaptationSets {
-         for _, mediaRep := range currentSet.Representations {
-            if mediaRep.requiresOriginalId() {
-               continue
-            }
-            currentTemplate := mediaRep.GetSegmentTemplate()
-            if currentTemplate == nil {
-               continue
-            }
-            pattern := currentTemplate.Media
-            if existingId, ok := patternToId[pattern]; ok {
-               mediaRep.Id = existingId
-               continue
-            }
-            var newId string
-            for {
-               newId = strconv.Itoa(counter)
-               counter++
-               if !reservedIds[newId] {
-                  break
-               }
-            }
-            patternToId[pattern] = newId
-            mediaRep.Id = newId
-         }
+   })
+   shared := make(map[string]string)
+   next := 0
+   m.eachRep(func(r *Representation) {
+      tmpl := r.GetSegmentTemplate()
+      if r.requiresOriginalId() || tmpl == nil {
+         return
       }
-   }
+      id, ok := shared[tmpl.Media]
+      if !ok {
+         for reserved[strconv.Itoa(next)] {
+            next++
+         }
+         id = strconv.Itoa(next)
+         next++
+         shared[tmpl.Media] = id
+      }
+      r.Id = id
+   })
 }
 
 // mpd.go KEEP THIS LINE
