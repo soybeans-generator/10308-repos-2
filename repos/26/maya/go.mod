@@ -3,7 +3,7 @@ module 41.neocities.org/maya
 go 1.27.0
 
 require (
-	41.neocities.org/luna v1.35.9
+	41.neocities.org/luna v1.36.2
 	41.neocities.org/playReady v1.1.3
 	41.neocities.org/sofia v1.16.3
 	41.neocities.org/widevine v1.6.8

@@ -18,7 +18,11 @@ func DashDownload(streamId string, m *Manifest, options *Options) error {
    if options == nil {
       options = &Options{}
    }
-   mpd, err := dash.Parse(m.Body, m.Url)
+   base, err := url.Parse(m.Url)
+   if err != nil {
+      return fmt.Errorf("invalid manifest URL %q: %w", m.Url, err)
+   }
+   mpd, err := dash.Parse(m.Body, base)
    if err != nil {
       return err
    }
@@ -34,7 +38,11 @@ func HlsDownload(streamId int, m *Manifest, options *Options) error {
    if options == nil {
       options = &Options{}
    }
-   playlist, err := hls.DecodeMaster(string(m.Body), m.Url)
+   base, err := url.Parse(m.Url)
+   if err != nil {
+      return fmt.Errorf("invalid manifest URL %q: %w", m.Url, err)
+   }
+   playlist, err := hls.DecodeMaster(string(m.Body), base)
    if err != nil {
       return err
    }
@@ -48,8 +56,8 @@ func HlsDownload(streamId int, m *Manifest, options *Options) error {
 // fetchData performs a GET and returns the body with the URL that actually
 // served it. After a redirect the returned URL differs from target, and any
 // relative URL found in the body must be resolved against it.
-func fetchData(target string, headers map[string]string, logRequest bool) ([]byte, *url.URL, error) {
-   req, err := http.NewRequest(http.MethodGet, target, nil)
+func fetchData(target *url.URL, headers map[string]string, logRequest bool) ([]byte, *url.URL, error) {
+   req, err := http.NewRequest(http.MethodGet, target.String(), nil)
    if err != nil {
       return nil, nil, err
    }
@@ -73,15 +81,18 @@ func fetchData(target string, headers map[string]string, logRequest bool) ([]byt
    if err != nil {
       return nil, nil, err
    }
+   return body, resp.Request.URL, nil
+}
 
-   effective := req.URL
-   if resp.Request != nil && resp.Request.URL != nil {
-      effective = resp.Request.URL
+// fetchManifest parses the manifest location given on the command line and
+// fetches it. This is the one place a manifest URL enters the package as a
+// string; everything below it works with url.URL.
+func fetchManifest(manifestUrl string) ([]byte, *url.URL, error) {
+   target, err := url.Parse(manifestUrl)
+   if err != nil {
+      return nil, nil, fmt.Errorf("invalid manifest URL %q: %w", manifestUrl, err)
    }
-   if logRequest && effective.String() != req.URL.String() {
-      log.Println("redirected to:", effective)
-   }
-   return body, effective, nil
+   return fetchData(target, nil, true)
 }
 
 // printStreams prints each stream, separating them with a blank line.
@@ -104,14 +115,19 @@ const (
 )
 
 // Manifest is a downloaded manifest together with the URL that served it.
+//
+// Url is a string because a Manifest is a CacheValue stored with
+// encoding/xml, and url.URL has no XML form of its own: reflecting over its
+// exported fields loses User and RawPath, and a lost RawPath can re-escape
+// the path into a different URL.
 type Manifest struct {
-   Url  *url.URL
+   Url  string
    Body []byte
 }
 
 // DashList downloads a DASH manifest and prints the streams it offers.
 func DashList(manifestUrl string) (*Manifest, error) {
-   body, effective, err := fetchData(manifestUrl, nil, true)
+   body, effective, err := fetchManifest(manifestUrl)
    if err != nil {
       return nil, err
    }
@@ -124,12 +140,12 @@ func DashList(manifestUrl string) (*Manifest, error) {
    if err := listStreamsDash(mpd); err != nil {
       return nil, err
    }
-   return &Manifest{Url: effective, Body: body}, nil
+   return &Manifest{Url: effective.String(), Body: body}, nil
 }
 
 // HlsList downloads an HLS master playlist and prints the streams it offers.
 func HlsList(manifestUrl string) (*Manifest, error) {
-   body, effective, err := fetchData(manifestUrl, nil, true)
+   body, effective, err := fetchManifest(manifestUrl)
    if err != nil {
       return nil, err
    }
@@ -140,7 +156,7 @@ func HlsList(manifestUrl string) (*Manifest, error) {
    if err := listStreamsHls(playlist); err != nil {
       return nil, err
    }
-   return &Manifest{Url: effective, Body: body}, nil
+   return &Manifest{Url: effective.String(), Body: body}, nil
 }
 
 func (*Manifest) CachePath() string {
