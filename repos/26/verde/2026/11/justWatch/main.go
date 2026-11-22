@@ -24,9 +24,6 @@ import (
 
 const apiBase = "https://apis.justwatch.com"
 
-// api is the only thing here that speaks HTTP.
-var api = &apiClient{http: &http.Client{Timeout: 30 * time.Second}}
-
 //go:embed BackendConstantsFetcherQuery.gql
 var backendConstantsFetcherQuery string
 
@@ -36,25 +33,24 @@ var deviceID = base64.RawStdEncoding.EncodeToString(make([]byte, 16))
 // queryParamsToStrip are tracking parameters that never change which title a
 // URL points at.
 var queryParamsToStrip = []struct {
-   date  string
    key   string
    value string
 }{
-   {"2026-03-08", "searchReferral", ""},
-   {"2026-03-07", "referrer", "JustWatch"},
-   {"2026-03-04", "subId3", "justappsvod"},
-   {"2026-02-26", "autoplay", "1"},
-   {"2026-02-26", "searchReferral", "publisher"},
-   {"2026-02-26", "source", "bing"},
-   {"2026-02-26", "source", "search-feeds"},
-   {"2026-02-26", "utm_campaign", "vod_feed"},
-   {"2026-02-26", "utm_content", ""},
-   {"2026-02-26", "utm_medium", "deeplink"},
-   {"2026-02-26", "utm_medium", "partner"},
-   {"2026-02-26", "utm_source", "justWatch-v2-catalog"},
-   {"2026-02-26", "utm_source", "justwatch"},
-   {"2026-02-26", "utm_source", "universal_search"},
-   {"2026-02-26", "utm_term", ""},
+   {"searchReferral", ""},
+   {"referrer", "JustWatch"},
+   {"subId3", "justappsvod"},
+   {"autoplay", "1"},
+   {"searchReferral", "publisher"},
+   {"source", "bing"},
+   {"source", "search-feeds"},
+   {"utm_campaign", "vod_feed"},
+   {"utm_content", ""},
+   {"utm_medium", "deeplink"},
+   {"utm_medium", "partner"},
+   {"utm_source", "justWatch-v2-catalog"},
+   {"utm_source", "justwatch"},
+   {"utm_source", "universal_search"},
+   {"utm_term", ""},
 }
 
 // GetPath returns the path of rawURL, e.g. /us/movie/goodfellas.
@@ -89,14 +85,21 @@ func GroupAndSortByUrl(offers []*EnrichedOffer) ([]string, map[string][]*Enriche
    return keys, groups
 }
 
+// get fetches apiBase+path with query.
+func get(path string, query url.Values) ([]byte, error) {
+   u, err := url.Parse(apiBase + path)
+   if err != nil {
+      return nil, err
+   }
+   u.RawQuery = query.Encode()
+   return send(http.MethodGet, u.String(), nil)
+}
+
 func getUrlGroupingKey(rawURL string) string {
    trimmed := strings.TrimSuffix(rawURL, "\n")
    u, err := url.Parse(trimmed)
    if err != nil {
       return trimmed
-   }
-   if u.RawQuery == "" {
-      return u.String()
    }
    query := u.Query()
    for _, rule := range queryParamsToStrip {
@@ -110,6 +113,28 @@ func getUrlGroupingKey(rawURL string) string {
    return u.String()
 }
 
+// graphql posts a query and returns the data field of the reply.
+func graphql(query string, variables map[string]string) (json.RawMessage, error) {
+   payload, err := json.Marshal(map[string]any{
+      "query":     query,
+      "variables": variables,
+   })
+   if err != nil {
+      return nil, err
+   }
+   body, err := send(http.MethodPost, apiBase+"/graphql", payload)
+   if err != nil {
+      return nil, err
+   }
+   var envelope struct {
+      Data json.RawMessage
+   }
+   if err := json.Unmarshal(body, &envelope); err != nil {
+      return nil, err
+   }
+   return envelope.Data, nil
+}
+
 func main() {
    log.SetFlags(log.Ltime)
    if err := new(client).do(); err != nil {
@@ -117,8 +142,34 @@ func main() {
    }
 }
 
+// send runs one request and returns the body of a 200 reply.
+func send(method, target string, payload []byte) ([]byte, error) {
+   req, err := http.NewRequest(method, target, bytes.NewReader(payload))
+   if err != nil {
+      return nil, err
+   }
+   req.Header.Set("accept", "application/json")
+   req.Header.Set("device-id", deviceID)
+   if payload != nil {
+      req.Header.Set("content-type", "application/json")
+   }
+   resp, err := http.DefaultClient.Do(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+   body, err := io.ReadAll(resp.Body)
+   if err != nil {
+      return nil, err
+   }
+   if resp.StatusCode != http.StatusOK {
+      return nil, fmt.Errorf("%s %s: %s: %s", method, req.URL.Path, resp.Status, body)
+   }
+   return body, nil
+}
+
 func FetchLocales(language string) (Locales, error) {
-   data, err := api.graphql(backendConstantsFetcherQuery, map[string]string{
+   data, err := graphql(backendConstantsFetcherQuery, map[string]string{
       "language": language,
    })
    if err != nil {
@@ -169,63 +220,6 @@ func FilterOffers(offers []*EnrichedOffer, unwantedTypes ...string) []*EnrichedO
       }
    }
    return kept
-}
-
-type apiClient struct {
-   http *http.Client
-}
-
-// do runs req, closes the body and returns it when the status is 200.
-func (c *apiClient) do(req *http.Request) ([]byte, error) {
-   req.Header.Set("accept", "application/json")
-   req.Header.Set("device-id", deviceID)
-   resp, err := c.http.Do(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-   body, err := io.ReadAll(resp.Body)
-   if err != nil {
-      return nil, err
-   }
-   if resp.StatusCode != http.StatusOK {
-      return nil, fmt.Errorf("%s %s: %s: %s", req.Method, req.URL.Path,
-         resp.Status, strings.TrimSpace(string(body)))
-   }
-   return body, nil
-}
-
-// get fetches apiBase+path and returns the raw body.
-func (c *apiClient) get(path string) ([]byte, error) {
-   req, err := http.NewRequest("GET", apiBase+path, nil)
-   if err != nil {
-      return nil, err
-   }
-   return c.do(req)
-}
-
-// graphql runs a query and returns the data field of the reply.
-func (c *apiClient) graphql(query string, variables map[string]string) (json.RawMessage, error) {
-   payload, err := json.Marshal(graphQLRequest{Query: query, Variables: variables})
-   if err != nil {
-      return nil, err
-   }
-   req, err := http.NewRequest("POST", apiBase+"/graphql", bytes.NewReader(payload))
-   if err != nil {
-      return nil, err
-   }
-   req.Header.Set("content-type", "application/json")
-   body, err := c.do(req)
-   if err != nil {
-      return nil, err
-   }
-   var envelope struct {
-      Data json.RawMessage
-   }
-   if err := json.Unmarshal(body, &envelope); err != nil {
-      return nil, err
-   }
-   return envelope.Data, nil
 }
 
 type client struct {
@@ -304,11 +298,6 @@ func (c *client) do_address() error {
    name := path.Base(urlPath) + ".md"
    log.Println("WriteFile", name)
    return os.WriteFile(name, data.Bytes(), os.ModePerm)
-}
-
-type graphQLRequest struct {
-   Query     string            `json:"query"`
-   Variables map[string]string `json:"variables"`
 }
 
 // main.go KEEP THIS LINE

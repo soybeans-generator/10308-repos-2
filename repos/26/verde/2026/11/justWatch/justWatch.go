@@ -158,7 +158,9 @@ type Content struct {
 }
 
 func (c *Content) Fetch(path string) error {
-   body, err := api.get("/content/urls?" + url.Values{"path": {path}}.Encode())
+   query := url.Values{}
+   query.Set("path", path)
+   body, err := get("/content/urls", query)
    if err != nil {
       return err
    }
@@ -176,7 +178,7 @@ type HrefLangTag struct {
 }
 
 func (h *HrefLangTag) Offers(locale *Locale) ([]Offer, error) {
-   data, err := api.graphql(getUrlTitleDetails, map[string]string{
+   data, err := graphql(getUrlTitleDetails, map[string]string{
       "country":  locale.Country,
       "fullPath": h.Href,
    })
