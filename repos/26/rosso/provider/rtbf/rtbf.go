@@ -182,13 +182,14 @@ func (e *Entitlement) FetchWidevine(body []byte) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-func (e *Entitlement) GetDash() (*url.URL, error) {
+// GetDash returns the MPD location of the entitlement's DASH format.
+func (e *Entitlement) GetDash() (string, error) {
    for _, format := range e.Formats {
       if format.Format == "DASH" {
-         return url.Parse(format.MediaLocator)
+         return format.MediaLocator, nil
       }
    }
-   return nil, errors.New("DASH format not found")
+   return "", errors.New("DASH format not found")
 }
 
 type Identity struct {
