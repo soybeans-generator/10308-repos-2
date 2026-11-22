@@ -1,3 +1,4 @@
+// playlist.go KEEP THIS LINE
 package hulu
 
 import (
@@ -202,4 +203,4 @@ func (d *Device) Playlist(eabId string) (*Playlist, error) {
    return &result, nil
 }
 
-// playlist.go
+// playlist.go KEEP THIS LINE

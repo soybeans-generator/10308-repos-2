@@ -1,3 +1,4 @@
+// device.go KEEP THIS LINE
 package hulu
 
 import (
@@ -179,4 +180,4 @@ func (d *Device) TokenRefresh() error {
    return nil
 }
 
-// device.go
+// device.go KEEP THIS LINE
