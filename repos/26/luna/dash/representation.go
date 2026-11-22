@@ -41,13 +41,6 @@ type Representation struct {
    Parent *AdaptationSet `xml:"-"`
 }
 
-func (r *Representation) GetCodecs() string {
-   if r.Codecs == "" && r.Parent != nil {
-      return r.Parent.Codecs
-   }
-   return r.Codecs
-}
-
 func (r *Representation) GetContentProtection() []*ContentProtection {
    if len(r.ContentProtection) > 0 {
       return r.ContentProtection
@@ -65,46 +58,11 @@ func (r *Representation) GetHeight() int {
    return r.Height
 }
 
-func (r *Representation) GetLabel() string {
-   if r.Parent == nil {
-      return ""
-   }
-   return r.Parent.Label
-}
-
-func (r *Representation) GetLang() string {
-   if r.Parent == nil {
-      return ""
-   }
-   return r.Parent.Lang
-}
-
 func (r *Representation) GetMimeType() string {
    if r.MimeType == "" && r.Parent != nil {
       return r.Parent.MimeType
    }
    return r.MimeType
-}
-
-func (r *Representation) GetPeriodDuration() string {
-   if r.Parent == nil || r.Parent.Parent == nil {
-      return ""
-   }
-   return r.Parent.Parent.Duration
-}
-
-func (r *Representation) GetPeriodId() string {
-   if r.Parent == nil || r.Parent.Parent == nil {
-      return ""
-   }
-   return r.Parent.Parent.Id
-}
-
-func (r *Representation) GetRole() string {
-   if r.Parent == nil || r.Parent.Role == nil {
-      return ""
-   }
-   return r.Parent.Role.Value
 }
 
 // GetSegmentTemplate returns the representation's own template, falling back to
@@ -117,13 +75,6 @@ func (r *Representation) GetSegmentTemplate() *SegmentTemplate {
       return r.Parent.SegmentTemplate
    }
    return nil
-}
-
-func (r *Representation) GetWidth() int {
-   if r.Width == 0 && r.Parent != nil {
-      return r.Parent.Width
-   }
-   return r.Width
 }
 
 func (r *Representation) ResolveBaseUrl() (*url.URL, error) {
@@ -142,25 +93,25 @@ func (r *Representation) String() string {
    var b strings.Builder
 
    fmt.Fprintln(&b, "bandwidth:", r.Bandwidth)
-   if width := r.GetWidth(); width != 0 {
+   if width := r.getWidth(); width != 0 {
       fmt.Fprintln(&b, "width:", width)
    }
    if height := r.GetHeight(); height != 0 {
       fmt.Fprintln(&b, "height:", height)
    }
-   if codecs := r.GetCodecs(); codecs != "" {
+   if codecs := r.getCodecs(); codecs != "" {
       fmt.Fprintln(&b, "codecs:", codecs)
    }
    fmt.Fprintln(&b, "mimeType:", r.GetMimeType())
-   if label := r.GetLabel(); label != "" {
+   if label := r.getLabel(); label != "" {
       fmt.Fprintln(&b, "label:", label)
-   } else if lang := r.GetLang(); lang != "" {
+   } else if lang := r.getLang(); lang != "" {
       fmt.Fprintln(&b, "lang:", lang)
    }
-   if role := r.GetRole(); role != "" {
+   if role := r.getRole(); role != "" {
       fmt.Fprintln(&b, "role:", role)
    }
-   if duration := r.GetPeriodDuration(); duration != "" {
+   if duration := r.getPeriodDuration(); duration != "" {
       fmt.Fprintln(&b, "period duration:", duration)
    }
    b.WriteString("id: ")
@@ -169,12 +120,54 @@ func (r *Representation) String() string {
    return b.String()
 }
 
+func (r *Representation) getCodecs() string {
+   if r.Codecs == "" && r.Parent != nil {
+      return r.Parent.Codecs
+   }
+   return r.Codecs
+}
+
+func (r *Representation) getLabel() string {
+   if r.Parent == nil {
+      return ""
+   }
+   return r.Parent.Label
+}
+
+func (r *Representation) getLang() string {
+   if r.Parent == nil {
+      return ""
+   }
+   return r.Parent.Lang
+}
+
+func (r *Representation) getPeriodDuration() string {
+   if r.Parent == nil || r.Parent.Parent == nil {
+      return ""
+   }
+   return r.Parent.Parent.Duration
+}
+
+func (r *Representation) getRole() string {
+   if r.Parent == nil || r.Parent.Role == nil {
+      return ""
+   }
+   return r.Parent.Role.Value
+}
+
+func (r *Representation) getWidth() int {
+   if r.Width == 0 && r.Parent != nil {
+      return r.Parent.Width
+   }
+   return r.Width
+}
+
 func (r *Representation) link() {
    if r.SegmentTemplate != nil {
-      r.SegmentTemplate.ParentRepresentation = r
+      r.SegmentTemplate.parentRepresentation = r
    }
    if r.SegmentList != nil {
-      r.SegmentList.Parent = r
+      r.SegmentList.parent = r
       r.SegmentList.link()
    }
 }

@@ -28,14 +28,14 @@ func segmentUri(lines []string, i int) (string, int, error) {
 
 // MediaPlaylist is a playlist of media segments.
 type MediaPlaylist struct {
-   TargetDuration int
-   MediaSequence  int
-   Version        int
-   PlaylistType   string
+   targetDuration int
+   mediaSequence  int
+   version        int
+   playlistType   string
    Segments       []*Segment
-   Keys           []*Key
+   keys           []*key
    Map            *url.URL
-   EndList        bool
+   endList        bool
 }
 
 // DecodeMedia parses a media playlist. Use ResolveUris to make its URIs absolute.
@@ -51,9 +51,9 @@ func parseMedia(lines []string) (*MediaPlaylist, error) {
    playlist := &MediaPlaylist{}
    // Integer tags map directly onto a field, so they share one parse path.
    intTags := map[string]*int{
-      "#EXT-X-VERSION:":        &playlist.Version,
-      "#EXT-X-TARGETDURATION:": &playlist.TargetDuration,
-      "#EXT-X-MEDIA-SEQUENCE:": &playlist.MediaSequence,
+      "#EXT-X-VERSION:":        &playlist.version,
+      "#EXT-X-TARGETDURATION:": &playlist.targetDuration,
+      "#EXT-X-MEDIA-SEQUENCE:": &playlist.mediaSequence,
    }
 
    for i := 0; i < len(lines); i++ {
@@ -71,17 +71,17 @@ func parseMedia(lines []string) (*MediaPlaylist, error) {
 
       switch {
       case strings.HasPrefix(line, "#EXT-X-PLAYLIST-TYPE:"):
-         playlist.PlaylistType = strings.TrimPrefix(line, "#EXT-X-PLAYLIST-TYPE:")
+         playlist.playlistType = strings.TrimPrefix(line, "#EXT-X-PLAYLIST-TYPE:")
 
       case strings.HasPrefix(line, "#EXT-X-ENDLIST"):
-         playlist.EndList = true
+         playlist.endList = true
 
       case strings.HasPrefix(line, keyTag):
-         key, err := parseKey(line)
+         k, err := parseKey(line)
          if err != nil {
             return nil, err
          }
-         playlist.Keys = append(playlist.Keys, key)
+         playlist.keys = append(playlist.keys, k)
 
       case strings.HasPrefix(line, mapTag):
          attrs, err := parseAttributes(line, mapTag)
@@ -106,28 +106,22 @@ func parseMedia(lines []string) (*MediaPlaylist, error) {
    return playlist, nil
 }
 
-// ResolveUris makes every URI absolute. An unparsable base is an error and leaves
-// the playlist untouched; an empty base leaves URIs as written.
-func (mp *MediaPlaylist) ResolveUris(base string) error {
-   baseUrl, err := parseBase(base)
-   if err != nil {
-      return err
-   }
-   for _, key := range mp.Keys {
-      key.Uri = resolveReference(baseUrl, key.Uri)
+// ResolveUris makes every URI absolute. A nil base leaves URIs as written.
+func (mp *MediaPlaylist) ResolveUris(base *url.URL) {
+   for _, k := range mp.keys {
+      k.uri = resolveReference(base, k.uri)
    }
    for _, segment := range mp.Segments {
-      segment.Uri = resolveReference(baseUrl, segment.Uri)
+      segment.Uri = resolveReference(base, segment.Uri)
    }
-   mp.Map = resolveReference(baseUrl, mp.Map)
-   return nil
+   mp.Map = resolveReference(base, mp.Map)
 }
 
 // Segment is one media segment of a media playlist.
 type Segment struct {
    Uri      *url.URL
    Duration float64
-   Title    string
+   title    string
 }
 
 // parseSegment parses the #EXTINF at index i and the URI that follows it,
@@ -148,7 +142,7 @@ func parseSegment(lines []string, i int) (*Segment, int, error) {
       return nil, i, fmt.Errorf("invalid segment URI: %w", err)
    }
 
-   segment := &Segment{Uri: parsed, Duration: duration, Title: strings.TrimSpace(title)}
+   segment := &Segment{Uri: parsed, Duration: duration, title: strings.TrimSpace(title)}
    return segment, uriLine, nil
 }
 

@@ -3,7 +3,6 @@
 package hls
 
 import (
-   "encoding/base64"
    "errors"
    "fmt"
    "net/url"
@@ -82,19 +81,6 @@ func parseAttributes(line, prefix string) (map[string]string, error) {
    return attrs, flush()
 }
 
-// parseBase parses the playlist location. An empty location yields a nil base,
-// which leaves URIs as written; a malformed one is an error.
-func parseBase(base string) (*url.URL, error) {
-   if base == "" {
-      return nil, nil
-   }
-   parsed, err := url.Parse(base)
-   if err != nil {
-      return nil, fmt.Errorf("invalid base URL %q: %w", base, err)
-   }
-   return parsed, nil
-}
-
 // resolveReference resolves ref against base; a nil on either side returns ref.
 func resolveReference(base, ref *url.URL) *url.URL {
    if base == nil || ref == nil {
@@ -108,56 +94,33 @@ func splitLines(content string) []string {
    return strings.FieldsFunc(content, func(r rune) bool { return r == '\n' || r == '\r' })
 }
 
-// Key is the encryption information of an #EXT-X-KEY tag.
-type Key struct {
-   Method            string
-   Uri               *url.URL
-   KeyFormat         string
-   KeyFormatVersions string
-   Characteristics   string
+// key is the encryption information of an #EXT-X-KEY tag.
+type key struct {
+   method            string
+   uri               *url.URL
+   keyFormat         string
+   keyFormatVersions string
+   characteristics   string
 }
 
-func parseKey(line string) (*Key, error) {
+func parseKey(line string) (*key, error) {
    attrs, err := parseAttributes(line, keyTag)
    if err != nil {
       return nil, fmt.Errorf("invalid EXT-X-KEY: %w", err)
    }
 
-   key := &Key{
-      Method:            attrs["METHOD"],
-      KeyFormat:         attrs["KEYFORMAT"],
-      KeyFormatVersions: attrs["KEYFORMATVERSIONS"],
-      Characteristics:   attrs["CHARACTERISTICS"],
+   k := &key{
+      method:            attrs["METHOD"],
+      keyFormat:         attrs["KEYFORMAT"],
+      keyFormatVersions: attrs["KEYFORMATVERSIONS"],
+      characteristics:   attrs["CHARACTERISTICS"],
    }
    if uri := attrs["URI"]; uri != "" {
-      if key.Uri, err = url.Parse(uri); err != nil {
+      if k.uri, err = url.Parse(uri); err != nil {
          return nil, fmt.Errorf("invalid URI in EXT-X-KEY: %w", err)
       }
    }
-   return key, nil
-}
-
-// DecodeData returns the key bytes carried by a data URI.
-func (k *Key) DecodeData() ([]byte, error) {
-   switch {
-   case k.Uri == nil:
-      return nil, errors.New("URI is nil")
-   case k.Uri.Scheme != "data":
-      return nil, errors.New("URI is not a data URI")
-   }
-   // net/url keeps the payload of a data URI in Opaque: [<mediatype>][;base64],<data>.
-   meta, payload, found := strings.Cut(k.Uri.Opaque, ",")
-   if !found {
-      return nil, errors.New("invalid data URI: missing comma separator")
-   }
-   if !strings.Contains(meta, ";base64") {
-      return nil, errors.New("data URI does not contain base64 indicator")
-   }
-   decoded, err := base64.StdEncoding.DecodeString(payload)
-   if err != nil {
-      return nil, fmt.Errorf("invalid base64 payload in data URI: %w", err)
-   }
-   return decoded, nil
+   return k, nil
 }
 
 // utils.go KEEP THIS LINE
