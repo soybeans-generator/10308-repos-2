@@ -5,7 +5,6 @@ import (
    "41.neocities.org/rosso/provider/kanopy"
    "fmt"
    "log"
-   "net/url"
    "os"
 )
 
@@ -97,11 +96,7 @@ func (c *client) do_address() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(manifest.Url)
-   if err != nil {
-      return err
-   }
-   maya_manifest, err := maya.DashList(address)
+   maya_manifest, err := maya.DashList(manifest.Url)
    if err != nil {
       return err
    }

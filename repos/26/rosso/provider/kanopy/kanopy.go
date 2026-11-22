@@ -14,7 +14,6 @@ import (
    "strings"
 )
 
-// plays.go
 func CreateLicense(loginData *Login, manifestData *Manifest, challenge []byte) ([]byte, error) {
    endpoint := &url.URL{
       Scheme: "https",
