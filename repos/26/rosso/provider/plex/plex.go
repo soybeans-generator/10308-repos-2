@@ -68,32 +68,10 @@ func ParsePath(rawUrl string) (string, error) {
    return rawUrl[startIndex:], nil
 }
 
-func CreateUser() (*User, error) {
-   endpoint := &url.URL{
-      Scheme: "https",
-      Host:   "plex.tv",
-      Path:   "/api/v2/users/anonymous",
-   }
-
-   req, err := http.NewRequest(http.MethodPost, endpoint.String(), nil)
-   if err != nil {
-      return nil, err
-   }
-   req.Header.Set("accept", "application/json")
-   req.Header.Set("x-plex-client-identifier", "x")
-   req.Header.Set("x-plex-product", "Plex Mediaverse")
-
-   resp, err := do(req)
-   if err != nil {
-      return nil, err
-   }
-   defer resp.Body.Close()
-
-   var result User
-   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, err
-   }
-   return &result, nil
+// do logs and executes the request.
+func do(req *http.Request) (*http.Response, error) {
+   log.Println(req.Method, req.URL)
+   return http.DefaultClient.Do(req)
 }
 
 type MatchContainer struct {
@@ -134,6 +112,19 @@ func GetMetadataMatches(urlPath string, userData *User) (*MatchContainer, error)
    return &result.MediaContainer, nil
 }
 
+type MatchItem struct {
+   Key       string `json:"key"`
+   RatingKey string `json:"ratingKey"`
+   Title     string `json:"title"`
+   Type      string `json:"type"`
+}
+
+type Media struct {
+   Id       string    `json:"id"`
+   Protocol string    `json:"protocol"`
+   Part     []VodPart `json:"Part"`
+}
+
 func (*Media) CachePath() string {
    return "rosso/plex/Media"
 }
@@ -151,8 +142,82 @@ func (m *Media) GetManifest(userData *User) *url.URL {
    return endpoint
 }
 
+type MetadataItem struct {
+   Title string  `json:"title"`
+   Media []Media `json:"Media"`
+}
+
+type User struct {
+   Id        int    `json:"id"`
+   Uuid      string `json:"uuid"`
+   AuthToken string `json:"authToken"`
+}
+
+func CreateUser() (*User, error) {
+   endpoint := &url.URL{
+      Scheme: "https",
+      Host:   "plex.tv",
+      Path:   "/api/v2/users/anonymous",
+   }
+
+   req, err := http.NewRequest(http.MethodPost, endpoint.String(), nil)
+   if err != nil {
+      return nil, err
+   }
+   req.Header.Set("accept", "application/json")
+   req.Header.Set("x-plex-client-identifier", "x")
+   req.Header.Set("x-plex-product", "Plex Mediaverse")
+
+   resp, err := do(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   var result User
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+   return &result, nil
+}
+
 func (*User) CachePath() string {
    return "rosso/plex/User"
+}
+
+type VodMetadata struct {
+   Metadata []MetadataItem `json:"Metadata"`
+}
+
+func GetVodMetadata(match *MatchItem, userData *User) (*VodMetadata, error) {
+   log.Print("GetVodMetadata")
+   endpoint := &url.URL{
+      Scheme: "https",
+      Host:   "vod.provider.plex.tv",
+      Path:   match.Key,
+   }
+
+   req, err := http.NewRequest(http.MethodGet, endpoint.String(), nil)
+   if err != nil {
+      return nil, err
+   }
+   req.Header.Set("accept", "application/json")
+   req.Header.Set("x-plex-token", userData.AuthToken)
+
+   resp, err := do(req)
+   if err != nil {
+      return nil, err
+   }
+   defer resp.Body.Close()
+
+   var result struct {
+      MediaContainer VodMetadata `json:"MediaContainer"`
+   }
+   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+      return nil, err
+   }
+
+   return &result.MediaContainer, nil
 }
 
 func (vod *VodMetadata) GetDash() (*Media, error) {
@@ -164,4 +229,10 @@ func (vod *VodMetadata) GetDash() (*Media, error) {
       }
    }
    return nil, errors.New("dash media not found")
+}
+
+type VodPart struct {
+   Id      string `json:"id"`
+   Key     string `json:"key"`
+   License string `json:"license"`
 }

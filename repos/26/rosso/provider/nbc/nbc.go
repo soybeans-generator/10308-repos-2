@@ -179,11 +179,8 @@ type Stream struct {
    PlaybackUrl string // MPD
 }
 
-func (s *Stream) GetManifest() (*url.URL, error) {
-   manifest, err := url.Parse(s.PlaybackUrl)
-   if err != nil {
-      return nil, err
-   }
-   manifest.Path = strings.Replace(manifest.Path, "_2sec", "", 1)
-   return manifest, nil
+// GetManifest returns the full-length MPD location, with the "_2sec"
+// marker removed from its path.
+func (s *Stream) GetManifest() string {
+   return strings.Replace(s.PlaybackUrl, "_2sec", "", 1)
 }

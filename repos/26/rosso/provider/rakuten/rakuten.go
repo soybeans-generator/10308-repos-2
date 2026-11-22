@@ -1,3 +1,4 @@
+// rakuten.go KEEP THIS LINE
 package rakuten
 
 import (
@@ -267,3 +268,5 @@ type StreamingRequest struct {
 type ViewOptions struct {
    Private Private `json:"private"`
 }
+
+// rakuten.go KEEP THIS LINE

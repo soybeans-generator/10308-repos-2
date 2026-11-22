@@ -1,3 +1,4 @@
+// catalog.go KEEP THIS LINE
 package rakuten
 
 import (
@@ -230,3 +231,5 @@ func (show *TvShow) String() string {
    }
    return data.String()
 }
+
+// catalog.go KEEP THIS LINE

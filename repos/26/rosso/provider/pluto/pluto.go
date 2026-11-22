@@ -43,7 +43,7 @@ func FetchWidevine(body []byte) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-func build_stitcher(session_token, path string) *url.URL {
+func build_stitcher(session_token, path string) string {
    stitcher := &url.URL{
       Host:   stitcherHost,
       Path:   "/v2" + path,
@@ -52,7 +52,7 @@ func build_stitcher(session_token, path string) *url.URL {
    values := url.Values{}
    values.Set("jwt", session_token)
    stitcher.RawQuery = values.Encode()
-   return stitcher
+   return stitcher.String()
 }
 
 func do(req *http.Request) (*http.Response, error) {
@@ -117,7 +117,7 @@ func (*Series) CachePath() string {
    return "rosso/pluto/Series"
 }
 
-func (s *Series) GetEpisodeUrl(episodeId string) (*url.URL, error) {
+func (s *Series) GetEpisodeUrl(episodeId string) (string, error) {
    // Iterate through all seasons and episodes to find the matching ID
    for _, season := range s.Vod[0].Seasons {
       for _, episode := range season.Episodes {
@@ -129,11 +129,11 @@ func (s *Series) GetEpisodeUrl(episodeId string) (*url.URL, error) {
          }
       }
    }
-   return nil, errors.New("episode not found")
+   return "", errors.New("episode not found")
 }
 
 // It assumes Vod and Stitched.Paths always have at least one entry
-func (s *Series) GetMovieUrl() *url.URL {
+func (s *Series) GetMovieUrl() string {
    // Directly access the required path based on the data guarantees
    return build_stitcher(s.SessionToken, s.Vod[0].Stitched.Paths[0].Path)
 }
