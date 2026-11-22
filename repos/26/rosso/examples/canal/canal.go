@@ -6,7 +6,6 @@ import (
    "fmt"
    "log"
    "net/http"
-   "net/url"
    "os"
    "path"
 )
@@ -190,11 +189,7 @@ func (c *client) do_tracking() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(player.Url)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(player.Url)
    if err != nil {
       return err
    }
