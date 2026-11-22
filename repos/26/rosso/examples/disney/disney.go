@@ -17,7 +17,7 @@ func main() {
 }
 
 type client struct {
-   cache maya.Cache
+   cache     maya.Cache
    Email     maya.FlagString
    PlayReady maya.FlagString
    address   maya.FlagString

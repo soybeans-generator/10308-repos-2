@@ -54,7 +54,7 @@ func AcquireLicense(challenge []byte, token *ProfileToken, activePlayback *Playb
    return io.ReadAll(resp.Body)
 }
 
-func GetStream(token *ProfileToken, activePlayback *Playback) (*url.URL, error) {
+func GetStream(token *ProfileToken, activePlayback *Playback) (string, error) {
    endpoint := fmt.Sprintf(
       "https://stream.video.9c9media.com/meta/content/%d/contentpackage/%d/destination/%d/platform/48",
       activePlayback.ContentId, activePlayback.ContentPackage.Id, activePlayback.DestinationId,
@@ -71,13 +71,13 @@ func GetStream(token *ProfileToken, activePlayback *Playback) (*url.URL, error) 
 
    req, err := http.NewRequest(http.MethodGet, endpoint, nil)
    if err != nil {
-      return nil, err
+      return "", err
    }
    req.Header.Set("authorization", "Bearer "+token.AccessToken)
 
    resp, err := doRequest(req)
    if err != nil {
-      return nil, err
+      return "", err
    }
    defer resp.Body.Close()
 
@@ -86,12 +86,12 @@ func GetStream(token *ProfileToken, activePlayback *Playback) (*url.URL, error) 
       Playback string `json:"playback"`
    }
    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-      return nil, err
+      return "", err
    }
    if result.Message != "" {
-      return nil, errors.New(result.Message)
+      return "", errors.New(result.Message)
    }
-   return url.Parse(result.Playback)
+   return result.Playback, nil
 }
 
 // doRequest logs the HTTP method and URL, then executes the request.
