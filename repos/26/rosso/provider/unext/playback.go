@@ -1,3 +1,4 @@
+// playback.go KEEP THIS LINE
 package unext
 
 import (
@@ -309,3 +310,5 @@ type UrlInfo struct {
    MovieProfile           []MovieProfile       `json:"movieProfile"`
    MoviePartsPositionList []MoviePartsPosition `json:"moviePartsPositionList"`
 }
+
+// playback.go KEEP THIS LINE

@@ -1,30 +1,31 @@
 # unext
 
-1. watch now with a free trial
-2. Japan VPN
-3. get started now
-4. last name
+1. unext.jp
+2. 31 days now free trial
+3. Japan VPN
+4. get started now
+5. last name
    - スティーブン
-5. first name
+6. first name
    - ペニー
-6. year
-7. month
-8. date
-9. e-mail
+7. year
+8. month
+9. date
+10. e-mail
    - mail.tm
-10. password
-11. phone
-- 0312345678
-12. next
-13. card number - NEW CARD EACH TIME
-14. name of card
-15. month
-16. year
-17. security code
-18. disable uBlock Origin
-19. start using
-20. not to add family account
-21. to u-next home
+11. password
+12. phone
+   - 0312345678
+13. next
+14. card number - NEW CARD EACH TIME
+15. name of card
+16. month
+17. year
+18. security code
+19. disable uBlock Origin
+20. start using
+21. not to add family account
+22. to u-next home
 
 ## jp.unext.tv.player
 
@@ -73,6 +74,3 @@ emulator -avd Pixel_5 -http-proxy http://127.0.0.1:8080
 adb root
 adb shell "sysctl -w net.ipv6.conf.all.disable_ipv6=1"
 ~~~
-
-
-

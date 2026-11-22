@@ -1,3 +1,4 @@
+// oauth.go KEEP THIS LINE
 package unext
 
 import (
@@ -254,3 +255,5 @@ func (t *TokenResponse) Refresh() error {
    *t = newToken
    return nil
 }
+
+// oauth.go KEEP THIS LINE
