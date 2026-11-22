@@ -1,3 +1,4 @@
+// client.go KEEP THIS LINE
 package hboMax
 
 import (
@@ -193,13 +194,9 @@ func (*Playback) CachePath() string {
    return "rosso/hboMax/Playback"
 }
 
-func (p *Playback) GetManifest() (*url.URL, error) {
-   manifest, err := url.Parse(p.Fallback.Manifest.Url)
-   if err != nil {
-      return nil, err
-   }
-   manifest.Path = strings.Replace(manifest.Path, "_fallback", "", 1)
-   return manifest, nil
+// GetManifest returns the MPD location with the "_fallback" marker removed.
+func (p *Playback) GetManifest() string {
+   return strings.Replace(p.Fallback.Manifest.Url, "_fallback", "", 1)
 }
 
 // SL2000 max 1080p
@@ -241,3 +238,5 @@ func (p *Playback) WidevineRequest(body []byte) ([]byte, error) {
    }
    return io.ReadAll(resp.Body)
 }
+
+// client.go KEEP THIS LINE

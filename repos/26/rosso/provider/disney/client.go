@@ -1,4 +1,4 @@
-// client.go
+// client.go KEEP THIS LINE
 package disney
 
 import (
@@ -224,15 +224,15 @@ func (t *Token) FetchSeason(id string) (*Season, error) {
 }
 
 // request: Account
-func (t *Token) FetchStream(mediaId string) (*url.URL, error) {
+func (t *Token) FetchStream(mediaId string) (string, error) {
    if err := t.assert("Account"); err != nil {
-      return nil, err
+      return "", err
    }
    playback_id, err := json.Marshal(map[string]string{
       "mediaId": mediaId,
    })
    if err != nil {
-      return nil, err
+      return "", err
    }
    body, err := json.Marshal(map[string]any{
       "playback": map[string]any{
@@ -251,7 +251,7 @@ func (t *Token) FetchStream(mediaId string) (*url.URL, error) {
       "playbackId": playback_id,
    })
    if err != nil {
-      return nil, err
+      return "", err
    }
    req, err := http.NewRequest(
       "POST",
@@ -259,7 +259,7 @@ func (t *Token) FetchStream(mediaId string) (*url.URL, error) {
       bytes.NewReader(body),
    )
    if err != nil {
-      return nil, err
+      return "", err
    }
    req.Header.Set("authorization", "Bearer "+t.AccessToken)
    req.Header.Set("content-type", "application/json")
@@ -270,7 +270,7 @@ func (t *Token) FetchStream(mediaId string) (*url.URL, error) {
    req.Header.Set("x-dss-feature-filtering", "true")
    resp, err := do(req)
    if err != nil {
-      return nil, err
+      return "", err
    }
    defer resp.Body.Close()
    var result struct {
@@ -284,9 +284,9 @@ func (t *Token) FetchStream(mediaId string) (*url.URL, error) {
    }
    err = json.NewDecoder(resp.Body).Decode(&result)
    if err != nil {
-      return nil, err
+      return "", err
    }
-   return url.Parse(result.Stream.Sources[0].Complete.Url)
+   return result.Stream.Sources[0].Complete.Url, nil
 }
 
 // L3 max: 720p
@@ -331,3 +331,5 @@ func (t *Token) assert(expected string) error {
    }
    return nil
 }
+
+// client.go KEEP THIS LINE

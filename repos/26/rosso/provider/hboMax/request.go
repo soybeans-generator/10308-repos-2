@@ -1,3 +1,4 @@
+// request.go KEEP THIS LINE
 package hboMax
 
 import (
@@ -313,3 +314,5 @@ type Resource struct {
 type Scheme struct {
    LicenseUrl string
 }
+
+// request.go KEEP THIS LINE

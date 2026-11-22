@@ -1,4 +1,4 @@
-// api.go marker preserve
+// api.go KEEP THIS LINE
 package criterion
 
 import (
@@ -124,4 +124,4 @@ func (s *Source) FetchWidevine(body []byte) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-// api.go marker preserve
+// api.go KEEP THIS LINE

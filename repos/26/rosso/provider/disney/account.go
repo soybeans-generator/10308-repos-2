@@ -1,4 +1,4 @@
-// account.go
+// account.go KEEP THIS LINE
 package disney
 
 import (
@@ -399,3 +399,5 @@ func (t *Token) SwitchProfile(profileId string) error {
    *t = result.Extensions.Sdk.Token
    return nil
 }
+
+// account.go KEEP THIS LINE

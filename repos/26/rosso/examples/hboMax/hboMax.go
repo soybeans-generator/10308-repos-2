@@ -109,11 +109,7 @@ func (c *client) do_edit_id() error {
    if err != nil {
       return err
    }
-   address, err := playback.GetManifest()
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(playback.GetManifest())
    if err != nil {
       return err
    }
