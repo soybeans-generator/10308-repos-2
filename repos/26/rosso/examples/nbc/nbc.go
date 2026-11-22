@@ -66,11 +66,7 @@ func (c *client) do_address() error {
    if err != nil {
       return err
    }
-   address, err := stream.GetManifest()
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(stream.GetManifest())
    if err != nil {
       return err
    }

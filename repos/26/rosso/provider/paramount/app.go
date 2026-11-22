@@ -1,4 +1,4 @@
-// app.go marker preserve
+// app.go KEEP THIS LINE
 package paramount
 
 import (
@@ -202,4 +202,4 @@ func (s *Session) Fetch(body []byte) ([]byte, error) {
    return io.ReadAll(resp.Body)
 }
 
-// app.go marker preserve
+// app.go KEEP THIS LINE

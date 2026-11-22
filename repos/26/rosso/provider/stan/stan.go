@@ -184,13 +184,14 @@ type Media struct {
    VideoUrl string
 }
 
-func (m *Media) BaseUrl(host string) (*url.URL, error) {
+// BaseUrl rewrites the video URL onto the given host and returns it.
+func (m *Media) BaseUrl(host string) (string, error) {
    video, err := url.Parse(m.VideoUrl)
    if err != nil {
-      return nil, err
+      return "", err
    }
    video.Host = host
-   return video, nil
+   return video.String(), nil
 }
 
 func (*Media) CachePath() string {

@@ -8,7 +8,6 @@ import (
    "fmt"
    "log"
    "net/http"
-   "net/url"
    "strings"
 )
 
@@ -153,17 +152,13 @@ type SecureUrl struct {
    UserMessage string `json:"user_message"`
 }
 
-func (s *SecureUrl) GetManifest() (*url.URL, error) {
-   manifest, err := url.Parse(s.Url)
-   if err != nil {
-      return nil, err
-   }
-   manifest.Path = strings.NewReplacer(
+// GetManifest returns the MPD location with the codec markers removed.
+func (s *SecureUrl) GetManifest() string {
+   return strings.NewReplacer(
       ".AVC1", "",
       ".ex-eac3", "",
       ".ex-vtt", "",
-   ).Replace(manifest.Path)
-   return manifest, nil
+   ).Replace(s.Url)
 }
 
 type Session struct {
@@ -261,5 +256,3 @@ func (s *Session) FetchWidevine(body []byte) ([]byte, error) {
    }
    return result.License, nil
 }
-
-// mubi.go

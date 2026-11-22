@@ -1,4 +1,4 @@
-// peacock.go KEEP VERBATIM
+// peacock.go KEEP THIS LINE
 package peacock
 
 import (
@@ -321,18 +321,14 @@ func (*PlayoutVodResponse) CachePath() string {
    return "rosso/peacock/PlayoutVodResponse"
 }
 
-// Fastly returns the parsed URL of the FASTLY CDN endpoint from the playout response.
-func (r *PlayoutVodResponse) Fastly() (*url.URL, error) {
+// Fastly returns the FASTLY CDN endpoint URL from the playout response.
+func (r *PlayoutVodResponse) Fastly() (string, error) {
    for _, endpoint := range r.Asset.Endpoints {
       if endpoint.Cdn == "FASTLY" {
-         parsed, err := url.Parse(endpoint.Url)
-         if err != nil {
-            return nil, fmt.Errorf("fastly: parse url: %w", err)
-         }
-         return parsed, nil
+         return endpoint.Url, nil
       }
    }
-   return nil, fmt.Errorf("fastly cdn endpoint not found")
+   return "", fmt.Errorf("fastly cdn endpoint not found")
 }
 
 // AcquireLicense sends a Widevine license acquisition request to the licence acquisition URL
@@ -373,5 +369,3 @@ func (p *PlayoutVodResponse) AcquireLicense(challenge []byte) ([]byte, error) {
 
    return license, nil
 }
-
-// peacock.go KEEP VERBATIM

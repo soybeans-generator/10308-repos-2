@@ -5,7 +5,6 @@ import (
    "41.neocities.org/rosso/provider/molotov"
    "fmt"
    "log"
-   "net/url"
    "os"
 )
 
@@ -84,11 +83,7 @@ func (c *client) do_asset_id() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(asset.Stream.URL)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(asset.Stream.URL)
    if err != nil {
       return err
    }

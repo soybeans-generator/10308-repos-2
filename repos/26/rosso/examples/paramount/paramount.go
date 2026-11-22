@@ -4,7 +4,6 @@ import (
    "41.neocities.org/maya"
    "41.neocities.org/rosso/provider/paramount"
    "log"
-   "net/url"
    "os"
 )
 
@@ -92,11 +91,7 @@ func (c *client) do_content_id() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(session.StreamingUrl)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(session.StreamingUrl)
    if err != nil {
       return err
    }

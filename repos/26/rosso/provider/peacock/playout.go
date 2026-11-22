@@ -1,4 +1,4 @@
-// playout.go KEEP VERBATIM
+// playout.go KEEP THIS LINE
 package peacock
 
 import (
@@ -177,4 +177,4 @@ type playoutRequest struct {
    PersonaParentalControlRating string        `json:"personaParentalControlRating"`
 }
 
-// playout.go KEEP VERBATIM
+// playout.go KEEP THIS LINE

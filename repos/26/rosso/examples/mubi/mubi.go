@@ -139,11 +139,7 @@ func (c *client) do_mubi() error {
    if err != nil {
       return err
    }
-   address, err := secure_url.GetManifest()
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(secure_url.GetManifest())
    if err != nil {
       return err
    }
@@ -162,5 +158,3 @@ func (c *client) do_session() error {
    }
    return c.cache.Encode(session)
 }
-
-// examples/mubi/mubi.go

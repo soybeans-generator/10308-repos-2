@@ -5,7 +5,6 @@ import (
    "41.neocities.org/rosso/provider/amc"
    "fmt"
    "log"
-   "net/url"
    "os"
 )
 
@@ -133,11 +132,7 @@ func (c *client) do_episode_or_movie() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(source.Src)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(source.Src)
    if err != nil {
       return err
    }

@@ -5,7 +5,6 @@ import (
    "41.neocities.org/rosso/provider/roku"
    "fmt"
    "log"
-   "net/url"
    "os"
 )
 
@@ -129,11 +128,7 @@ func (c *client) do_roku_id() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(playback.Url)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(playback.Url)
    if err != nil {
       return err
    }
