@@ -5,7 +5,6 @@ import (
    "41.neocities.org/rosso/provider/itv"
    "fmt"
    "log"
-   "net/url"
    "os"
 )
 
@@ -22,8 +21,7 @@ type client struct {
    address  maya.FlagString
    dash_id  maya.FlagString
    playlist maya.FlagString
-
-   cache maya.Cache
+   cache    maya.Cache
 }
 
 func (*client) CachePath() string {
@@ -102,11 +100,7 @@ func (c *client) do_playlist() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(media_file.Href)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(media_file.Href)
    if err != nil {
       return err
    }

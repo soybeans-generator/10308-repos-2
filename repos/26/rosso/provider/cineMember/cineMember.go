@@ -144,13 +144,12 @@ func FetchStream(phpSessId *Cookie, id int) (*Stream, error) {
    return &result, nil
 }
 
-func (s *Stream) GetDash() (*url.URL, error) {
+// GetDash returns the MPD location of the stream.
+func (s *Stream) GetDash() (string, error) {
    for _, link := range s.Links {
       if link.MimeType == "application/dash+xml" {
-         return url.Parse(link.Url)
+         return link.Url, nil
       }
    }
-   return nil, errors.New("DASH link not found")
+   return "", errors.New("DASH link not found")
 }
-
-// cineMember.go

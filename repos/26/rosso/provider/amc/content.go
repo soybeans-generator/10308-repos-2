@@ -1,3 +1,4 @@
+// content.go KEEP THIS LINE
 package amc
 
 import (
@@ -184,4 +185,4 @@ func (*Source) CachePath() string {
    return "rosso/amc/Source"
 }
 
-// content.go
+// content.go KEEP THIS LINE

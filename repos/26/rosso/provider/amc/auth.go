@@ -1,3 +1,4 @@
+// auth.go KEEP THIS LINE
 package amc
 
 import (
@@ -262,4 +263,4 @@ type Properties struct {
    Metadata     *Metadata `json:"metadata,omitempty"`
 }
 
-// auth.go
+// auth.go KEEP THIS LINE
