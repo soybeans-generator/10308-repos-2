@@ -129,7 +129,7 @@ func (*Media) CachePath() string {
    return "rosso/plex/Media"
 }
 
-func (m *Media) GetManifest(userData *User) *url.URL {
+func (m *Media) GetManifest(userData *User) string {
    log.Print("GetManifest")
    endpoint := &url.URL{
       Scheme: "https",
@@ -139,7 +139,7 @@ func (m *Media) GetManifest(userData *User) *url.URL {
    query := url.Values{}
    query.Set("x-plex-token", userData.AuthToken)
    endpoint.RawQuery = query.Encode()
-   return endpoint
+   return endpoint.String()
 }
 
 type MetadataItem struct {
