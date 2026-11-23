@@ -2,10 +2,12 @@
 package maya
 
 import (
+   "cmp"
    "errors"
    "fmt"
    "net/url"
    "path"
+   "slices"
    "strconv"
 
    "41.neocities.org/luna/hls"
@@ -17,10 +19,18 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher
    if err != nil {
       return err
    }
-   media, err := fetchMediaPlaylist(mediaUrl)
+   data, effective, err := fetchData(mediaUrl, nil, true)
    if err != nil {
       return err
    }
+   media, err := hls.DecodeMedia(string(data))
+   if err != nil {
+      return err
+   }
+   // Resolve against the URL that actually served the playlist: after a
+   // redirect, its relative segment URIs point elsewhere.
+   media.ResolveUris(effective)
+
    info, err := detectHlsType(media)
    if err != nil {
       return err
@@ -28,7 +38,7 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher
 
    segments := make([]segment, len(media.Segments))
    for i, entry := range media.Segments {
-      segments[i] = segment{url: entry.Uri, duration: entry.Duration}
+      segments[i] = segment{url: entry.Uri}
    }
 
    var initData []byte
@@ -48,20 +58,6 @@ func downloadHls(playlist *hls.MasterPlaylist, streamId int, fetchKey keyFetcher
    })
 }
 
-// fetchMediaPlaylist fetches and parses an HLS media playlist.
-func fetchMediaPlaylist(mediaUrl *url.URL) (*hls.MediaPlaylist, error) {
-   data, effective, err := fetchData(mediaUrl, nil, true)
-   if err != nil {
-      return nil, err
-   }
-   media, err := hls.DecodeMedia(string(data))
-   if err != nil {
-      return nil, err
-   }
-   media.ResolveUris(effective)
-   return media, nil
-}
-
 // hlsStreamUrl returns the URI of the variant or rendition with streamId.
 func hlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, error) {
    for _, variant := range playlist.StreamInfs {
@@ -77,8 +73,13 @@ func hlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, error) 
    return nil, fmt.Errorf("stream with ID not found: %d", streamId)
 }
 
-// listStreamsHls prints the renditions, then the variants, in manifest order.
+// listStreamsHls prints the renditions, then the variants by bandwidth.
+// Renditions carry no BANDWIDTH attribute, so only the variants are sorted.
 func listStreamsHls(playlist *hls.MasterPlaylist) error {
+   slices.SortFunc(playlist.StreamInfs, func(a, b *hls.StreamInf) int {
+      return cmp.Compare(a.Bandwidth, b.Bandwidth)
+   })
+
    streams := make([]any, 0, len(playlist.Medias)+len(playlist.StreamInfs))
    for _, rendition := range playlist.Medias {
       streams = append(streams, rendition)
