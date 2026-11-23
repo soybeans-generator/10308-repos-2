@@ -82,9 +82,9 @@ func parseMaster(lines []string) (*MasterPlaylist, error) {
          }
          // The lowest bandwidth tag is the primary description of the URI
          // and may overwrite what an earlier tag set.
-         primary := stream.bandwidth == 0 || bandwidth < stream.bandwidth
+         primary := stream.Bandwidth == 0 || bandwidth < stream.Bandwidth
          if primary && bandwidth > 0 {
-            stream.bandwidth = bandwidth
+            stream.Bandwidth = bandwidth
          }
          if err := stream.applyAttributes(attrs, primary); err != nil {
             return nil, err
@@ -164,13 +164,16 @@ func (m *Media) String() string {
 type StreamInf struct {
    audio            []string
    averageBandwidth int
-   bandwidth        int
-   codecs           string
-   frameRate        string
-   Id               int
-   resolution       string
-   subtitles        string
-   Uri              *url.URL
+   // Bandwidth is the lowest BANDWIDTH among the tags sharing Uri. It is 0
+   // when no tag declared BANDWIDTH, and the aggregate it belongs to keeps
+   // describing one URI even when its tags name different renditions.
+   Bandwidth  int
+   codecs     string
+   frameRate  string
+   Id         int
+   resolution string
+   subtitles  string
+   Uri        *url.URL
 }
 
 // String returns a multi-line summary of the StreamInf.
@@ -179,7 +182,7 @@ func (s *StreamInf) String() string {
    if s.averageBandwidth > 0 {
       fmt.Fprintln(&b, "average bandwidth:", s.averageBandwidth)
    }
-   fmt.Fprintln(&b, "bandwidth:", s.bandwidth)
+   fmt.Fprintln(&b, "bandwidth:", s.Bandwidth)
    if s.resolution != "" {
       fmt.Fprintln(&b, "resolution:", s.resolution)
    }
