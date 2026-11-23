@@ -41,6 +41,13 @@ type Representation struct {
    Parent *AdaptationSet `xml:"-"`
 }
 
+func (r *Representation) GetCodecs() string {
+   if r.Codecs == "" && r.Parent != nil {
+      return r.Parent.Codecs
+   }
+   return r.Codecs
+}
+
 func (r *Representation) GetContentProtection() []*ContentProtection {
    if len(r.ContentProtection) > 0 {
       return r.ContentProtection
@@ -99,7 +106,7 @@ func (r *Representation) String() string {
    if height := r.GetHeight(); height != 0 {
       fmt.Fprintln(&b, "height:", height)
    }
-   if codecs := r.getCodecs(); codecs != "" {
+   if codecs := r.GetCodecs(); codecs != "" {
       fmt.Fprintln(&b, "codecs:", codecs)
    }
    fmt.Fprintln(&b, "mimeType:", r.GetMimeType())
@@ -118,13 +125,6 @@ func (r *Representation) String() string {
    b.WriteString(r.Id)
 
    return b.String()
-}
-
-func (r *Representation) getCodecs() string {
-   if r.Codecs == "" && r.Parent != nil {
-      return r.Parent.Codecs
-   }
-   return r.Codecs
 }
 
 func (r *Representation) getLabel() string {
