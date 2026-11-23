@@ -64,11 +64,13 @@ type PlayoutVodResponse struct {
 
 // PlayoutVod requests a VOD playout URL from POST /video/playouts/vod using the
 // embedded mTLS certificate. token supplies the userToken; providerVariantID
-// identifies the asset to play. The video codec capability is always sent as
-// H264 and the colour space as SDR. protection selects the DRM system
-// ("WIDEVINE" or "PLAYREADY").
+// identifies the asset to play. vcodec selects the requested video codec
+// (e.g. "H264" or "H265") and defaults to "H264" when empty. protection selects
+// the DRM system ("WIDEVINE" or "PLAYREADY"). colourSpace selects the requested
+// transfer range ("SDR", "HDR10" or "DolbyVision") and defaults to "SDR" when
+// empty.
 func PlayoutVod(
-   token *TokenResponse, providerVariantID, protection string,
+   token *TokenResponse, providerVariantID, vcodec, protection, colourSpace string,
 ) (*PlayoutVodResponse, error) {
    if token == nil {
       return nil, fmt.Errorf("playout vod: nil token")
@@ -82,6 +84,12 @@ func PlayoutVod(
    if protection == "" {
       return nil, fmt.Errorf("playout vod: empty protection")
    }
+   if vcodec == "" {
+      vcodec = "H264"
+   }
+   if colourSpace == "" {
+      colourSpace = "SDR"
+   }
    body := playoutRequest{
       Device: playoutDevice{
          Capabilities: []playoutCapability{
@@ -90,11 +98,11 @@ func PlayoutVod(
                Container:  "ISOBMFF",
                Protection: protection,
                Transport:  "DASH",
-               Vcodec:     "H264",
+               Vcodec:     vcodec,
             },
          },
          MaxVideoFormat:        "UHD",
-         SupportedColourSpaces: []string{"SDR"},
+         SupportedColourSpaces: []string{colourSpace},
       },
       ProviderVariantID:            providerVariantID,
       PersonaParentalControlRating: "9",

@@ -369,3 +369,5 @@ func (p *PlayoutVodResponse) AcquireLicense(challenge []byte) ([]byte, error) {
 
    return license, nil
 }
+
+// peacock.go KEEP THIS LINE

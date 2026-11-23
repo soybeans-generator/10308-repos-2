@@ -102,10 +102,11 @@ func fetchDRMLicense(path string, actorToken *ActorToken, metadata *PlaybackExpe
    return nil, fmt.Errorf("license not found in response")
 }
 
-func trimURLPath(rawUrl string) (*url.URL, error) {
+// trimURLPath removes the Amazon routing prefix from an MPD location.
+func trimURLPath(rawUrl string) (string, error) {
    parsedURL, err := url.Parse(rawUrl)
    if err != nil {
-      return nil, err
+      return "", err
    }
 
    parts := strings.Split(parsedURL.Path, "/")
@@ -118,7 +119,7 @@ func trimURLPath(rawUrl string) (*url.URL, error) {
       parsedURL.Path = "/" + strings.Join(parts[3:], "/")
    }
 
-   return parsedURL, nil
+   return parsedURL.String(), nil
 }
 
 // EntitlementMessaging holds the "entitlementMessaging" object from the resource.
@@ -137,6 +138,66 @@ type PlaybackExperienceMetadata struct {
 
 func (*PlaybackExperienceMetadata) CachePath() string {
    return "rosso/amazon/PlaybackExperienceMetadata"
+}
+
+// PlaybackResources is the GetVodPlaybackResources response, trimmed to the
+// fields we use.
+type PlaybackResources struct {
+   GlobalError struct {
+      Code    string `json:"code"`
+      Message string `json:"message"`
+   } `json:"globalError"`
+   TimedTextUrls struct {
+      Result struct {
+         SubtitleUrls []SubtitleUrl `json:"subtitleUrls"`
+      } `json:"result"`
+   } `json:"timedTextUrls"`
+   VodPlaylistedPlaybackUrls struct {
+      Result struct {
+         PlaybackUrls struct {
+            IntraTitlePlaylist []struct {
+               Type string `json:"type"`
+               Urls []struct {
+                  Url string `json:"url"`
+                  Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
+               } `json:"urls"`
+            } `json:"intraTitlePlaylist"`
+         } `json:"playbackUrls"`
+      } `json:"result"`
+      Error struct {
+         Message string `json:"message"`
+      } `json:"error"`
+   } `json:"vodPlaylistedPlaybackUrls"`
+}
+
+// PlaybackUrl extracts the Akamai MPD URL from the main playlist and sanitizes
+// its path. Returns an error if the Main playlist or Akamai CDN is not found.
+func (p *PlaybackResources) PlaybackUrl() (string, error) {
+   for _, playlist := range p.VodPlaylistedPlaybackUrls.Result.PlaybackUrls.IntraTitlePlaylist {
+      if playlist.Type == "Main" {
+         // Require Akamai to avoid the 30MB Cloudfront/Amazon MPD bloat
+         for _, u := range playlist.Urls {
+            if u.Cdn == "akamai" {
+               return trimURLPath(u.Url)
+            }
+         }
+
+         return "", fmt.Errorf("akamai cdn not found in main playlist")
+      }
+   }
+
+   return "", fmt.Errorf("main playlist not found in response")
+}
+
+// SubtitleUrls returns every subtitle track with ".ttml2" rewritten to ".vtt".
+// An empty slice means "no subtitles".
+func (p *PlaybackResources) SubtitleUrls() []SubtitleUrl {
+   out := make([]SubtitleUrl, 0, len(p.TimedTextUrls.Result.SubtitleUrls))
+   for _, subtitle := range p.TimedTextUrls.Result.SubtitleUrls {
+      subtitle.Url = strings.Replace(subtitle.Url, ".ttml2", ".vtt", 1)
+      out = append(out, subtitle)
+   }
+   return out
 }
 
 // Resource represents the "resource" object returned from the detailsPageATF endpoint.
@@ -276,6 +337,18 @@ func (r *Resource) String() string {
    return data.String()
 }
 
+// SubtitleUrl is a single timed-text track from the GetVodPlaybackResources
+// response.
+type SubtitleUrl struct {
+   LanguageCode string `json:"languageCode"`
+   Url          string `json:"url"`
+}
+
+// String returns the track as key: value lines, language first.
+func (s *SubtitleUrl) String() string {
+   return fmt.Sprintf("languageCode: %s\nurl: %s", s.LanguageCode, s.Url)
+}
+
 // VodPlaybackParams holds the configuration for fetching playback resources.
 type VodPlaybackParams struct {
    ActorToken                 *ActorToken
@@ -290,7 +363,7 @@ type VodPlaybackParams struct {
 }
 
 // Fetch requests the final MPD resources for playback from Amazon's API.
-func (p *VodPlaybackParams) Fetch() (*VodPlaybackResources, error) {
+func (p *VodPlaybackParams) Fetch() (*PlaybackResources, error) {
    if p == nil {
       return nil, fmt.Errorf("VodPlaybackParams cannot be nil")
    }
@@ -347,7 +420,7 @@ func (p *VodPlaybackParams) Fetch() (*VodPlaybackResources, error) {
       return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
    }
 
-   var result VodPlaybackResources
+   var result PlaybackResources
    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
       return nil, err
    }
@@ -361,80 +434,6 @@ func (p *VodPlaybackParams) Fetch() (*VodPlaybackResources, error) {
    }
 
    return &result, nil
-}
-
-// VodPlaybackResources is the GetVodPlaybackResources response, trimmed to the
-// fields we use.
-type VodPlaybackResources struct {
-   GlobalError struct {
-      Code    string `json:"code"`
-      Message string `json:"message"`
-   } `json:"globalError"`
-   TimedTextUrls struct {
-      Result struct {
-         SubtitleUrls []struct {
-            Format string `json:"format"` // e.g., "TTMLv2"
-            Url    string `json:"url"`
-         } `json:"subtitleUrls"`
-      } `json:"result"`
-   } `json:"timedTextUrls"`
-   VodPlaylistedPlaybackUrls struct {
-      Result struct {
-         PlaybackUrls struct {
-            IntraTitlePlaylist []struct {
-               Type string `json:"type"`
-               Urls []struct {
-                  Url string `json:"url"`
-                  Cdn string `json:"cdn"` // Used to identify Akamai vs Cloudfront
-               } `json:"urls"`
-            } `json:"intraTitlePlaylist"`
-         } `json:"playbackUrls"`
-      } `json:"result"`
-      Error struct {
-         Message string `json:"message"`
-      } `json:"error"`
-   } `json:"vodPlaylistedPlaybackUrls"`
-}
-
-// DashUrl extracts the Akamai MPD URL from the main playlist and sanitizes its
-// path. Returns an error if the Main playlist or Akamai CDN is not found.
-func (r *VodPlaybackResources) DashUrl() (*url.URL, error) {
-   for _, playlist := range r.VodPlaylistedPlaybackUrls.Result.PlaybackUrls.IntraTitlePlaylist {
-      if playlist.Type == "Main" {
-         if len(playlist.Urls) == 0 {
-            return nil, fmt.Errorf("no urls found in main playlist")
-         }
-
-         // Require Akamai to avoid the 30MB Cloudfront/Amazon MPD bloat
-         for _, u := range playlist.Urls {
-            if u.Cdn == "akamai" {
-               return trimURLPath(u.Url)
-            }
-         }
-
-         return nil, fmt.Errorf("akamai cdn not found in main playlist")
-      }
-   }
-
-   return nil, fmt.Errorf("main playlist not found in response")
-}
-
-// VttUrl returns the first TTML2 subtitle URL with its extension changed to
-// ".vtt". Returns an error if no TTML2 subtitle is found.
-func (r *VodPlaybackResources) VttUrl() (*url.URL, error) {
-   for _, subtitle := range r.TimedTextUrls.Result.SubtitleUrls {
-      if !strings.EqualFold(subtitle.Format, "TTMLv2") {
-         continue
-      }
-      parsedURL, err := url.Parse(subtitle.Url)
-      if err != nil {
-         return nil, err
-      }
-      parsedURL.Path = strings.TrimSuffix(parsedURL.Path, ".ttml2") + ".vtt"
-      return parsedURL, nil
-   }
-
-   return nil, fmt.Errorf("ttml2 subtitle not found in response")
 }
 
 // playback.go KEEP THIS LINE

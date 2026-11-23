@@ -1,4 +1,4 @@
-// login.go marker preserve
+// login.go KEEP THIS LINE
 package criterion
 
 import (
@@ -237,4 +237,4 @@ func (t *TokenSet) Expiry() time.Time {
    return time.Now().Add(time.Duration(t.ExpiresIn) * time.Second)
 }
 
-// login.go marker preserve
+// login.go KEEP THIS LINE

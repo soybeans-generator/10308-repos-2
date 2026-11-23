@@ -1,4 +1,3 @@
-// criterion.go
 package main
 
 import (
@@ -6,7 +5,6 @@ import (
    "41.neocities.org/rosso/provider/criterion"
    "fmt"
    "log"
-   "net/url"
    "os"
 )
 
@@ -127,11 +125,7 @@ func (c *client) do_media_id() error {
    if err != nil {
       return err
    }
-   address, err := url.Parse(source.File)
-   if err != nil {
-      return err
-   }
-   manifest, err := maya.DashList(address)
+   manifest, err := maya.DashList(source.File)
    if err != nil {
       return err
    }
@@ -151,5 +145,3 @@ func (c *client) do_token() error {
    }
    return c.cache.Encode(token)
 }
-
-// criterion.go

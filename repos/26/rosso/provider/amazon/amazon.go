@@ -1,4 +1,4 @@
-// amazon.go marker preserve
+// amazon.go KEEP THIS LINE
 package amazon
 
 import (
@@ -395,4 +395,4 @@ func (t *TokenPair) Refresh() error {
    return nil
 }
 
-// amazon.go marker preserve
+// amazon.go KEEP THIS LINE
