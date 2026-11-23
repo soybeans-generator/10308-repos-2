@@ -11,14 +11,6 @@ import (
    "path/filepath"
 )
 
-func createFile(name string) (*os.File, error) {
-   if err := os.MkdirAll(filepath.Dir(name), os.ModePerm); err != nil {
-      return nil, err
-   }
-   log.Println("create:", name)
-   return os.Create(name)
-}
-
 func writeResume(name string, state *resumeState) error {
    data, err := json.Marshal(state)
    if err != nil {
@@ -96,18 +88,22 @@ func openOutput(name string) (*os.File, *resumeState, error) {
    if err != nil {
       return nil, nil, err
    }
-   if state == nil {
-      if fi, err := os.Stat(name); err == nil && fi.Size() > 0 {
-         return nil, nil, fmt.Errorf("%s already exists and no resume state was found; delete it to start over", name)
+   if state != nil {
+      file, err := os.OpenFile(name, os.O_RDWR, 0)
+      if err != nil {
+         return nil, nil, fmt.Errorf("resume state exists but %s cannot be opened; delete the state to start over", name)
       }
-      file, err := createFile(name)
-      return file, &resumeState{}, err
+      return file, state, nil
    }
-   file, err := os.OpenFile(name, os.O_RDWR, 0)
-   if err != nil {
-      return nil, nil, fmt.Errorf("resume state exists but %s cannot be opened; delete the state to start over", name)
+   if fi, err := os.Stat(name); err == nil && fi.Size() > 0 {
+      return nil, nil, fmt.Errorf("%s already exists and no resume state was found; delete it to start over", name)
    }
-   return file, state, nil
+   if err := os.MkdirAll(filepath.Dir(name), os.ModePerm); err != nil {
+      return nil, nil, err
+   }
+   log.Println("create:", name)
+   file, err := os.Create(name)
+   return file, &resumeState{}, err
 }
 
 func readResume(name string) (*resumeState, error) {

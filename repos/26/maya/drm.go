@@ -3,6 +3,7 @@ package maya
 
 import (
    "bytes"
+   "encoding/hex"
    "errors"
    "fmt"
    "log"
@@ -22,6 +23,21 @@ const (
 
    widevinePsshURN = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
 )
+
+var (
+   playReadyId = decodeSystemId(playReadySystemID)
+   widevineId  = decodeSystemId(widevineSystemID)
+)
+
+// decodeSystemId decodes a hex DRM system ID. The inputs are constants, so a
+// failure is a programming error rather than something a caller can handle.
+func decodeSystemId(hexId string) []byte {
+   id, err := hex.DecodeString(hexId)
+   if err != nil {
+      panic(err)
+   }
+   return id
+}
 
 // getKeyForStream fetches the key for a stream, preferring the content ID
 // from the manifest and the key ID from the initialization segment.
@@ -195,7 +211,7 @@ func getDashProtection(rep *dash.Representation) (*protectionInfo, error) {
 }
 
 // keyFetcher returns the key fetcher selected by the DRM options, or nil
-// when no DRM is configured.
+// when no DRM is configured. A nil Options means no DRM.
 func (options *Options) keyFetcher() (keyFetcher, error) {
    if options == nil || options.Drm == DrmNone {
       return nil, nil

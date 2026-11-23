@@ -14,13 +14,18 @@ import (
    "41.neocities.org/sofia"
 )
 
+// errInterrupted reports that a download failed after its output file was
+// finalized, so the resume state can be saved just like after a stop.
+var errInterrupted = errors.New("download interrupted")
+
 // errStopped reports that the download stopped on request; resume state has
 // been saved.
 var errStopped = errors.New("download stopped")
 
 // executeSegments downloads segments in order, returning how many were
-// written. A stop between segments finalizes the file and reports
-// errStopped, so the remaining segments are fetched on resume.
+// written. A stop between segments, or a failed fetch, finalizes the file; a
+// stop reports errStopped, a failed fetch errInterrupted, so either way the
+// remaining segments are fetched on resume.
 func executeSegments(segments []segment, remux *sofia.Remuxer, dst io.Writer, stop <-chan struct{}) (int, error) {
    t := tracker{total: len(segments), start: time.Now(), lastLog: time.Now()}
    for i, seg := range segments {
@@ -40,7 +45,7 @@ func executeSegments(segments []segment, remux *sofia.Remuxer, dst io.Writer, st
       // absolute, so a redirect on one of them changes nothing.
       data, _, err := fetchData(seg.url, seg.headers, false)
       if err != nil {
-         return i, err
+         return i, finalizeOnError(remux, err)
       }
       if remux != nil {
          if err := remux.AddSegment(data); err != nil {
@@ -90,7 +95,9 @@ func executeStream(seg segment, offset int64, remux *sofia.Remuxer, stop <-chan 
 
    processErr := remux.Process(progress)
    if processErr != nil && !errors.Is(processErr, sofia.ErrStopped) {
-      return processErr
+      // A dropped connection mid-stream is resumable by offset, the same
+      // way a stop is: finalize the file and report it as interrupted.
+      return finalizeOnError(remux, processErr)
    }
    if err := remux.Finish(); err != nil {
       return err
@@ -129,6 +136,21 @@ func fetchStream(target *url.URL, offset int64) (io.ReadCloser, int64, error) {
       return nil, 0, errors.New(resp.Status)
    }
    return resp.Body, resp.ContentLength, nil
+}
+
+// finalizeOnError finishes the output after a failed fetch, so the moov that
+// a resume reads back is in place, and marks the failure as resumable. If the
+// file cannot be finished there is nothing to resume from, so the original
+// error is returned unchanged.
+func finalizeOnError(remux *sofia.Remuxer, cause error) error {
+   if remux == nil {
+      return cause
+   }
+   if err := remux.Finish(); err != nil {
+      log.Printf("finish after error: %v", err)
+      return cause
+   }
+   return fmt.Errorf("%w: %w", errInterrupted, cause)
 }
 
 // setDecrypt installs the decryption callback on the remuxer.

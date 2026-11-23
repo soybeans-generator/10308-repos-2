@@ -13,11 +13,9 @@ import (
    "41.neocities.org/luna/hls"
 )
 
-// DashDownload downloads streamId from a DASH manifest.
+// DashDownload downloads streamId from a DASH manifest. A nil Options means
+// no DRM.
 func DashDownload(streamId string, m *Manifest, options *Options) error {
-   if options == nil {
-      options = &Options{}
-   }
    base, err := url.Parse(m.Url)
    if err != nil {
       return fmt.Errorf("invalid manifest URL %q: %w", m.Url, err)
@@ -33,11 +31,9 @@ func DashDownload(streamId string, m *Manifest, options *Options) error {
    return downloadDash(mpd, streamId, fetchKey)
 }
 
-// HlsDownload downloads streamId from an HLS master playlist.
+// HlsDownload downloads streamId from an HLS master playlist. A nil Options
+// means no DRM.
 func HlsDownload(streamId int, m *Manifest, options *Options) error {
-   if options == nil {
-      options = &Options{}
-   }
    base, err := url.Parse(m.Url)
    if err != nil {
       return fmt.Errorf("invalid manifest URL %q: %w", m.Url, err)

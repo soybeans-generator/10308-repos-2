@@ -5,6 +5,7 @@ import (
    "errors"
    "fmt"
    "io"
+   "slices"
    "strconv"
    "strings"
 )
@@ -28,7 +29,9 @@ func (b FlagBool) Default() string {
    return ""
 }
 
-func (FlagBool) Example() string { return "" }
+func (FlagBool) Example() string {
+   return ""
+}
 
 func (b *FlagBool) Parse(value string) error {
    if value == "" {
@@ -43,7 +46,9 @@ func (b *FlagBool) Parse(value string) error {
    return nil
 }
 
-func (FlagBool) Type() string { return "bool" }
+func (FlagBool) Type() string {
+   return "bool"
+}
 
 type FlagInt int
 
@@ -54,7 +59,9 @@ func (i FlagInt) Default() string {
    return ""
 }
 
-func (FlagInt) Example() string { return "789" }
+func (FlagInt) Example() string {
+   return "789"
+}
 
 func (i *FlagInt) Parse(value string) error {
    parsed, err := strconv.Atoi(value)
@@ -65,7 +72,9 @@ func (i *FlagInt) Parse(value string) error {
    return nil
 }
 
-func (FlagInt) Type() string { return "int" }
+func (FlagInt) Type() string {
+   return "int"
+}
 
 type FlagSet []*Flag
 
@@ -155,11 +164,8 @@ func (set FlagSet) Usage(w io.Writer, name string) error {
          // After a standalone example, print one line for each flag
          // that lists it in Needs.
          for _, dependent := range set {
-            for _, need := range dependent.Needs {
-               if need == flag.Name {
-                  fmt.Fprintf(&b, "     %s %s %s\n", name, abbreviate(flag), abbreviate(dependent))
-                  break
-               }
+            if slices.Contains(dependent.Needs, flag.Name) {
+               fmt.Fprintf(&b, "     %s %s %s\n", name, abbreviate(flag), abbreviate(dependent))
             }
          }
          continue
@@ -192,16 +198,22 @@ func (set FlagSet) lookup(name string) *Flag {
 
 type FlagString string
 
-func (s FlagString) Default() string { return string(s) }
+func (s FlagString) Default() string {
+   return string(s)
+}
 
-func (FlagString) Example() string { return "xyz" }
+func (FlagString) Example() string {
+   return "xyz"
+}
 
 func (s *FlagString) Parse(value string) error {
    *s = FlagString(value)
    return nil
 }
 
-func (FlagString) Type() string { return "string" }
+func (FlagString) Type() string {
+   return "string"
+}
 
 // FlagValue is the value a Flag holds.
 type FlagValue interface {

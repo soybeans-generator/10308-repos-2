@@ -3,7 +3,6 @@ package maya
 
 import (
    "encoding/binary"
-   "encoding/hex"
    "errors"
    "fmt"
    "io"
@@ -22,8 +21,9 @@ import (
 var StopKey = true
 
 // orchestrateDownload runs a download from opening the output file to
-// finishing or stopping it. A stop saves the resume state (fMP4 only), and
-// running the same command again picks it up.
+// finishing or stopping it. A stop, or a failure that finalized the output,
+// saves the resume state (fMP4 only), and running the same command again
+// picks it up.
 func orchestrateDownload(job *downloadJob) error {
    if job.single != nil && !job.info.IsFmp4 {
       return errors.New("single-URL downloads require fMP4")
@@ -113,41 +113,52 @@ func orchestrateDownload(job *downloadJob) error {
       segmentsDone, runErr = executeSegments(job.allRequests[state.Segments:], remux, file, stop)
    }
 
-   switch {
-   case errors.Is(runErr, errStopped):
-      if !job.info.IsFmp4 {
-         // Raw streams keep no resume state; the partial output must be
-         // deleted to start over.
-         log.Println("stop: raw streams are not resumable; delete the output to start over")
-         return nil
-      }
-      resume := &resumeState{Key: key}
-      if job.single != nil {
-         // Progress is relative to the first byte this session read.
-         offset, segments := remux.Progress()
-         resume.Segments = segments
-         resume.Offset = state.Offset + offset
-      } else {
-         resume.Segments = state.Segments + segmentsDone
-      }
-      if resume.Segments == 0 {
-         log.Println("stop: nothing downloaded yet; delete the output to start over")
-         return nil
-      }
-      if err := writeResume(outputName+".json", resume); err != nil {
-         return err
-      }
-      log.Println("stop: resume state saved; run again to resume")
-      return nil
-   case runErr != nil:
-      return runErr
-   default:
+   if runErr == nil {
       // Finished: drop the state left behind by an earlier stop.
       if err := os.Remove(outputName + ".json"); err != nil && !errors.Is(err, os.ErrNotExist) {
          return err
       }
       return nil
    }
+
+   stopped := errors.Is(runErr, errStopped)
+   if stopped && !job.info.IsFmp4 {
+      // Raw streams keep no resume state; the partial output must be
+      // deleted to start over.
+      log.Println("stop: raw streams are not resumable; delete the output to start over")
+      return nil
+   }
+   // A stop, and a failure that left a finalized file behind, both keep the
+   // progress made so far. Any other failure has nothing to resume.
+   if !job.info.IsFmp4 || !(stopped || errors.Is(runErr, errInterrupted)) {
+      return runErr
+   }
+
+   resume := &resumeState{Key: key}
+   if job.single != nil {
+      // Progress is relative to the first byte this session read.
+      offset, segments := remux.Progress()
+      resume.Segments = segments
+      resume.Offset = state.Offset + offset
+   } else {
+      resume.Segments = state.Segments + segmentsDone
+   }
+   if resume.Segments == 0 {
+      if stopped {
+         log.Println("stop: nothing downloaded yet; delete the output to start over")
+         return nil
+      }
+      return runErr
+   }
+   if err := writeResume(outputName+".json", resume); err != nil {
+      return err
+   }
+   if stopped {
+      log.Println("stop: resume state saved; run again to resume")
+      return nil
+   }
+   log.Printf("error: %v; resume state saved, run again to resume", runErr)
+   return runErr
 }
 
 // readStoppedMoov reads the moov that a stop appended after the media data
@@ -216,15 +227,6 @@ func extractProtection(moov *sofia.MoovBox) (*protectionInfo, error) {
       return nil, nil
    }
    protection := &protectionInfo{}
-
-   widevineId, err := hex.DecodeString(widevineSystemID)
-   if err != nil {
-      return nil, fmt.Errorf("decode widevine system ID: %w", err)
-   }
-   playReadyId, err := hex.DecodeString(playReadySystemID)
-   if err != nil {
-      return nil, fmt.Errorf("decode playready system ID: %w", err)
-   }
 
    if pssh, ok := moov.FindPssh(widevineId); ok {
       if data, err := widevine.DecodePsshData(pssh.Data); err == nil {
@@ -307,9 +309,8 @@ type downloadJob struct {
 
 // segment is one chunk to download.
 type segment struct {
-   url      *url.URL
-   headers  map[string]string
-   duration float64
+   url     *url.URL
+   headers map[string]string
 }
 
 // typeInfo holds the properties of a stream.

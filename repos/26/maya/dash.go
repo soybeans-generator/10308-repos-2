@@ -5,6 +5,7 @@ import (
    "cmp"
    "errors"
    "fmt"
+   "net/url"
    "slices"
 
    "41.neocities.org/luna/dash"
@@ -62,45 +63,42 @@ func downloadDash(mpd *dash.Mpd, streamId string, fetchKey keyFetcher) error {
 }
 
 // getDashInitSegment locates and fetches the initialization segment of a
-// DASH representation.
+// DASH representation. Each form names it differently but fetches it the
+// same way: one URL and an optional byte range.
 func getDashInitSegment(rep *dash.Representation, info *typeInfo) ([]byte, error) {
    if !info.IsFmp4 {
       return nil, nil
    }
 
-   if rep.SegmentBase != nil && rep.SegmentBase.Initialization != nil {
-      baseUrl, err := rep.ResolveBaseUrl()
-      if err != nil {
+   var target *url.URL
+   var rangeSpec string
+   template := rep.GetSegmentTemplate()
+   list := rep.SegmentList
+
+   switch {
+   case rep.SegmentBase != nil && rep.SegmentBase.Initialization != nil:
+      var err error
+      if target, err = rep.ResolveBaseUrl(); err != nil {
          return nil, err
       }
-      headers := map[string]string{"Range": "bytes=" + rep.SegmentBase.Initialization.Range}
-      data, _, err := fetchData(baseUrl, headers, true)
-      return data, err
-   }
-
-   if template := rep.GetSegmentTemplate(); template != nil && template.Initialization != "" {
-      initUrl, err := template.ResolveInitialization(rep)
-      if err != nil {
+      rangeSpec = rep.SegmentBase.Initialization.Range
+   case template != nil && template.Initialization != "":
+      var err error
+      if target, err = template.ResolveInitialization(rep); err != nil {
          return nil, fmt.Errorf("resolve DASH SegmentTemplate initialization URL: %w", err)
       }
-      data, _, err := fetchData(initUrl, nil, true)
-      return data, err
-   }
-
-   if list := rep.SegmentList; list != nil && list.Initialization != nil {
-      initUrl, err := list.Initialization.ResolveSourceUrl()
-      if err != nil {
+   case list != nil && list.Initialization != nil:
+      var err error
+      if target, err = list.Initialization.ResolveSourceUrl(); err != nil {
          return nil, fmt.Errorf("resolve DASH SegmentList initialization URL: %w", err)
       }
-      var headers map[string]string
-      if list.Initialization.Range != "" {
-         headers = map[string]string{"Range": "bytes=" + list.Initialization.Range}
-      }
-      data, _, err := fetchData(initUrl, headers, true)
-      return data, err
+      rangeSpec = list.Initialization.Range
+   default:
+      return nil, nil
    }
 
-   return nil, nil
+   data, _, err := fetchData(target, rangeHeader(rangeSpec), true)
+   return data, err
 }
 
 // listStreamsDash prints one representative per representation group,
@@ -118,6 +116,15 @@ func listStreamsDash(mpd *dash.Mpd) error {
    })
    printStreams(reps)
    return nil
+}
+
+// rangeHeader asks a server for one byte range, or returns nil for the whole
+// resource. An absent range must not become a "bytes=" header.
+func rangeHeader(spec string) map[string]string {
+   if spec == "" {
+      return nil
+   }
+   return map[string]string{"Range": "bytes=" + spec}
 }
 
 // detectDashType derives the file extension and container type from a
@@ -144,44 +151,22 @@ func generateSegments(rep *dash.Representation) ([]segment, error) {
          return nil, err
       }
       segments := make([]segment, len(urls))
-      timescale := float64(template.GetTimescale())
-
-      if timeline := template.SegmentTimeline; timeline != nil {
-         index := 0
-         for _, entry := range timeline.S {
-            repeat := max(1, entry.R+1)
-            duration := float64(entry.D) / timescale
-            for n := 0; n < repeat && index < len(segments); n++ {
-               segments[index] = segment{url: urls[index], duration: duration}
-               index++
-            }
-         }
-         return segments, nil
-      }
-
-      duration := float64(template.Duration) / timescale
-      for i := range segments {
-         segments[i] = segment{url: urls[i], duration: duration}
+      for i, mediaUrl := range urls {
+         segments[i] = segment{url: mediaUrl}
       }
       return segments, nil
    }
 
    if list := rep.SegmentList; list != nil {
       segments := make([]segment, 0, len(list.SegmentUrls))
-      duration := float64(list.Duration) / float64(list.GetTimescale())
       for _, entry := range list.SegmentUrls {
          mediaUrl, err := entry.ResolveMedia()
          if err != nil {
             return nil, err
          }
-         var headers map[string]string
-         if entry.MediaRange != "" {
-            headers = map[string]string{"Range": "bytes=" + entry.MediaRange}
-         }
          segments = append(segments, segment{
-            url:      mediaUrl,
-            headers:  headers,
-            duration: duration,
+            url:     mediaUrl,
+            headers: rangeHeader(entry.MediaRange),
          })
       }
       return segments, nil
@@ -191,13 +176,7 @@ func generateSegments(rep *dash.Representation) ([]segment, error) {
    if err != nil {
       return nil, err
    }
-   var duration float64
-   if rep.Parent != nil && rep.Parent.Parent != nil {
-      if periodDuration, err := rep.Parent.Parent.GetDuration(); err == nil {
-         duration = periodDuration.Seconds()
-      }
-   }
-   return []segment{{url: baseUrl, duration: duration}}, nil
+   return []segment{{url: baseUrl}}, nil
 }
 
 // getDashMediaRequests lists the media segments of a representation group.
