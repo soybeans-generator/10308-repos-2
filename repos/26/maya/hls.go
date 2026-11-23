@@ -2,10 +2,12 @@
 package maya
 
 import (
+   "cmp"
    "errors"
    "fmt"
    "net/url"
    "path"
+   "slices"
    "strconv"
 
    "41.neocities.org/luna/hls"
@@ -77,8 +79,13 @@ func hlsStreamUrl(playlist *hls.MasterPlaylist, streamId int) (*url.URL, error) 
    return nil, fmt.Errorf("stream with ID not found: %d", streamId)
 }
 
-// listStreamsHls prints the renditions, then the variants, in manifest order.
+// listStreamsHls prints the renditions, then the variants by bandwidth.
+// Renditions carry no BANDWIDTH attribute, so only the variants are sorted.
 func listStreamsHls(playlist *hls.MasterPlaylist) error {
+   slices.SortFunc(playlist.StreamInfs, func(a, b *hls.StreamInf) int {
+      return cmp.Compare(a.Bandwidth, b.Bandwidth)
+   })
+
    streams := make([]any, 0, len(playlist.Medias)+len(playlist.StreamInfs))
    for _, rendition := range playlist.Medias {
       streams = append(streams, rendition)

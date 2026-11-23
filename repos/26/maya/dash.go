@@ -104,7 +104,7 @@ func getDashInitSegment(rep *dash.Representation, info *typeInfo) ([]byte, error
 }
 
 // listStreamsDash prints one representative per representation group,
-// ordered by height then bandwidth.
+// ordered by mime type then bandwidth.
 func listStreamsDash(mpd *dash.Mpd) error {
    var reps []*dash.Representation
    for _, group := range mpd.GetRepresentations() {
@@ -112,7 +112,7 @@ func listStreamsDash(mpd *dash.Mpd) error {
    }
    slices.SortFunc(reps, func(a, b *dash.Representation) int {
       return cmp.Or(
-         cmp.Compare(a.GetHeight(), b.GetHeight()),
+         cmp.Compare(a.GetMimeType(), b.GetMimeType()),
          cmp.Compare(a.Bandwidth, b.Bandwidth),
       )
    })
@@ -123,15 +123,16 @@ func listStreamsDash(mpd *dash.Mpd) error {
 // detectDashType derives the file extension and container type from a
 // representation's metadata.
 func detectDashType(rep *dash.Representation) (*typeInfo, error) {
-   switch rep.GetMimeType() {
-   case "video/mp4":
+   mimeType := rep.GetMimeType()
+   switch {
+   case mimeType == "video/mp4":
       return &typeInfo{Extension: ".mp4", IsFmp4: true}, nil
-   case "audio/mp4":
+   case mimeType == "audio/mp4":
       return &typeInfo{Extension: ".m4a", IsFmp4: true}, nil
-   case "text/vtt":
-      return &typeInfo{Extension: ".vtt", IsFmp4: false}, nil
+   case mimeType == "text/vtt":
+      return &typeInfo{Extension: ".vtt"}, nil
    default:
-      return nil, fmt.Errorf("unsupported mime type for stream %s: %s", rep.Id, rep.GetMimeType())
+      return nil, fmt.Errorf("unsupported mime type for stream %s: %s", rep.Id, mimeType)
    }
 }
 
