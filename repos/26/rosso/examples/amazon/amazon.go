@@ -189,9 +189,15 @@ func (c *client) do_playback() error {
    if err != nil {
       return fmt.Errorf("failed to get VOD playback resources: %v", err)
    }
-   manifestUrl, err := resources.DashUrl()
+   manifestUrl, err := resources.PlaybackUrl()
    if err != nil {
       return err
+   }
+   for i, subtitle := range resources.SubtitleUrls() {
+      if i >= 1 {
+         fmt.Println()
+      }
+      fmt.Println(&subtitle)
    }
    manifest, err := maya.DashList(manifestUrl)
    if err != nil {
