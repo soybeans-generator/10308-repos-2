@@ -11,11 +11,10 @@
 //
 //   Proven by d*G == extracted.enc.pub. Nothing is written unless it holds.
 //
-// THIS FILE IS ONE STEP IN TWO HALVES. The search below walks the code graph outward from
-// the key consumer and tries every ordered pair; the apply path replays the recorded
-// pairing through the same two children. They are together because a pairing is only a
-// pairing when it can be applied: the search confirms every candidate match through
-// dpApply before returning it.
+// The search below walks the code graph outward from the key consumer and tries every ordered
+// pair; the apply path replays the recorded pairing through the same two children. They are
+// together because a pairing is only a pairing when it can be applied: the search confirms
+// every candidate match through dpApply before returning it.
 //
 // ONE CHILD PER CANDIDATE: these are arbitrary code blobs called with arbitrary inputs, and
 // some write outside the buffers they are handed. A child that tried forty combinations
@@ -23,26 +22,20 @@
 // descriptor census: no DLL read, no scan, just the image and the patch.
 //
 // THE SEARCH IS EXHAUSTIVE OVER WHAT CAN VARIATE. Both stages share one candidate set and
-// every ordered pair is tried. op=3 gets a 0x20-byte key and two 0x20-byte buffers, and
-// which buffer a routine writes is not stated anywhere, so every trial reports both and the
-// parent tries each. The winner is recorded - S1, S2, K1, O1, K2, O2 - and the apply path
-// replays it.
+// every ordered pair is tried. op=3 gets a 0x20-byte key and two 0x20-byte buffers, and which
+// buffer a routine writes is not stated anywhere, so every trial reports both and the parent
+// tries each. The winner is recorded - S1, S2, K1, O1, K2, O2 - and the apply path replays it.
 //
-// THE WALK MATCHES BOTH ADDRESSES: a lea/call target names either a descriptor's own
-// address (what op=3 is handed) or its descVA (what the kernel executes, so what a call
-// inside the image targets). Indexing only one of them misses the real stages whenever they
-// differ. The caps bound the walk; hitting one is reported as TRUNCATED, and a miss under a
-// TRUNCATED walk is not evidence of absence.
+// THE WALK MATCHES BOTH ADDRESSES: a lea/call target names either a descriptor's own address
+// or its descVA. Indexing only one of them misses the real stages whenever they differ. The
+// caps bound the walk; hitting one is reported as TRUNCATED, and a miss under a TRUNCATED walk
+// is not evidence of absence.
 //
-// STAGES 3 AND 4 ARE ONE PASS: mut is 32 bytes, so 64 nibbles. Nibble i selects one byte
-// from its own 16-byte row at the family's cluster, and that byte - a value in 0..15 -
-// indexes the 16-entry permutation. So `perm[img[cluster+i*16+nibble]]`, sixty-four times.
+// STAGES 3 AND 4 ARE ONE PASS: mut is 32 bytes, so 64 nibbles. Nibble i selects one byte from
+// its own 16-byte row at the family's cluster, and that byte indexes the 16-entry permutation.
 //
-// key[0x40] % 3 selects one of three routine families, each with its own bijection table
-// AND its own stage routines, so a search records only the family it was run for.
-//
-// USAGE  prkf -6 discovers, caches and applies. Its children are selected by childEnv and
-// take no arguments (see childMode in child.go); their bodies are in trials.go.
+// key[0x40] % 3 selects one of three routine families, each with its own bijection table AND
+// its own stage routines, so a search records only the family it was run for.
 package main
 
 import (
@@ -57,15 +50,15 @@ import (
    "time"
 )
 
-// dpPattern is the size-check signature: the consumer's own test, and the anchor both the
-// walk here and -3's census of the consumer are built on.
+// dpPattern is the size-check signature: the consumer's own test, and the anchor both the walk
+// here and -3's census of the consumer are built on.
 var dpPattern = []byte{0x83, 0x79, 0x14, 0x41} // cmp dword ptr [rcx+0x14], 0x41
 
 // ---------------------------------------------------------------- the apply
 
-// dpApply replays a pairing and returns the scalar its chain produces. Two children - p1
-// for stage 1, p2 for stage 2 - because those are the only trial modes there are. Stages 3
-// and 4 are pure table work, so they run here.
+// dpApply replays a pairing and returns the scalar its chain produces. Two children - p1 for
+// stage 1, p2 for stage 2 - because those are the only trial modes there are. Stages 3 and 4
+// are pure table work, so they run here.
 func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any)) ([]byte, error) {
    t := in.tab[fam]
    if t == nil {
@@ -78,8 +71,7 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
 
    // Every index in a recorded pairing comes out of dllprof.json. O1/O2 index a two-element
    // array, so an out-of-range value would panic; K1/K2 would only match no row and the
-   // failure would read as "produced no output". Both are checked against the only values a
-   // trial row can carry.
+   // failure would read as "produced no output".
    if !is01(st.K1) || !is01(st.O1) || !is01(st.K2) || !is01(st.O2) {
       return nil, fmt.Errorf("recorded pairing %+v has an index outside 0..1 - %s is corrupt",
          *st, profilePath)
@@ -98,9 +90,6 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
       }
       v, err := hex.DecodeString(r.Buf[st.O1])
       if err != nil {
-         // readRows already proved this field is hex, so this cannot fire today. It stays
-         // because a prefix decode here is a different 0x20 bytes and every verdict below
-         // it would read as "no match".
          return nil, fmt.Errorf("stage 1 (0x%06x): key half %d buffer %d: %w",
             st.S1, st.K1, st.O1, err)
       }
@@ -148,8 +137,8 @@ func dpApply(in *dpInputs, fam int, st *profileStages, say func(string, ...any))
 // 16-byte row at the family's cluster - a value in 0..15 - and that value indexes the
 // 16-entry permutation. The packed form is rebuilt at the end.
 //
-// An image byte above 0x0F means the cluster is not the table the profile says it is, which
-// is a wrong profile rather than a wrong scalar, so it fails instead of masking.
+// An image byte above 0x0F means the cluster is not the table the profile says it is, which is
+// a wrong profile rather than a wrong scalar, so it fails instead of masking.
 func dpChain(img []byte, t *famTab, mut []byte) ([]byte, bool) {
    if len(mut) < 0x20 {
       return nil, false
@@ -177,9 +166,9 @@ func dpChain(img []byte, t *famTab, mut []byte) ([]byte, bool) {
    return out[:], true
 }
 
-// dpCommit is the one place a derived scalar becomes a file. The check is repeated here
-// rather than trusted from the caller: this is the only write, so it is the only place a
-// wrong scalar could reach the disk.
+// dpCommit is the one place a derived scalar becomes a file. The check is repeated here rather
+// than trusted from the caller: this is the only write, so it is the only place a wrong scalar
+// could reach the disk.
 func dpCommit(plain, want []byte, say func(string, ...any)) error {
    if !pubMatches(plain, want) {
       return fmt.Errorf("scalar does not reproduce %s\n  got  %x\n  want %x",
@@ -257,8 +246,8 @@ func dpDerive() (code int) {
    return 0
 }
 
-// dpSample returns the sample's 0x41-byte key component and its P-256 public key, carving
-// them out of the BLA when -4 has not written them yet.
+// dpSample returns the sample's 0x41-byte key component and its P-256 public key, carving them
+// out of the BLA when -4 has not written them yet.
 func dpSample() (prv, pub []byte, err error) {
    if !isFile(encPrvPath) || !isFile(encPubPath) {
       fmt.Printf("carving the key components from %s\n\n", corePath)
@@ -284,24 +273,24 @@ func dpSample() (prv, pub []byte, err error) {
 }
 
 // is01 reports whether a recorded half/buffer index is one of the two values a trial row can
-// carry. Every such index is read from dllprof.json, so it is checked rather than trusted.
+// carry.
 func is01(v int) bool { return v == 0 || v == 1 }
 
 // isZeroHex reports whether a hex field is absent or all zero bytes. A stage that writes
-// nothing is not a stage: an all-zero buffer carries no information and would only add pairs
-// to the matrix.
+// nothing is not a stage: an all-zero buffer carries no information and would only add pairs to
+// the matrix.
 //
-// The 0x40-length test is what rejects an absent field, and it is not redundant with the
-// trim: a 64-character string of any other hex digits trims to itself.
+// The 0x40-length test is what rejects an absent field, and it is not redundant with the trim:
+// a 64-character string of any other hex digits trims to itself.
 func isZeroHex(s string) bool {
    return len(s) != 0x40 || strings.Trim(s, "0") == ""
 }
 
 // ---------------------------------------------------------------- the search
 
-// dpFindStages is the search. It returns one confirmed pairing and writes nothing: the
-// caller caches it. The public key to verify against arrives as an argument rather than
-// being read here, so the function has one input it cannot get wrong.
+// dpFindStages is the search. It returns one confirmed pairing and writes nothing: the caller
+// caches it. The public key to verify against arrives as an argument rather than being read
+// here, so the function has one input it cannot get wrong.
 func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) (*profileStages, error) {
    const (
       tol     = 0x20 // a lea/call target this close to a descriptor is that descriptor
@@ -310,8 +299,8 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
       maxBlk  = 4000
    )
 
-   // &h is safe from Go 1.22 on: the loop variable is per-iteration, so each pass has its
-   // own address and the return cannot alias a later iteration.
+   // &h is safe from Go 1.22 on: the loop variable is per-iteration, so the return cannot
+   // alias a later iteration.
    blockOf := func(rva int) (*imgDesc, bool) {
       for _, h := range in.heaps {
          if h.ln != 0 && int(h.rva) <= rva && rva < int(h.rva+h.ln) {
@@ -536,8 +525,8 @@ func dpFindStages(in *dpInputs, fam int, want []byte, say func(string, ...any)) 
          continue
       }
 
-      // Confirm through the exact path -6 will use: a child can produce a match a single
-      // call cannot reproduce, and a pairing that cannot be applied is not a pairing.
+      // Confirm through the exact path -6 will use: a child can produce a match a single call
+      // cannot reproduce, and a pairing that cannot be applied is not a pairing.
       say("  0x%06x candidate match, confirming", d2)
       plain, err := dpApply(in, fam, st, say)
       if err != nil || !pubMatches(plain, want) {
@@ -573,12 +562,9 @@ type dpBatch struct {
    err error
 }
 
-// dpParse keeps only the rows a verdict can be read from. An err row is not a verdict: it
-// means the child never got to try the candidate, which is a spawn or setup fault and not a
-// property of the code under test, so it aborts the batch instead of skipping one entry.
-//
-// A fault row needs no handling of its own: it carries no result, and a child that faulted
-// printed nothing after it, so an empty res already says the candidate died.
+// dpParse keeps only the rows a verdict can be read from. An err row means the child never got
+// to try the candidate, which is a spawn or setup fault and not a property of the code under
+// test, so it aborts the batch instead of skipping one entry.
 func dpParse(p *procOut) *dpBatch {
    b := &dpBatch{}
    if p.err != nil {
@@ -607,8 +593,8 @@ func dpParse(p *procOut) *dpBatch {
    return b
 }
 
-// dpRunP1 spawns one stage-1 probe child and parses its rows. Phase 1 is phase 2 with a
-// single empty OBF, which selects the phase-1 argument shape (see dpWorker).
+// dpRunP1 spawns one stage-1 probe child and parses its rows. Phase 1 is phase 2 with a single
+// empty OBF, which selects the phase-1 argument shape.
 func dpRunP1(descs []uint32) *dpBatch {
    return dpParse(runCollect(&childSpec{
       Mode:  "p1",
@@ -632,8 +618,7 @@ func dpRunP2(start int, obfs []dpObf, descs []uint32) *dpBatch {
 }
 
 // dpInputs is the profile plus the family tables -6 needs. The image, census, patch plan and
-// parsed profile all come from pfImage, which is the same load a trial child does; prof is
-// promoted from it rather than held a second time.
+// parsed profile all come from pfImage, which is the same load a trial child does.
 type dpInputs struct {
    *pfImage
    fams []int
@@ -641,8 +626,7 @@ type dpInputs struct {
 }
 
 // dpLoadInputs validates the profile pfPrep already parsed and builds the per-family tables.
-// It does NOT read dllprof.json a second time, and does NOT call scanDescs: the census in the
-// profile is that scan's result.
+// It does NOT read dllprof.json a second time, and does NOT call scanDescs.
 func dpLoadInputs() (*dpInputs, error) {
    pi, err := pfPrep()
    if err != nil {
@@ -659,8 +643,7 @@ func dpLoadInputs() (*dpInputs, error) {
    for k, pm := range pi.prof.Map {
       v, err := strconv.Atoi(k)
       if err != nil {
-         return nil, fmt.Errorf("%s: map key %q is not a family index: %w",
-            profilePath, k, err)
+         return nil, fmt.Errorf("%s: map key %q is not a family index: %w", profilePath, k, err)
       }
       in.tab[v] = &famTab{cluster: pm.Cluster, perm: pm.Map}
       in.fams = append(in.fams, v)
@@ -678,9 +661,9 @@ type dpObf struct {
    v  string
 }
 
-// famTab is one family's stage 3/4 tables, taken from the profile's map section. The cluster
-// and the permutation travel together because stage 4 needs both and a profile can only be
-// valid when both came from the same family.
+// famTab is one family's stage 3/4 tables. The cluster and the permutation travel together
+// because stage 4 needs both and a profile can only be valid when both came from the same
+// family.
 type famTab struct {
    cluster uint32
    perm    [16]int // mapped nibble -> real nibble

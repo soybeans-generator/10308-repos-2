@@ -2,15 +2,14 @@
 //go:build windows
 
 // The child bodies that drive the DLL, and the parsers on the parent side of each. The
-// process plumbing they share - the spec, the spawn, the grammar - is child.go.
+// plumbing they share - the spec, the spawn, the grammar - is child.go.
 //
-//   dmWorker  -3's sweep: one image patch, then every family
-//   dpWorker  -6's trial, both phases
+//   dmWorker    -3's sweep: one image patch, then every family
+//   dpWorker    -6's trial, both phases
 //   probeBatch  the parent side of -1's probe child, which lives in signing.go
 //
-// WHY A CHILD IS A SEPARATE PROCESS: a fault in a descriptor's code is a Windows SEH
-// exception raised inside the DLL, not a Go panic. recover() never runs and the whole
-// process dies, so one child per candidate confines a fault to that candidate.
+// A worker returns no verdict. Every one reports by row and closes with k=end; a fault, a
+// kill or a death inside native code is the absence of that row.
 package main
 
 import (
@@ -34,8 +33,8 @@ var (
 )
 
 // dmCall runs the consumer on one blob with the given 0x41-byte key and returns
-// (ntstatus, status dword, 0x20-byte output). It is NOT op3Call: this consumer's routine
-// takes a blob, so its argument block is a different shape.
+// (ntstatus, status dword, 0x20-byte output). It is NOT op3Call: this routine takes a blob,
+// so the argument block is a different shape.
 //
 //   +0x00  op = 3
 //   +0x08  descriptor address
@@ -46,8 +45,7 @@ var (
 //   +0x28  -> blob
 //   +0x30  -> output
 //
-// The status dword and the output are locals, so the slices handed back are owned by the
-// caller and the next call cannot overwrite them.
+// The status dword and the output are locals, so the returned slices are owned by the caller.
 func dmCall(base uintptr, desc uint32, prv, blob []byte) (uint32, []byte, []byte) {
    var st [4]byte
    var out [0x20]byte
@@ -67,18 +65,14 @@ func dmCall(base uintptr, desc uint32, prv, blob []byte) (uint32, []byte, []byte
    return uint32(r), st[:], out[:]
 }
 
-// dmLoadFail emits the loadfail row the parent parses and yields exit code 4.
-func dmLoadFail(f string, a ...any) int {
+// dmLoadFail emits the loadfail row the parent parses; the caller then unwinds.
+func dmLoadFail(f string, a ...any) {
    emit(childRow{Kind: "loadfail", Msg: fmt.Sprintf(f, a...)})
-   return 4
 }
 
-// dmPrv is a synthetic 0x41-byte key component: the first 0x40 bytes a fixed
-// non-repeating pattern, byte 0x40 the family selector.
-//
-// Only -3 uses it. -6 drives the real key, because the stage routines reject material
-// that is not real; forcing the table here collapses whatever this key derives, so its
-// bytes cannot matter.
+// dmPrv is a synthetic 0x41-byte key component: the first 0x40 bytes a fixed non-repeating
+// pattern, byte 0x40 the family selector. Only -3 uses it, because forcing the table
+// collapses whatever this key derives.
 func dmPrv(family int) []byte {
    var p [0x41]byte
    for i := 0; i < 0x40; i++ {
@@ -88,9 +82,8 @@ func dmPrv(family int) []byte {
    return p[:]
 }
 
-// dmWorker is the sweep child. One image patch, then every family: find the live set
-// with one licence, sweep it with fifteen.
-func dmWorker(desc uint32, fams []int, sets []uint32) int {
+// dmWorker is the sweep child: one image patch, then every family.
+func dmWorker(desc uint32, fams []int, sets []uint32) {
    defer emit(childRow{Kind: "end"})
 
    // Every blob is read before the image is touched, so a missing licence fails in
@@ -99,18 +92,21 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
    for nn := 1; nn <= 15; nn++ {
       b, err := os.ReadFile(filepath.Join(oracleDir, fmt.Sprintf("lic_%02x.blob", nn)))
       if err != nil {
-         return dmLoadFail("licence %02x: %v", nn, err)
+         dmLoadFail("licence %02x: %v", nn, err)
+         return
       }
       blobs[nn] = b
    }
 
    pi, err := pfPrep()
    if err != nil {
-      return dmLoadFail("%v", err)
+      dmLoadFail("%v", err)
+      return
    }
    base, err := loadWarbird()
    if err != nil {
-      return dmLoadFail("%v", err)
+      dmLoadFail("%v", err)
+      return
    }
 
    patched, skipped := pi.apply(base)
@@ -119,7 +115,8 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
    // A false return means the child runs unprotected: a fault then kills it with no fault
    // row, and the driver reads that as missing rows.
    if !wbVEH(base) {
-      return dmLoadFail("AddVectoredExceptionHandler returned NULL")
+      dmLoadFail("AddVectoredExceptionHandler returned NULL")
+      return
    }
 
    // A failed patch does not merely skip work: the forced nibble is not forced, so every
@@ -135,12 +132,9 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
       prv := dmPrv(f)
 
       // ---- phase 1: which set does this family read? ----------------------
-      // One licence is enough: forcing 16 different nibbles through a table the routine
-      // actually reads gives 16 different scalars, hence 16 different outputs. A set it
-      // never reads gives the same output 16 times.
-      //
-      // Each force overwrites all of dmCLEN, so a set is restored once and not once per
-      // forced nibble: only the last force needs undoing.
+      // Forcing 16 different nibbles through a table the routine reads gives 16 different
+      // outputs; a set it never reads gives the same output 16 times. Each force
+      // overwrites all of dmCLEN, so only the last one needs undoing.
       liveIdx, nLive := -1, 0
       for i, srva := range sets {
          orig := diReadMem(base+uintptr(srva), dmCLEN)
@@ -148,7 +142,8 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
          ok := true
          for mm := 0; mm < 16; mm++ {
             if err := force(srva, byte(mm)); err != nil {
-               return dmLoadFail("%v", err)
+               dmLoadFail("%v", err)
+               return
             }
             rc, sd, res := dmCall(base, desc, prv, blobs[1])
             if rc != 0 || !statusOK(sd) {
@@ -158,7 +153,8 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
             seen[hex.EncodeToString(res)] = true
          }
          if !wbPatch(base, srva, orig) {
-            return dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
+            dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
+            return
          }
          d := len(seen)
          if !ok {
@@ -186,27 +182,27 @@ func dmWorker(desc uint32, fams []int, sets []uint32) int {
       orig := diReadMem(base+uintptr(srva), dmCLEN)
       for mm := 0; mm < 16; mm++ {
          if err := force(srva, byte(mm)); err != nil {
-            return dmLoadFail("%v", err)
+            dmLoadFail("%v", err)
+            return
          }
          for nn := 1; nn <= 15; nn++ {
-            rc, sd, res := dmCall(base, desc, prv, blobs[nn])
+            _, sd, res := dmCall(base, desc, prv, blobs[nn])
             emit(childRow{Kind: "out", Fam: f, Idx: nn, Half: mm,
-               RC:  rc,
                St:  []string{hex.EncodeToString(sd)},
                Buf: []string{hex.EncodeToString(res)}})
          }
          if !wbPatch(base, srva, orig) {
-            return dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
+            dmLoadFail("restore set 0x%x: VirtualProtect failed", srva)
+            return
          }
       }
    }
-   return 0
 }
 
 // ------------------------------------------------------- the -6 trial child
 
-// dpHalf returns one 0x20-byte half of the key component. Byte 0x40 is the family
-// selector and is never handed to a stage.
+// dpHalf returns one 0x20-byte half of the key component. Byte 0x40 is never handed to a
+// stage.
 func dpHalf(prv []byte, h int) []byte {
    if h == 1 {
       return prv[0x20:0x40]
@@ -214,9 +210,8 @@ func dpHalf(prv []byte, h int) []byte {
    return prv[0:0x20]
 }
 
-// dpPrv reads the sample's 0x41-byte key component. Every trial drives it: the stage
-// routines reject key material that is not real, which is why a synthetic key made the
-// search unfindable.
+// dpPrv reads the sample's 0x41-byte key component. The stage routines reject material that
+// is not real, which is why a synthetic key made the search unfindable.
 func dpPrv() ([]byte, error) {
    prv, err := os.ReadFile(encPrvPath)
    if err != nil {
@@ -228,8 +223,8 @@ func dpPrv() ([]byte, error) {
    return prv, nil
 }
 
-// dpTrial runs one op=3 trial. k1 goes in the key buffer, k2 in the output buffer; ln
-// and size2 are the only things that differ between the phases.
+// dpTrial runs one op=3 trial. k1 goes in the key buffer, k2 in the output buffer; ln and
+// size2 are the only things that differ between the phases.
 func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, out []byte, rc uint32, st []byte) {
    var sb [0x40]byte
    var b1 [0x40]byte
@@ -241,26 +236,24 @@ func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, ou
    return b1[:0x20], b2[:0x20], rc, sb[:4]
 }
 
-// dpWorker is the trial body for both phases, because they differ in three constants and
-// nothing else: phase 1 is 0x2C bytes with no second size, key half in the key buffer and
-// a zeroed output; phase 2 is 0x30 with a 0x20 there, OBF in the key buffer and the key
-// half in the output buffer. Phase 1 is therefore phase 2 with a single empty OBF.
+// dpWorker is the trial body for both phases: phase 1 is 0x2C bytes with no second size, key
+// half in the key buffer and a zeroed output; phase 2 is 0x30 with a 0x20 there, OBF in the
+// key buffer and the key half in the output buffer. Phase 1 is phase 2 with one empty OBF.
 //
-// The index is still flattened as (di*len(obfs)+oi)*2+h, because that is one resume point,
-// but each row names its own descriptor, OBF and half: the parent never re-derives them.
-func dpWorker(mode string, start int, obfs []string, descs []uint32) (code int) {
+// The index is flattened as (di*len(obfs)+oi)*2+h because that is one resume point, but each
+// row names its own descriptor, OBF and half: the parent never re-derives them.
+func dpWorker(mode string, start int, obfs []string, descs []uint32) {
    defer func() {
       if r := recover(); r != nil {
          emit(childRow{Kind: "err", Msg: fmt.Sprint(r)})
-         code = 5
       }
       emit(childRow{Kind: "end"})
    }()
 
-   op3, prv, code, err := dpPrepChild()
+   op3, prv, err := dpPrepChild()
    if err != nil {
       emit(childRow{Kind: "err", Msg: err.Error()})
-      return code
+      return
    }
 
    sz := uint32(0x20)
@@ -277,30 +270,28 @@ func dpWorker(mode string, start int, obfs []string, descs []uint32) (code int) 
          var derr error
          if k1, derr = hex.DecodeString(obfs[oi]); derr != nil || len(k1) != 0x20 {
             emit(childRow{Kind: "err", Msg: fmt.Sprintf("bad obf %q", obfs[oi])})
-            return 5
+            return
          }
          k2 = dpHalf(prv, h)
       }
       kb, out, rc, st := dpTrial(op3, descs[di], ln, k1, k2, szp)
       if rc != 0 || !statusOK(st) {
          emit(childRow{Kind: "reject", Desc: descs[di], Idx: oi, Half: h,
-            RC: rc, St: []string{hex.EncodeToString(st)}})
+            St: []string{hex.EncodeToString(st)}})
          continue
       }
       emit(childRow{Kind: "ok", Desc: descs[di], Idx: oi, Half: h,
          Buf: []string{hex.EncodeToString(kb), hex.EncodeToString(out)}})
    }
-   return 0
 }
 
 // ------------------------------------------------------------ -1's parent side
 
-// probeBatch re-executes this binary as a probe child for a list of descriptors and
-// returns the verdict row each one produced, keyed by descriptor VA. A descriptor with no
-// row faulted or was never reached, and the caller recovers it.
+// probeBatch runs one probe child for a list of descriptors and returns the verdict row each
+// produced, keyed by descriptor VA. A descriptor with no row faulted or was never reached.
 //
 // No deadline, and stderr is streamed into w: a hung chunk never exits, so its last trace
-// line is the only evidence of where it stopped, and a timeout would hide that.
+// line is the only evidence of where it stopped.
 func probeBatch(descs []imgDesc, w func(string)) map[uint32]childRow {
    out := map[uint32]childRow{}
    if len(descs) == 0 {
@@ -317,8 +308,8 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]childRow {
       w("  spawn: " + p.err.Error())
       return out
    }
-   if p.rc != 0 {
-      w(fmt.Sprintf("  exit: %d", p.rc))
+   if !p.ended {
+      w("  child did not finish - no end row")
    }
    rows, err := readRows(p.stdout)
    if err != nil {
@@ -329,52 +320,53 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]childRow {
       switch r.Kind {
       case "accept", "reject", "none":
          out[r.Desc] = r
-      case "fault":
+      case "fault", "err":
          w("  " + r.Msg)
       }
    }
    return out
 }
 
-// dpPrepChild loads what a trial needs and patches the image. It is the one place a child
-// pays its fixed cost, so both phases call it and nothing else does.
-func dpPrepChild() (op3 op3Func, prv []byte, code int, err error) {
+// dpPrepChild loads what a trial needs and patches the image: the one place a child pays its
+// fixed cost.
+func dpPrepChild() (op3 op3Func, prv []byte, err error) {
    pi, err := pfPrep()
    if err != nil {
-      return nil, nil, 5, err
+      return nil, nil, err
    }
    if prv, err = dpPrv(); err != nil {
-      return nil, nil, 5, err
+      return nil, nil, err
    }
    base, err := loadWarbird()
    if err != nil {
-      return nil, nil, 4, err
+      return nil, nil, err
    }
    pi.apply(base)
 
    if !wbVEH(base) {
-      return nil, nil, 6, fmt.Errorf("AddVectoredExceptionHandler returned NULL")
+      return nil, nil, fmt.Errorf("AddVectoredExceptionHandler returned NULL")
    }
-   return op3Call(base), prv, 0, nil
+   return op3Call(base), prv, nil
 }
 
 // ------------------------------------------------------------ -3's parent side
 
-// dmFam is one family's rows from a sweep child. nLive is 1 when exactly one set answered
-// 16 distinct outputs; liveRVA is that set.
+// dmFam is one family's rows from a sweep child. nLive is 1 when exactly one set answered 16
+// distinct outputs; liveRVA is that set.
 type dmFam struct {
    nLive   int
    liveRVA uint32
    outs    map[int]map[int]string // licence -> forced nibble -> hex
 }
 
-// dmResult is one sweep child, parsed.
+// dmResult is one sweep child, parsed. ended is whether it printed its end row: a run without
+// one is incomplete, and an incomplete run is not a verdict.
 type dmResult struct {
    fams  map[int]*dmFam
    meta  []string
    fault string
    err   error
-   rc    int
+   ended bool
 }
 
 // dmSweep spawns one sweep child for the given families and parses its rows.
@@ -386,7 +378,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) *dmResult {
       Sets:  sets,
    }, 30*time.Minute, nil)
 
-   r := &dmResult{fams: map[int]*dmFam{}, rc: p.rc}
+   r := &dmResult{fams: map[int]*dmFam{}, ended: p.ended}
    if p.err != nil {
       r.err = p.err
       return r
@@ -407,8 +399,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) *dmResult {
    for _, x := range rows {
       switch x.Kind {
       case "meta":
-         // PATCHED and PROBE are the per-set evidence behind the live-set verdict, so
-         // they belong in the log.
+         // PATCHED and PROBE are the per-set evidence behind the live-set verdict.
          r.meta = append(r.meta, x.Msg)
 
       case "loadfail", "err":
@@ -425,8 +416,8 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) *dmResult {
          fm.nLive, fm.liveRVA = x.Idx, 0
 
       case "out":
-         // A value that is not a 0x20-byte hex string would silently match nothing, and
-         // dmPerm would report it as an incomplete sweep rather than a bad row.
+         // A value that is not 0x20 hex bytes would silently match nothing, and dmPerm
+         // would report it as an incomplete sweep rather than a bad row.
          if len(x.Buf) != 1 || !isHex32(x.Buf[0]) {
             r.err = fmt.Errorf("out row: buffer %q is not 0x20 hex bytes", x.Buf)
             return r
@@ -441,15 +432,16 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) *dmResult {
    return r
 }
 
-// dmSweepAll is dmSweep plus the fault fallback: one child covers all families, so a
-// fault costs every family at once. Re-running one family at a time salvages the ones
-// that did not fault, and costs nothing when the batch succeeds.
+// dmSweepAll is dmSweep plus the fault fallback: one child covers all families, so a fault
+// costs every family at once. Re-running one family at a time salvages the rest, and costs
+// nothing when the batch succeeds. A child with no end row takes the same path: it was killed
+// on the deadline or died in native code, so the families it did not finish are missing.
 func dmSweepAll(descRVA uint32, fams []int, sets []uint32, logf func(string, ...any)) *dmResult {
    r := dmSweep(descRVA, fams, sets)
    if r.err != nil || len(fams) <= 1 {
       return r
    }
-   if r.fault == "" && r.rc == 0 {
+   if r.fault == "" && r.ended {
       return r
    }
 
