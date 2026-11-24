@@ -308,13 +308,13 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]childRow {
       w("  spawn: " + p.err.Error())
       return out
    }
-   if !p.ended {
-      w("  child did not finish - no end row")
-   }
    rows, err := readRows(p.stdout)
    if err != nil {
       w("  " + err.Error())
       return out
+   }
+   if !ended(rows) {
+      w("  child did not finish - no end row")
    }
    for _, r := range rows {
       switch r.Kind {
@@ -378,7 +378,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) *dmResult {
       Sets:  sets,
    }, 30*time.Minute, nil)
 
-   r := &dmResult{fams: map[int]*dmFam{}, ended: p.ended}
+   r := &dmResult{fams: map[int]*dmFam{}}
    if p.err != nil {
       r.err = p.err
       return r
@@ -388,6 +388,7 @@ func dmSweep(descRVA uint32, fams []int, sets []uint32) *dmResult {
       r.err = err
       return r
    }
+   r.ended = ended(rows)
 
    fam := func(i int) *dmFam {
       if r.fams[i] == nil {
