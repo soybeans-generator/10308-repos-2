@@ -75,6 +75,7 @@ https://justwatch.com/us/movie/woman-unknown
 - https://justwatch.com/us/movie/if-i-had-legs-id-kick-you
 - https://justwatch.com/us/movie/it-was-just-an-accident
 - https://justwatch.com/us/movie/jurassic-world-4
+- https://justwatch.com/us/movie/magellan-2025
 - https://justwatch.com/us/movie/marty-supreme
 - https://justwatch.com/us/movie/miroirs-no-3
 - https://justwatch.com/us/movie/mission-impossible-8
