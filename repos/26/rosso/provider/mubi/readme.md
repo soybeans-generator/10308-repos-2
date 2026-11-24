@@ -24,7 +24,7 @@ adb shell am start -a android.intent.action.VIEW `
     * mailsac.com: sorry this isn't a valid email
 4. sign up
 5. we've sent a code. please enter it below to continue.
-6. mubi
+6. mubi classic
    - start with 7 days free
 7. card number
 8. expiration date
