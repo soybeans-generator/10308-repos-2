@@ -5,36 +5,26 @@
 // with it. One file, because -1 writes prsubs.json and -5 reads it, both call the same ABI
 // in kernel.go, and both name the same DLL.
 //
-// -1 scans the DLL for Warbird heap-exec descriptors, then re-executes this binary once per
-// CHUNK of candidates and reads the row each descriptor produced. Discovery rests
-// entirely on properties of the routine itself, read from its disassembly - no sample key
-// files:
+// -1 re-executes this binary once per CHUNK of candidates and reads the row each descriptor
+// produced. Discovery rests entirely on properties of the routine itself:
 //
 //  1. accepts exactly 0x20 bytes and succeeds (cmp dword ptr [rcx+10h], 20h)
 //  2. writes its output buffer; 3. different input -> different output
 //  4. REJECTS a size other than 0x20
 //
-// Property 4 is the discriminating one - it collapses the large set of descriptors that
-// merely return success. Verification against a real key is -5's job. Zero accepted
-// descriptors, or more than one, is an error to investigate.
+// Property 4 is the discriminating one - it collapses the descriptors that merely return
+// success. Verification against a real key is -5's job. Zero accepted descriptors, or more
+// than one, is an error to investigate.
 //
-// THE PROBE CHILD LIVES HERE because it drives this file's routine and nothing else:
-// runProbes, runOne, probe and trace. It emits childRow rows like every other child, so
-// the parent reads them with the one parser in child.go.
-//
-// Descriptors are probed in chunks of 64, sequentially: a child pays LoadLibrary before its
-// first call, so one child per descriptor spent 981 module loads on 981 probes. A chunk
-// that dies takes its remaining descriptors with it; a child prints its rows in order, so
-// the first descriptor with no row is the one that faulted, and the rest are retried as a
-// run. Every child streams its stderr into the log as it arrives, so a hung chunk leaves
+// Chunks of 64, sequentially: a child pays LoadLibrary before its first call, so one child
+// per descriptor spent 981 module loads on 981 probes. A chunk that dies takes its remaining
+// descriptors with it; the first descriptor with no row is the one that faulted, and the rest
+// are retried as a run. stderr is streamed into the log as it arrives, so a hung chunk leaves
 // its last trace line as the final record - there is no deadline, because a timeout would
 // make a hang invisible.
 //
-// Only ONE value differs between DLL builds: the RVA of the heap descriptor holding the
-// signing-key routine, from prsubsPath keyed by the DLL sha256. This step refuses to run if
-// the cache does not match. Everything else cannot drift: op=3 and the WarbirdCallArgs
-// layout are kernel ABI; the routine's argument struct is packed and its layout fixed by
-// source; size == 0x20 it tests itself.
+// Only ONE value differs between DLL builds: the descriptor RVA in prsubsPath, keyed by the
+// DLL sha256, and -5 refuses a cache that does not match.
 package main
 
 import (
@@ -113,8 +103,8 @@ func cmdFindSub() error {
 
    // Writes go straight to the file, not through stepLog: this log is the only evidence a
    // stalled scan leaves behind, so a line must be on disk before the next statement runs.
-   // *os.File writes are unbuffered, which is exactly that guarantee. logErr keeps the
-   // first write failure, because a log that stops mid-scan is worse than one that says so.
+   // *os.File writes are unbuffered, which is exactly that guarantee. logErr keeps the first
+   // write failure, because a log that stops mid-scan is worse than one that says so.
    var logErr error
    w := func(s string) {
       if logErr != nil {
@@ -126,8 +116,8 @@ func cmdFindSub() error {
    }
    wf := func(f string, a ...any) { w(fmt.Sprintf(f, a...)) }
 
-   // One defer, so the elapsed line - which is exactly what the error returns below are
-   // worth knowing for - cannot run before the close is checked or after it is skipped.
+   // One defer, so the elapsed line cannot run before the close is checked or after it is
+   // skipped.
    defer func() {
       w("elapsed " + time.Since(start).Round(time.Millisecond).String())
       switch cerr := logf.Close(); {
@@ -155,8 +145,8 @@ func cmdFindSub() error {
    }
    w("self   " + selfPath)
 
-   // One row per descriptor, keyed by descriptor VA. A descriptor with no row either
-   // faulted its chunk or was never reached; the passes below recover both.
+   // One row per descriptor, keyed by descriptor VA. A descriptor with no row either faulted
+   // its chunk or was never reached; the passes below recover both.
    results := make([]childRow, len(descs))
    chunks := (len(descs) + probeChunk - 1) / probeChunk
    wf("probing %d descriptors in %d chunks of %d", len(descs), chunks, probeChunk)
@@ -187,9 +177,9 @@ func cmdFindSub() error {
    }
 
    // A dead run is retried as a run: the faulting descriptor is recorded and skipped, and
-   // everything behind it goes into the next pass. Recording a none row for the faulting
-   // descriptor is what guarantees the next pass is strictly smaller - a routine that dies
-   // on its first call is not the signing-key routine, so this is its verdict, not a gap.
+   // everything behind it goes into the next pass. Recording a none row for it is what
+   // guarantees the next pass is strictly smaller - a routine that dies on its first call is
+   // not the signing-key routine, so this is its verdict, not a gap.
    for pass := 0; ; pass++ {
       var missing []int
       for i, r := range results {
@@ -277,9 +267,8 @@ func cmdFindSub() error {
 
 // ---- the kernel call -----------------------------------------------------
 
-// decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key, reading the
-// *.sig.prv component from prvPath and returning the 32-byte plaintext. Nothing is written;
-// cmdDecrypt writes after validating.
+// decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key and returns the
+// 32-byte plaintext. Nothing is written; cmdDecrypt writes after validating.
 func decryptSigningKey(prvPath string) ([]byte, error) {
    rec, err := loadPrsubs()
    if err != nil {
@@ -301,8 +290,8 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
       return nil, fmt.Errorf("%s: expected %d bytes, got %d", prvPath, keyLen, len(enc))
    }
 
-   // A random fill proves the routine actually wrote to the output buffer; a fixed sentinel
-   // could collide with real key material.
+   // A random fill proves the routine wrote to the output buffer; a fixed sentinel could
+   // collide with real key material.
    var fill [keyLen]byte
    if _, err := rand.Read(fill[:]); err != nil {
       return nil, err
@@ -320,20 +309,16 @@ func decryptSigningKey(prvPath string) ([]byte, error) {
       }
       return nil, errors.New(msg)
    }
-
    if !statusOK(status[:]) {
       return nil, fmt.Errorf("routine returned %s - the argument layout no "+
-         "longer matches this build; re-run prkf -1",
-         hex.EncodeToString(status[:4]))
+         "longer matches this build; re-run prkf -1", hex.EncodeToString(status[:4]))
    }
-
    if bytes.Equal(out, fill[:]) {
       return nil, errors.New("output buffer untouched - out_off is wrong")
    }
    if bytes.Equal(out, enc) {
       return nil, errors.New("output equals input - desc_va is the wrong routine")
    }
-
    return out, nil
 }
 
@@ -342,13 +327,9 @@ func isFile(p string) bool {
    return err == nil && fi.Mode().IsRegular()
 }
 
-// pubBytes normalizes a stored public key to the 65-byte SEC 1 form. The key files carry
-// X||Y with no prefix, so that is the only difference to absorb. nil means the point is off
-// the curve or at infinity, which NewPublicKey rejects.
-//
-// slices.Concat allocates a new array unconditionally, so raw is only ever read. That
-// matters because cmdDecrypt calls this twice on one buffer: an in-place prepend would
-// shift raw's own bytes and the second call would decode a different point.
+// pubBytes normalizes a stored public key to the 65-byte SEC 1 form. nil means the point is
+// off the curve or at infinity. slices.Concat allocates unconditionally, so raw is only ever
+// read - cmdDecrypt calls this twice on one buffer.
 func pubBytes(raw []byte) []byte {
    if len(raw) == 64 {
       raw = slices.Concat([]byte{4}, raw)
@@ -360,8 +341,7 @@ func pubBytes(raw []byte) []byte {
    return k.Bytes()
 }
 
-// pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar. The range
-// check is NewPrivateKey's.
+// pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar.
 func pubFor(d []byte) []byte {
    priv, err := ecdh.P256().NewPrivateKey(d)
    if err != nil {
@@ -377,11 +357,8 @@ func pubMatches(d, raw []byte) bool {
    return got != nil && want != nil && bytes.Equal(got, want)
 }
 
-// runOne probes one descriptor and emits its verdict row. A probe that cannot be set up
-// still emits a row, because the parent would otherwise retry this descriptor forever.
-//
-// The verdict row carries everything the log needs: both outputs, all three status dwords
-// and all three NTSTATUS values, so a reject can be read without re-running the probe.
+// runOne probes one descriptor and emits its verdict row. A probe that cannot be set up still
+// emits a row, because the parent would otherwise retry this descriptor forever.
 func runOne(op3 op3Func, descVA uint32) {
    trace("probe %#x begin", descVA)
 
@@ -412,8 +389,8 @@ func runOne(op3 op3Func, descVA uint32) {
    }
    a, b, c := p[0], p[1], p[2]
 
-   // Rejection is judged on NTSTATUS and the status dword alone - the output buffer is not
-   // consulted, because a routine that refused the size wrote nothing to judge.
+   // Rejection is judged on NTSTATUS and the status dword alone - a routine that refused the
+   // size wrote nothing to judge.
    okReject := !(c.ntstatus == 0 && statusOK(c.status))
 
    kind := "reject"
@@ -437,9 +414,8 @@ func runOne(op3 op3Func, descVA uint32) {
    })
 }
 
-// runProbes is the probe child's whole body: one module load, then three calls per
-// descriptor.
-func runProbes(descs []uint32) int {
+// runProbes is the probe child's whole body: one module load, then three calls per descriptor.
+func runProbes(descs []uint32) {
    defer emit(childRow{Kind: "end"})
 
    trace("start descriptors=%d keyLen=%#x", len(descs), keyLen)
@@ -448,7 +424,7 @@ func runProbes(descs []uint32) int {
    if err != nil {
       trace("loadWarbird failed: %v", err)
       emit(childRow{Kind: "err", Msg: err.Error()})
-      return 2
+      return
    }
    trace("dll loaded base=%#x", base)
 
@@ -457,7 +433,6 @@ func runProbes(descs []uint32) int {
       runOne(op3, d)
    }
    trace("done")
-   return 0
 }
 
 // ------------------------------------------------------------- descriptors
@@ -476,8 +451,8 @@ func spanMapped(secs []imgSection, rva, n uint32) bool {
 
 // trace writes one timestamped line to the child's stderr. Writes to stderr are unbuffered
 // syscalls, so the line is out of this process before the next statement runs - including
-// when the next statement is the kernel call that never returns. No parser reads it: it is
-// the human record of where a hung chunk stopped.
+// when the next statement is the call that never returns. No parser reads it: it is the human
+// record of where a hung chunk stopped.
 func trace(format string, a ...any) {
    fmt.Fprintf(os.Stderr, "[pid %d +%dms] %s\n",
       os.Getpid(), time.Since(childT0).Milliseconds(), fmt.Sprintf(format, a...))
@@ -507,8 +482,8 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
       out = append(out, d)
    }
 
-   // A total order over keys the map already deduplicated: no equal elements can reach the
-   // comparator. rva first, so the order matches the code layout the log reports.
+   // A total order over keys the map already deduplicated. rva first, so the order matches
+   // the code layout the log reports.
    slices.SortFunc(out, func(a, b imgDesc) int {
       if c := cmp.Compare(a.rva, b.rva); c != 0 {
          return c
@@ -524,8 +499,7 @@ func signingCandidates(fb []byte, secs []imgSection) []imgDesc {
 // ---- the probe child -----------------------------------------------------
 
 // probeResult is one WB heap-exec call. wrote is NTSTATUS 0, a zero status dword, and an
-// output buffer that is neither the random fill nor the input - the whole success test, so
-// no caller has to hold the fill or the input to decide it.
+// output buffer that is neither the random fill nor the input - the whole success test.
 type probeResult struct {
    ntstatus uint32
    status   []byte // the 4 status bytes the routine wrote
@@ -533,8 +507,8 @@ type probeResult struct {
    wrote    bool
 }
 
-// probe performs one WB heap-exec call. A failure to draw the random fill is returned
-// rather than exited on, so the caller decides what to print.
+// probe performs one WB heap-exec call. A failure to draw the random fill is returned rather
+// than exited on, so the caller decides what to print.
 func probe(op3 op3Func, descVA uint32, tag string, data []byte, size uint32) (*probeResult, error) {
    trace("probe %#x %s begin size=%#x", descVA, tag, size)
 
@@ -562,8 +536,7 @@ func probe(op3 op3Func, descVA uint32, tag string, data []byte, size uint32) (*p
 // ---------------------------------------------------------------- the cache
 
 // subRecord is prsubs.json: the one build-specific value the pipeline caches, plus the
-// descriptor it came from. -5's validation is the SHA256 comparison: a cache written
-// against another DLL is refused, not reinterpreted.
+// descriptor it came from. -5's validation is the SHA256 comparison.
 type subRecord struct {
    SHA256  string `json:"sha256"`
    DescVA  uint32 `json:"desc_va"`

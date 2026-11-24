@@ -1,9 +1,9 @@
 // warbird.go begin
 //go:build windows
 
-// The Warbird descriptor format, the PE census that finds descriptors in a DLL on disk,
-// the span and block carving, and -2, the op=1 segment decrypt. It also holds the decrypted
-// image and the patch plan (pfImage, pfPrep, apply), because that plan IS the carving.
+// The Warbird descriptor format, the PE census that finds descriptors in a DLL on disk, the
+// span and block carving, and -2, the op=1 segment decrypt. It also holds the decrypted image
+// and the patch plan (pfImage, pfPrep, apply), because that plan IS the carving.
 //
 //   +0x00  32-byte SHA-256 over [0x20, size)
 //   +0x20  u32 total size   (0xF0 => heap-exec, anything else => segment)
@@ -14,19 +14,19 @@
 //   +0x38  u32 size         (0xF0000000 | code_len; heap-exec only)
 //   +0xF0  entries, 0xC each: flags, rva, size   (segment descriptors only)
 //
-// A descriptor has THREE addresses: its own (`va`), desc_va (+0x28, what op=3 is handed
-// and what a call targets) and code rva (+0x34). The census stores all three.
+// A descriptor has THREE addresses: its own (va), desc_va (+0x28, what op=3 is handed and
+// what a call inside the image targets) and code rva (+0x34). The census stores all three.
 //
 // Segment descriptors list RVA ranges and all decrypt in one loaded image; heap-exec
 // descriptors each need their own fresh LoadLibraryW, because the kernel honours only the
 // FIRST such decrypt per image.
 //
 // PITFALLS. Do not compare the image hash between runs - LoadLibraryW bakes the load base
-// into IAT slots and relocated fields, which is why the profile is keyed by the DLL's
-// digest and the image is cross-checked by length. The descriptor size cap must stay at
-// 0x200000; segment descriptors must be decrypted per descriptor, not per deduped RVA, or
-// later/larger spans are lost; and the sacrificial page's protection must be restored
-// before the WB call, or the kernel rejects it with 0xc000000d.
+// into IAT slots and relocated fields, which is why the profile is keyed by the DLL's digest
+// and the image is cross-checked by length. The descriptor size cap must stay at 0x200000;
+// segment descriptors must be decrypted per descriptor, not per deduped RVA, or later/larger
+// spans are lost; and the sacrificial page's protection must be restored before the WB call,
+// or the kernel rejects it with 0xc000000d.
 package main
 
 import (
@@ -43,8 +43,8 @@ import (
 
 // ------------------------------------------------------------- -2: op=1
 
-// diCall issues op=1 (segment decrypt) for the descriptor at `sac` inside `base`.
-// NTSTATUS comes back in RAX, so r1 is the whole answer.
+// diCall issues op=1 (segment decrypt) for the descriptor at `sac` inside `base`. NTSTATUS
+// comes back in RAX, so r1 is the whole answer.
 func diCall(base, sac, rel, num uintptr) uint32 {
    var a [0x30]byte
    binary.LittleEndian.PutUint64(a[0x00:], 1)                // op = 1, segment decrypt
@@ -58,8 +58,8 @@ func diCall(base, sac, rel, num uintptr) uint32 {
    return uint32(r1)
 }
 
-// diMakeDesc builds a synthetic 1-entry segment descriptor, reusing hdr's header shape so
-// it matches what the kernel expects for this build:
+// diMakeDesc builds a synthetic 1-entry segment descriptor, reusing hdr's header shape so it
+// matches what the kernel expects for this build:
 //
 //   [0x00..0x20)  sha256 over the body
 //   [0x20]        total size (0x100)
@@ -89,13 +89,8 @@ func diReadMem(base uintptr, n int) []byte {
    return out
 }
 
-func le16(b []byte, o int) uint16 {
-   return binary.LittleEndian.Uint16(b[o:])
-}
-
-func le32(b []byte, o int) uint32 {
-   return binary.LittleEndian.Uint32(b[o:])
-}
+func le16(b []byte, o int) uint16 { return binary.LittleEndian.Uint16(b[o:]) }
+func le32(b []byte, o int) uint32 { return binary.LittleEndian.Uint32(b[o:]) }
 
 func stageDecryptImg() (code int) {
    lg := newStepLog(imgLogPath)
@@ -120,8 +115,7 @@ func stageDecryptImg() (code int) {
    // SLOT / RELOCS / NUM vary between builds, so they are read from a real segment
    // descriptor instead of being hardcoded. segs[0] is the sacrificial slot because a
    // genuine descriptor already carries its own self-address at +0x28, which the kernel
-   // validates. The heap-exec pass overwrites it later, by which time the segment pass has
-   // finished.
+   // validates. The heap-exec pass overwrites it later, by which time this pass is done.
    slot := segs[0].va
    relocs := le32(f, int(segs[0].off)+0x2C)
    num := le32(f, int(segs[0].off)+0x30)
@@ -134,8 +128,8 @@ func stageDecryptImg() (code int) {
    logf("")
 
    // Segment pass: ONE loaded image, op=1 against every real segment descriptor.
-   // Per-descriptor, not per-deduped-RVA: descriptors overlap, and deduping by RVA drops
-   // the later/larger spans.
+   // Per-descriptor, not per-deduped-RVA: descriptors overlap, and deduping by RVA drops the
+   // later/larger spans.
    base, err := wbLoad(dllPath)
    if err != nil {
       return fail("LoadLibraryW failed: %v", err)
@@ -157,13 +151,13 @@ func stageDecryptImg() (code int) {
    }
    logf("")
 
-   // Heap-exec pass: ONE FRESH IMAGE PER BLOCK. Each iteration builds a synthetic
-   // descriptor for (rva, size) from this block's own crypto params, writes it over the
-   // sacrificial slot, restores the slot's protection (the kernel rejects a descriptor on
-   // a writable page with 0xc000000d), decrypts, reads back and frees.
+   // Heap-exec pass: ONE FRESH IMAGE PER BLOCK. Each iteration builds a synthetic descriptor
+   // for (rva, size) from this block's own crypto params, writes it over the sacrificial
+   // slot, restores the slot's protection (the kernel rejects a descriptor on a writable page
+   // with 0xc000000d), decrypts, reads back and frees.
    //
-   // A failed patch is reported as rc != 0 with no bytes: the call is skipped, and the
-   // block belongs with the ones that failed rather than the ones that did not change.
+   // A failed patch is reported as rc != 0 with no bytes: the call is skipped, and the block
+   // belongs with the ones that failed rather than the ones that did not change.
    decryptBlock := func(h *imgDesc) (got []byte, rc uint32, err error) {
       lib, err := wbLoad(dllPath)
       if err != nil {
@@ -207,11 +201,7 @@ func stageDecryptImg() (code int) {
          copy(img[h.rva:], got)
          done++
       default:
-         // was already plaintext (e.g. .data entries) - not an error
-         same++
-         if same <= 12 {
-            logf("  unchanged 0x%06x+0x%x owner 0x%x", h.rva, h.ln, h.va)
-         }
+         same++ // already plaintext (e.g. .data entries)
       }
 
       if (i+1)%200 == 0 {
@@ -228,12 +218,12 @@ func stageDecryptImg() (code int) {
    }
 
    // -2 establishes the profile: it is the first step that knows the DLL's digest and
-   // produces the artefact everything else is measured against. The census goes in here,
-   // not just SizeOfImage: scanDescs hashes several gigabytes, and every trial child needs
-   // the spans and heap blocks it produces.
+   // produces the artefact everything else is measured against. The census goes in here, not
+   // just SizeOfImage: scanDescs hashes several gigabytes, and every trial child needs the
+   // spans and heap blocks it produces.
    //
-   // pfLoad, not a fresh profile: re-running -2 against the same build must not discard a
-   // map and a stage pairing that are still valid.
+   // pfLoad, not a fresh profile: re-running -2 against the same build must not discard a map
+   // and a stage pairing that are still valid.
    cen := &profileCensus{}
    for _, s := range segs {
       for _, sp := range segSpans(f, &s, sizeImg) {
@@ -261,9 +251,8 @@ func stageDecryptImg() (code int) {
 // ------------------------------------------------------------- descriptors
 
 // imgDesc is one digest-validated descriptor. va is its own address and identifies a
-// candidate; descVA is +0x28 and is what a call inside the image targets; rva and ln are
-// the code block, meaningful only for heap-exec descriptors; off and size are the
-// descriptor's file position.
+// candidate; descVA is +0x28 and is what a call inside the image targets; rva and ln are the
+// code block, meaningful only for heap-exec descriptors; off and size are its file position.
 type imgDesc struct {
    va     uint32
    off    uint32
@@ -281,9 +270,9 @@ type imgDesc struct {
 // THIS IS THE EXPENSIVE FUNCTION IN THE PROGRAM: it hashes every 4-byte offset whose size
 // field lands in range. It runs once, in -2, and the result is cached.
 //
-// The 0x200000 cap must not be lowered: the two largest descriptors on the recorded build
-// are 0x829c and 0x3cac bytes, and a 0x2000 cap silently skips them, which loses the gap
-// blocks and makes -6 execute ciphertext.
+// The 0x200000 cap must not be lowered: the two largest descriptors on the recorded build are
+// 0x829c and 0x3cac bytes, and a 0x2000 cap silently skips them, which loses the gap blocks
+// and makes -6 execute ciphertext.
 func scanDescs(fb []byte, secs []imgSection) []imgDesc {
    var out []imgDesc
    for _, s := range secs {
@@ -322,7 +311,6 @@ func scanDescs(fb []byte, secs []imgSection) []imgDesc {
 }
 
 // splitDescs partitions a census into segment and heap-exec descriptors, in file order.
-// -1 and -2 both need exactly this split.
 func splitDescs(fb []byte, secs []imgSection) (segs, heaps []imgDesc) {
    for _, d := range scanDescs(fb, secs) {
       if d.heap() {
@@ -334,29 +322,26 @@ func splitDescs(fb []byte, secs []imgSection) (segs, heaps []imgDesc) {
    return segs, heaps
 }
 
-// heap reports whether this is a heap-exec descriptor. 0xF0 is the only size the kernel
-// treats that way, and the size field is covered by the digest, so the test cannot be
-// spoofed by a corrupt byte.
-func (d *imgDesc) heap() bool {
-   return d.size == 0xF0
-}
+// heap reports whether this is a heap-exec descriptor. 0xF0 is the only size the kernel treats
+// that way, and the size field is covered by the digest.
+func (d *imgDesc) heap() bool { return d.size == 0xF0 }
 
-// imgRun is a half-open RVA range. It serves three jobs with one type: one heap-exec
-// block, a merged run of them, and a segment span to patch.
+// imgRun is a half-open RVA range. It serves three jobs with one type: one heap-exec block, a
+// merged run of them, and a segment span to patch.
 type imgRun struct{ start, length uint32 }
 
 // carveRuns returns [r, r+s) minus every interval, as the runs that remain.
 //
 // Both patching callers need it for the same reason: the kernel decrypts a heap-exec block
-// itself on op=3, so copying already-decrypted bytes over one causes a double decrypt and
-// the routine executes garbage.
+// itself on op=3, so copying already-decrypted bytes over one causes a double decrypt and the
+// routine executes garbage.
 func carveRuns(merged []imgRun, r, s uint32) []imgRun {
    var out []imgRun
    cur, end := r, r+s
 
    // Start at the last interval whose start is at or below r. BinarySearchFunc reports the
-   // first entry not less than the target, so an exact hit is that entry and a miss leaves
-   // pos one past the last candidate.
+   // first entry not less than the target, so an exact hit is that entry and a miss leaves pos
+   // one past the last candidate.
    pos, found := slices.BinarySearchFunc(merged, r, func(m imgRun, t uint32) int {
       return cmp.Compare(m.start, t)
    })
@@ -385,12 +370,9 @@ func carveRuns(merged []imgRun, r, s uint32) []imgRun {
    return out
 }
 
-// mergeRuns sorts and coalesces overlapping OR touching ranges, so carveRuns can
-// binary-search them and the patcher can issue one VirtualProtect per merged run.
-//
-// Touching counts as overlapping because every run is written from the same source image:
-// adjacent runs are equivalent to their union, and merging turns thousands of protection
-// flips into a few dozen.
+// mergeRuns sorts and coalesces overlapping OR touching ranges, so carveRuns can binary-search
+// them and the patcher can issue one VirtualProtect per merged run. Touching counts as
+// overlapping because every run is written from the same source image.
 func mergeRuns(ivs []imgRun) []imgRun {
    slices.SortFunc(ivs, func(a, b imgRun) int { return cmp.Compare(a.start, b.start) })
 
@@ -434,9 +416,9 @@ type imgSection struct {
    va, vs, rs, rp uint32
 }
 
-// peSections reads SizeOfImage and the section table out of a PE file. A short or
-// malformed header returns no sections and a zero SizeOfImage rather than panicking:
-// callers pass a ReadFile result straight in.
+// peSections reads SizeOfImage and the section table out of a PE file. A short or malformed
+// header returns no sections and a zero SizeOfImage rather than panicking: callers pass a
+// ReadFile result straight in.
 func peSections(fb []byte) (sizeImg uint32, secs []imgSection) {
    if len(fb) < 0x40 {
       return 0, nil
@@ -470,13 +452,12 @@ func peSections(fb []byte) (sizeImg uint32, secs []imgSection) {
 
 // ------------------------------------------------------------- the trial prep
 
-// pfImage is everything a trial child or a -3 sweep needs: the decrypted image, the
-// census, the patch plan, and the profile those came from. It deliberately does NOT
-// include the module: a child used to read the DLL and re-run scanDescs, which hashes
-// several gigabytes.
+// pfImage is everything a trial child or a -3 sweep needs: the decrypted image, the census,
+// the patch plan, and the profile those came from. It deliberately does NOT include the
+// module: a child used to read the DLL and re-run scanDescs, which hashes several gigabytes.
 //
-// prof is the parse pfPrep already performed, carried so the BLA-phase steps do not read
-// and unmarshal dllprof.json a second time just to reach Map and Stages.
+// prof is the parse pfPrep already performed, carried so the BLA-phase steps do not read and
+// unmarshal dllprof.json a second time just to reach Map and Stages.
 type pfImage struct {
    sha    string
    size   uint32
@@ -487,9 +468,9 @@ type pfImage struct {
    prof   *dllProfile
 }
 
-// pfPrep loads the census and the image. The size check is what proves the image on disk
-// came from this build: the image's own hash changes every run, because LoadLibraryW bakes
-// the load base into relocated fields, but SizeOfImage is a per-build constant.
+// pfPrep loads the census and the image. The size check is what proves the image on disk came
+// from this build: the image's own hash changes every run, but SizeOfImage is a per-build
+// constant.
 func pfPrep() (*pfImage, error) {
    raw, err := os.ReadFile(profilePath)
    if err != nil {
@@ -529,10 +510,10 @@ func pfPrep() (*pfImage, error) {
 // apply patches the segment plaintext into the loaded image, carving around the heap-exec
 // blocks the kernel decrypts itself.
 //
-// Every span is written, not just the ones that differ from the file: writing the image's
-// own bytes over an unencrypted span is a no-op, and skipping the comparison is what lets
-// a child avoid reading the module at all. The runs are coalesced first, so the protection
-// flips number in the dozens.
+// Every span is written, not just the ones that differ from the file: writing the image's own
+// bytes over an unencrypted span is a no-op, and skipping the comparison is what lets a child
+// avoid reading the module at all. The runs are coalesced first, so the protection flips
+// number in the dozens.
 func (p *pfImage) apply(base uintptr) (patched, skipped int) {
    var runs []imgRun
    for _, s := range p.spans {

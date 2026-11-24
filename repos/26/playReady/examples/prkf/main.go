@@ -10,16 +10,14 @@
 //   prkf -5   signing.go     decrypt the signing key                       BLA
 //   prkf -6   derive.go      derive the encryption key                     BLA
 //
-// Shared by all of them: kernel.go holds the kernel ABI and the DLL profile; child.go holds
-// the wire, the child spec and the spawn plumbing; trials.go holds the child bodies that
-// drive it; warbird.go additionally holds the decrypted image and the patch plan.
+// Shared by all of them: kernel.go holds the kernel ABI and the DLL profile; child.go holds the
+// wire, the child spec and the spawn plumbing; trials.go holds the child bodies that drive it;
+// warbird.go additionally holds the decrypted image and the patch plan.
 //
-// -1..-3 read only the DLL; -4..-6 read only the sample. Every artefact lives under
-// outDir, every path is declared once at the end of this file, and dllPath is the one
-// path outside it.
+// -1..-3 read only the DLL; -4..-6 read only the sample. Every artefact lives under outDir,
+// every path is declared once at the end of this file, and dllPath is the one path outside it.
 //
-// No goroutines, channels or mutexes. main is the only place that calls os.Exit outside
-// wbVEH.
+// No goroutines, channels or mutexes. main is the only place that calls os.Exit outside wbVEH.
 package main
 
 import (
@@ -39,13 +37,13 @@ import (
 // magic(4) version(4) total_length(4) certificate_length(4).
 const certHdr = 16
 
-// dllPath is the PlayReady module. It stays outside outDir: a descriptor is an RVA into
-// the mapped image, so the bytes hashed and the image the Warbird gate executes must be
-// the same module.
+// dllPath is the PlayReady module. It stays outside outDir: a descriptor is an RVA into the
+// mapped image, so the bytes hashed and the image the Warbird gate executes must be the same
+// module.
 const dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 
-// outDir is the one directory the pipeline uses: the sample it reads and every file it
-// writes. Read and write through dataFile, never by spelling a path.
+// outDir is the one directory the pipeline uses: the sample it reads and every file it writes.
+// Read and write through dataFile, never by spelling a path.
 const outDir = "testdata"
 
 var (
@@ -74,9 +72,9 @@ var (
    oracleDir = dataFile("oracle")
 )
 
-// cmdCert carves the CHAI certificate chain out of corePath and writes it to certPath.
-// A candidate must tile its own certificate entries exactly; a chain whose preceding
-// length prefix matches its total length is preferred.
+// cmdCert carves the CHAI certificate chain out of corePath and writes it to certPath. A
+// candidate must tile its own certificate entries exactly; a chain whose preceding length prefix
+// matches its total length is preferred.
 func cmdCert() error {
    if fi, err := os.Stat(corePath); err != nil || !fi.Mode().IsRegular() {
       return fmt.Errorf("missing input: %s\n  put the PlayReady sample there before running", corePath)
@@ -128,20 +126,16 @@ func cmdCert() error {
       fmt.Printf("\nselected 0x%x (%s)\n", ch.base, how)
    }
 
-   blob := buf[ch.base : ch.base+int(ch.totalLength)]
-
-   lo := max(ch.base-16, 0)
-   fmt.Printf("\nbytes 0x%x..0x%x (before CHAI):\n  % x\n", lo, ch.base, buf[lo:ch.base])
    switch {
    case ch.base < 4:
-      fmt.Println("  (chain starts before offset 4 - no length prefix possible)")
+      fmt.Println("prefix: none (chain starts before offset 4)")
    case ch.prefixOK:
-      fmt.Printf("u32be at CHAI-4 = 0x%08x == chain length -> PRKF length-prefix confirmed\n", ch.prefix)
+      fmt.Printf("prefix: u32be at CHAI-4 = %d == chain length\n", ch.prefix)
    default:
-      fmt.Printf("u32be at CHAI-4 = 0x%08x != chain length (%d) -> not a PRKF-length-prefixed span\n",
-         ch.prefix, ch.totalLength)
+      fmt.Printf("prefix: u32be at CHAI-4 = %d != chain length %d\n", ch.prefix, ch.totalLength)
    }
 
+   blob := buf[ch.base : ch.base+int(ch.totalLength)]
    if err := os.WriteFile(certPath, blob, 0o644); err != nil {
       return err
    }
@@ -149,8 +143,8 @@ func cmdCert() error {
    return nil
 }
 
-// cmdExtract is -4: carve the chain, then extract the keys. Idempotent, because -6
-// calls it when the enc pair is absent.
+// cmdExtract is -4: carve the chain, then extract the keys. Idempotent, because -6 calls it when
+// the enc pair is absent.
 func cmdExtract() error {
    if err := cmdCert(); err != nil {
       return err
@@ -159,9 +153,8 @@ func cmdExtract() error {
    return cmdKeys()
 }
 
-// cmdKeys parses the PRKF key-material section and writes the four key components. It
-// re-reads corePath rather than taking buf from cmdCert: the two halves are independent
-// and neither holds state for the other.
+// cmdKeys parses the PRKF key-material section and writes the four key components. It re-reads
+// corePath rather than taking buf from cmdCert: the two halves are independent.
 func cmdKeys() error {
    b, err := os.ReadFile(corePath)
    if err != nil || len(b) < 4 || string(b[:4]) != "PRKF" {
@@ -199,10 +192,9 @@ func cmdKeys() error {
          r.off, len(r.pub), len(r.priv), hex.EncodeToString(head))
    }
 
-   // The encryption key is the unique record with a 65-byte private component; the
-   // signing key is the record immediately before it. No field separates it from the
-   // other 32-byte record: ver/flags/z1/z2 are identical across all three and every
-   // pubkey occurs exactly twice.
+   // The encryption key is the unique record with a 65-byte private component; the signing key
+   // is the record immediately before it. No field separates it from the other 32-byte record:
+   // ver/flags/z1/z2 are identical across all three and every pubkey occurs exactly twice.
    var enc *keyRecord
    encIdx := -1
    for j, r := range recs {
@@ -249,8 +241,8 @@ func cmdKeys() error {
    return nil
 }
 
-// dataFile returns the path inside outDir for a pipeline file, whether the pipeline
-// reads it or writes it.
+// dataFile returns the path inside outDir for a pipeline file, whether the pipeline reads it or
+// writes it.
 func dataFile(name string) string {
    return filepath.Join(outDir, name)
 }
@@ -269,14 +261,18 @@ func errStep(fn func() error) func() int {
 // ------------------------------------------------------------------- dispatch
 
 func main() {
-   // A child is this binary re-executed with its mode in the environment and no
-   // arguments at all. Checked before the FlagSet exists.
-   if code, ok, err := childMode(); ok {
+   // A child is this binary re-executed with its mode in the environment and no arguments at
+   // all. Checked before the FlagSet exists.
+   //
+   // A child reports through its rows and closes them with k=end; the exit status is not a
+   // verdict channel, so an ordinary child returns 0 by simply unwinding. Only a malformed
+   // payload - a spawn bug, never a candidate's property - exits nonzero here.
+   if ok, err := childMode(); ok {
       if err != nil {
          fmt.Fprintf(os.Stderr, "prkf: %v\n", err)
          os.Exit(2)
       }
-      os.Exit(code)
+      return
    }
 
    var (
@@ -330,8 +326,8 @@ func main() {
       os.Exit(1)
    }
 
-   // The elapsed line cannot be a deferred timer inside the step: main exits with the
-   // step's code, which unwinds no frames.
+   // The elapsed line cannot be a deferred timer inside the step: main exits with the step's
+   // code, which unwinds no frames.
    t0 := time.Now()
    code := run()
    fmt.Printf("elapsed %s\n", time.Since(t0).Round(time.Millisecond))
@@ -438,10 +434,10 @@ func walk(buf []byte, start, end int) []section {
 
 // ------------------------------------------------------------------- the step log
 
-// stepLog is the log -2, -3 and -6 keep: every line goes to the terminal as it is
-// produced and to the step's file when the step ends, so no return path can leave the
-// file unwritten. -1 does not use it: its log must be on disk before the next statement
-// runs, because it is the only evidence a stalled scan leaves behind.
+// stepLog is the log -2, -3 and -6 keep: every line goes to the terminal as it is produced and
+// to the step's file when the step ends, so no return path can leave the file unwritten. -1 does
+// not use it: its log must be on disk before the next statement runs, because it is the only
+// evidence a stalled scan leaves behind.
 type stepLog struct {
    path  string
    lines []string

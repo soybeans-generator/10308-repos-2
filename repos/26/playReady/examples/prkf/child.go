@@ -1,26 +1,21 @@
 // child.go begin
 //go:build windows
 
-// The process plumbing every step shares: how a child is identified, how it is spawned, and
-// the one grammar it speaks. No child BODY lives here - the probe child is in signing.go,
-// the sweep and trial children in trials.go, and this file is what they agree on.
+// The process plumbing every step shares: the child spec, the spawn, and the one grammar.
 //
-// A CHILD IS IDENTIFIED BY ITS ENVIRONMENT, NOT BY ITS ARGUMENTS: one variable, one JSON
+// A CHILD IS IDENTIFIED BY ITS ENVIRONMENT, NOT ITS ARGUMENTS: one variable, one JSON
 // childSpec, decoded and validated once in childMode. No child mode appears in `prkf -h`
-// and every step has an empty command line.
+// and every child has an empty command line.
 //
 // WHY A CHILD IS A SEPARATE PROCESS: a fault in a descriptor's code is a Windows SEH
-// exception raised inside the DLL, not a Go panic. recover() never runs and the whole
-// process dies, so one child per candidate confines a fault to that candidate.
+// exception raised inside the DLL, not a Go panic. recover() never runs and the process
+// dies, so one child per candidate confines a fault to that candidate.
 //
-// THE WIRE IS ONE GRAMMAR. Every child prints childRow, one JSON object per line, and
-// closes with k=end. A caller knows which mode it spawned, so no row names it. A child with
-// no end row died inside native code, and the rows before it say where - so no caller
-// matches on prose, and no caller re-derives an index the child already knew.
-//
-// EXIT CODES: nothing here calls os.Exit. 0 after the rows, 2 for a bad payload, 4 when
-// the module cannot be loaded, 5 on bad input or a recovered panic, 6 when no fault
-// handler could be installed.
+// THE ROWS ARE THE WHOLE REPORT. Every child prints childRow, one JSON object per line, and
+// closes with k=end. Whether it finished is read from that end row, never from its exit
+// status: no end row means it died in native code or was killed, and the rows before it say
+// where. The only nonzero exit is main's 2 for a malformed payload - a spawn bug, whose
+// message is on stderr.
 package main
 
 import (
@@ -35,8 +30,7 @@ import (
    "time"
 )
 
-// childEnv is the one variable a child is identified by. Its value is a JSON childSpec;
-// nothing else about the process differs from its parent.
+// childEnv is the one variable a child is identified by: its value is a JSON childSpec.
 const childEnv = "PRKF_CHILD"
 
 // childEnc is the one writer. Encode appends the newline, and an *os.File write is a
@@ -44,10 +38,7 @@ const childEnv = "PRKF_CHILD"
 // statement is the call that never returns.
 var childEnc = json.NewEncoder(os.Stdout)
 
-// ------------------------------------------------------------- the payload
-
-// selfPath and selfErr are resolved once at init: four drivers spawn children of
-// themselves and each needs the same answer.
+// selfPath and selfErr are resolved once at init: four drivers spawn children of themselves.
 var selfPath, selfErr = os.Executable()
 
 // childEnvFor renders spec as the one NAME=VALUE entry a spawn site passes.
@@ -59,78 +50,94 @@ func childEnvFor(spec *childSpec) (string, error) {
    return childEnv + "=" + string(b), nil
 }
 
-// childMode reports whether this process was started as one of the re-executed children,
-// and runs it if so. Called from main before the FlagSet exists: a child passes no
-// arguments, so there is nothing for the FlagSet to parse.
+// childMode reports whether this process is a re-executed child, and runs it if so. Called
+// from main before the FlagSet exists: a child passes no arguments.
 //
-// It is also the ONLY place a child payload is validated. Each mode names exactly the
-// fields it needs, so a malformed spec fails here with one message rather than in
-// whichever worker happened to trip over it. An error means a spawn bug, so main exits 2.
-func childMode() (code int, ok bool, err error) {
+// It is the ONLY place a payload is validated. Each mode names exactly the fields it needs,
+// so a malformed spec fails here with one message rather than in whichever worker tripped
+// over it. A worker's verdicts are rows, never a return code.
+func childMode() (ok bool, err error) {
    s := os.Getenv(childEnv)
    if s == "" {
-      return 0, false, nil
+      return false, nil
    }
 
    var spec childSpec
    if err := json.Unmarshal([]byte(s), &spec); err != nil {
-      return 0, true, fmt.Errorf("%s: %w", childEnv, err)
+      return true, fmt.Errorf("%s: %w", childEnv, err)
    }
 
    switch spec.Mode {
    case "probe":
       if len(spec.Descs) == 0 {
-         return 0, true, fmt.Errorf("%s: probe with no descriptors", childEnv)
+         return true, fmt.Errorf("%s: probe with no descriptors", childEnv)
       }
-      return runProbes(spec.Descs), true, nil
+      runProbes(spec.Descs)
 
    case "sweep":
       // One descriptor, because a sweep drives one consumer. Families are indices into
       // dmFams, so the range is checked against it and not against a literal.
       if len(spec.Descs) != 1 {
-         return 0, true, fmt.Errorf("%s: sweep needs exactly one descriptor, got %d",
+         return true, fmt.Errorf("%s: sweep needs exactly one descriptor, got %d",
             childEnv, len(spec.Descs))
       }
       if len(spec.Fams) == 0 || len(spec.Sets) == 0 {
-         return 0, true, fmt.Errorf("%s: sweep needs families and sets", childEnv)
+         return true, fmt.Errorf("%s: sweep needs families and sets", childEnv)
       }
       for _, f := range spec.Fams {
          if f < 0 || f >= len(dmFams) {
-            return 0, true, fmt.Errorf("%s: family %d is not one of %d",
-               childEnv, f, len(dmFams))
+            return true, fmt.Errorf("%s: family %d is not one of %d", childEnv, f, len(dmFams))
          }
       }
-      return dmWorker(spec.Descs[0], spec.Fams, spec.Sets), true, nil
+      dmWorker(spec.Descs[0], spec.Fams, spec.Sets)
 
    case "p1":
       // Phase 1 is phase 2 with one empty OBF, and the empty value is what selects the
       // phase-1 argument shape, so exactly one is required and it must be empty.
       if len(spec.Descs) == 0 {
-         return 0, true, fmt.Errorf("%s: p1 with no descriptors", childEnv)
+         return true, fmt.Errorf("%s: p1 with no descriptors", childEnv)
       }
       if len(spec.Obfs) != 1 || spec.Obfs[0] != "" {
-         return 0, true, fmt.Errorf("%s: p1 needs exactly one empty OBF slot, got %d",
+         return true, fmt.Errorf("%s: p1 needs exactly one empty OBF slot, got %d",
             childEnv, len(spec.Obfs))
       }
-      return dpWorker(spec.Mode, 0, spec.Obfs, spec.Descs), true, nil
+      dpWorker(spec.Mode, 0, spec.Obfs, spec.Descs)
 
    case "p2":
-      // One OBF per candidate, so any non-empty list will not do: the worker indexes
-      // obfs[oi] for every (descriptor, OBF, half) triple.
+      // One OBF per candidate: the worker indexes obfs[oi] for every triple.
       if len(spec.Descs) == 0 || len(spec.Obfs) == 0 {
-         return 0, true, fmt.Errorf("%s: p2 needs descriptors and OBFs", childEnv)
+         return true, fmt.Errorf("%s: p2 needs descriptors and OBFs", childEnv)
       }
       if spec.Start < 0 {
-         return 0, true, fmt.Errorf("%s: p2 start %d is negative", childEnv, spec.Start)
+         return true, fmt.Errorf("%s: p2 start %d is negative", childEnv, spec.Start)
       }
-      return dpWorker(spec.Mode, spec.Start, spec.Obfs, spec.Descs), true, nil
+      dpWorker(spec.Mode, spec.Start, spec.Obfs, spec.Descs)
+
+   default:
+      return true, fmt.Errorf("%s: unknown mode %q", childEnv, spec.Mode)
    }
-   return 0, true, fmt.Errorf("%s: unknown mode %q", childEnv, spec.Mode)
+   return true, nil
 }
 
 // emit prints one row. The only error Encode can return here is a write to a closed pipe,
-// which no caller could act on and which the parent already reports as a missing end row.
+// which the parent already reports as a missing end row.
 func emit(r childRow) { _ = childEnc.Encode(r) }
+
+// endedRow reports whether the last non-blank line of stdout is a k=end row. It parses one
+// line and not the stream, because readRows belongs to the callers that want the rows. A
+// child killed mid-write leaves a truncated final line, which is not an end row: correct.
+func endedRow(stdout []byte) bool {
+   lines := bytes.Split(stdout, []byte("\n"))
+   for i := len(lines) - 1; i >= 0; i-- {
+      ln := bytes.TrimSpace(lines[i])
+      if len(ln) == 0 {
+         continue
+      }
+      var r childRow
+      return json.Unmarshal(ln, &r) == nil && r.Kind == "end"
+   }
+   return false
+}
 
 // isHex reports whether s decodes as hex bytes.
 func isHex(s string) bool {
@@ -138,25 +145,20 @@ func isHex(s string) bool {
    return err == nil
 }
 
-// isHex32 reports whether s is exactly 0x20 bytes of hex, the shape of every 0x20-byte
-// buffer a child prints. Length alone is not the test: hex.DecodeString returns the bytes
-// it did decode alongside its error, so a 66-character field with a bad final byte yields a
-// well-formed 0x20 bytes plus an error.
+// isHex32 reports whether s is exactly 0x20 bytes of hex. Length alone is not the test:
+// hex.DecodeString returns the bytes it did decode alongside its error.
 func isHex32(s string) bool { return len(s) == 0x40 && isHex(s) }
 
-// ------------------------------------------------------------- the wire
-
-// childRow is one line a child prints, and the only thing a parent parses. A kind sets only
-// the fields it carries; on the far side an absent field is the zero value.
+// childRow is one line a child prints, and the only thing a parent parses.
 //
 //   k=ok        p1/p2  d descriptor, i OBF, h key half, b key buffer then output buffer
-//   k=reject    p1/p2  d, i, h, r rc, s the status dword
+//   k=reject    p1/p2  d, i, h, s the status dword
 //   k=accept    probe  d, b[0] A output, b[1] B output, s A/B/C status, e the verdict detail
 //   k=none      probe  d, e why no verdict was reached
 //   k=meta      sweep  e one human log line
 //   k=live      sweep  f family, i set index, d the live set rva
 //   k=nolive    sweep  f family, i how many sets were live
-//   k=out       sweep  f family, i licence, h forced nibble, r rc, s status, b[0] value
+//   k=out       sweep  f family, i licence, h forced nibble, s status, b[0] value
 //   k=fault     any    e the FAULT detail, emitted by wbVEH just before it exits
 //   k=err       any    e why the child could not start or run - never a property of a
 //                      candidate, so it aborts the batch instead of being skipped
@@ -170,16 +172,15 @@ type childRow struct {
    Half int      `json:"h,omitempty"`
    Buf  []string `json:"b,omitempty"`
    St   []string `json:"s,omitempty"`
-   RC   uint32   `json:"r,omitempty"`
    Msg  string   `json:"e,omitempty"`
 }
 
-// readRows parses a child's stdout. Blank lines are skipped. Every b and s entry must be
-// hex, because every caller below decodes those fields without a second look: a malformed
-// one is a parse failure here rather than a silent "no match" ten steps later.
+// readRows parses a child's stdout. Blank lines are skipped, and every b and s entry must be
+// hex: every caller decodes those fields without a second look, so a malformed one is a
+// parse failure here rather than a silent "no match" ten steps later.
 //
 // A final line that does not parse is dropped, not fatal: it has no trailing newline, so it
-// is a row a killed child was still writing, and discarding it keeps the rows before it.
+// is a row a killed child was still writing.
 func readRows(stdout []byte) ([]childRow, error) {
    lines := bytes.Split(stdout, []byte("\n"))
    var out []childRow
@@ -207,19 +208,15 @@ func readRows(stdout []byte) ([]childRow, error) {
    return out, nil
 }
 
-// log renders a row for a step's log file. The wire form is already the JSON line; this
-// exists so a caller does not have to marshal-and-ignore-error at the log site.
+// log renders a row for a step's log file.
 func (r childRow) log() string {
    b, _ := json.Marshal(r)
    return string(b)
 }
 
-// childSpec is a child's whole payload. Descs is per-mode: descriptor VAs for "probe",
-// "p1" and "p2", and the single consumer descRVA for "sweep". The remaining fields are
-// read by the one mode that uses them and ignored by the rest.
-//
-// Obfs is a single "" for "p1", where the empty value selects the phase-1 argument shape,
-// and the full OBF list for "p2".
+// childSpec is a child's whole payload. Descs is descriptor VAs for "probe", "p1" and "p2",
+// and the single consumer descRVA for "sweep". Obfs is a single "" for "p1", where the empty
+// value selects the phase-1 argument shape, and the full list for "p2".
 type childSpec struct {
    Mode  string   `json:"mode"`            // probe | sweep | p1 | p2
    Descs []uint32 `json:"descs,omitempty"` // probe, p1, p2; sweep uses the one element
@@ -231,37 +228,34 @@ type childSpec struct {
 
 // ------------------------------------------------------------ spawn helpers
 
-// procOut is one collected child run. rc is -1 when the child produced no verdict: it was
-// killed by the deadline, or it could not be started at all, which is the one case err
-// reports.
+// procOut is one collected child run. ended is the completion signal: the last row was
+// k=end. err is non-nil only when the process could not be started or the spec could not be
+// encoded.
 type procOut struct {
    stdout []byte
-   rc     int
+   ended  bool
    err    error
 }
 
-// runCollect spawns this binary as a child and returns its stdout. The child is identified
-// by env alone and is passed no arguments; spec is encoded here, so no caller ever formats
-// a payload and no child ever re-parses a hand-built string.
+// runCollect spawns this binary as a child and returns its stdout. The child is identified by
+// env alone and passed no arguments; spec is encoded here, so no caller formats a payload and
+// no child re-parses a hand-built string.
 //
-// A non-zero exit is reported as rc, not as an error: every child signals failure that way
-// on purpose, and the caller parses stdout for the reason. err is non-nil only when the
-// process could not be started or the spec could not be encoded.
-//
-// timeout > 0 bounds the run; -1's probe passes 0, because a deadline there would make a
-// hang indistinguishable from a fault. stream, when non-nil, receives each stderr line as
-// it arrives and before Wait, so a child that never exits still leaves its trace.
+// timeout > 0 bounds the run; -1's probe passes 0, because a deadline there would make a hang
+// indistinguishable from a fault. A child killed on the deadline simply has no end row, so
+// the timer is never consulted. stream, when non-nil, receives each stderr line as it arrives
+// and before Wait, so a child that never exits still leaves its trace.
 func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *procOut {
    if selfErr != nil {
-      return &procOut{rc: -1, err: selfErr}
+      return &procOut{err: selfErr}
    }
    entry, err := childEnvFor(spec)
    if err != nil {
-      return &procOut{rc: -1, err: err}
+      return &procOut{err: err}
    }
 
    cmd := exec.Command(selfPath)
-   // Last value wins: exec dedupes Env, case-insensitively on Windows, so an inherited
+   // Last value wins: exec dedupes Env case-insensitively on Windows, so an inherited
    // PRKF_CHILD is shadowed by this spawn's spec rather than needing to be removed.
    cmd.Env = append(os.Environ(), entry)
    var so bytes.Buffer
@@ -270,23 +264,17 @@ func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *pr
    var er io.ReadCloser
    if stream != nil {
       if er, err = cmd.StderrPipe(); err != nil {
-         return &procOut{rc: -1, err: err}
+         return &procOut{err: err}
       }
    }
    if err := cmd.Start(); err != nil {
-      return &procOut{rc: -1, err: err}
+      return &procOut{err: err}
    }
 
-   // The deadline does one thing - kill the child - and asks one question - did it fire?
-   // That is all a context.Context was doing here, and a timer answers both without the
-   // package. It is armed after Start because the callback dereferences cmd.Process,
-   // which is nil until then.
-   //
-   // A Kill that fails means the child had already exited; the check below tolerates that
-   // race anyway, so the error is dropped rather than reported as a failure to kill.
-   var kill *time.Timer
+   // Armed after Start because the callback dereferences cmd.Process, which is nil until
+   // then. Stop only releases the timer; a Kill that fails means the child already exited.
    if timeout > 0 {
-      kill = time.AfterFunc(timeout, func() { _ = cmd.Process.Kill() })
+      defer time.AfterFunc(timeout, func() { _ = cmd.Process.Kill() }).Stop()
    }
 
    if er != nil {
@@ -295,35 +283,19 @@ func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *pr
       for sc.Scan() {
          stream("  " + sc.Text())
       }
-      // The scanner's error is the only signal that the trace ended early. Dropped, it
-      // would make a truncated trace indistinguishable from a complete one.
+      // The scanner's error is the only signal that the trace ended early: dropped, a
+      // truncated trace would be indistinguishable from a complete one.
       if serr := sc.Err(); serr != nil {
          stream(fmt.Sprintf("  TRACE TRUNCATED: %v", serr))
       }
    }
 
    // Reading stderr to EOF before Wait is the documented pattern: Wait closes the pipe, so
-   // every trace line is out of the child before the rows are read.
-   runErr := cmd.Wait()
+   // every trace line is out of the child before the rows are read. The exit status is
+   // discarded: the rows carry the verdicts and the end row carries completion.
+   _ = cmd.Wait()
 
-   // Stop reports whether the timer was still pending. False means it fired, so the child
-   // was killed on the deadline: this run has no verdict, and is not a start failure
-   // either. The window between Wait returning and Stop is the same one ctx.Err() left, so
-   // a child that finished exactly on the deadline is still reported as no-verdict.
-   if kill != nil && !kill.Stop() {
-      return &procOut{stdout: so.Bytes(), rc: -1}
-   }
-
-   p := &procOut{stdout: so.Bytes(), rc: -1}
-   switch e := runErr.(type) {
-   case nil:
-      p.rc = 0
-   case *exec.ExitError:
-      p.rc = e.ExitCode()
-   default:
-      p.err = runErr
-   }
-   return p
+   return &procOut{stdout: so.Bytes(), ended: endedRow(so.Bytes())}
 }
 
 // child.go end
