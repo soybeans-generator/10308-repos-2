@@ -117,22 +117,19 @@ func (m Message) Encode() ([]byte, error) {
    return out, nil
 }
 
-// First returns the first occurrence of the given field number. The pointer is
-// nil and ok is false if the field does not occur.
 func (m Message) First(field int) (*Value, bool) {
    for _, v := range m {
-      if v.Field == field {
+      if v != nil && v.Field == field {
          return v, true
       }
    }
    return nil, false
 }
 
-// Values returns every occurrence of the given field number, in wire order.
 func (m Message) Values(field int) []*Value {
    var out []*Value
    for _, v := range m {
-      if v.Field == field {
+      if v != nil && v.Field == field {
          out = append(out, v)
       }
    }
