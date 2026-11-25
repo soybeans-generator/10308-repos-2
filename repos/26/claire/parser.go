@@ -1,4 +1,4 @@
-// parser.go marker preserve
+// parser.go KEEP THIS LINE
 package claire
 
 import (
@@ -160,4 +160,4 @@ func (p *PackageDoc) Render(outputPath string) error {
    return packageTemplate.Execute(file, p)
 }
 
-// parser.go marker preserve
+// parser.go KEEP THIS LINE
