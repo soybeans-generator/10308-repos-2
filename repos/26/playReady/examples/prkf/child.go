@@ -123,20 +123,11 @@ func childMode() (ok bool, err error) {
 // which the parent already reports as a missing end row.
 func emit(r childRow) { _ = childEnc.Encode(r) }
 
-// endedRow reports whether the last non-blank line of stdout is a k=end row. It parses one
-// line and not the stream, because readRows belongs to the callers that want the rows. A
-// child killed mid-write leaves a truncated final line, which is not an end row: correct.
-func endedRow(stdout []byte) bool {
-   lines := bytes.Split(stdout, []byte("\n"))
-   for i := len(lines) - 1; i >= 0; i-- {
-      ln := bytes.TrimSpace(lines[i])
-      if len(ln) == 0 {
-         continue
-      }
-      var r childRow
-      return json.Unmarshal(ln, &r) == nil && r.Kind == "end"
-   }
-   return false
+// ended reports whether the child got to its own last statement. It reads the parsed rows and
+// not stdout a second time: readRows has already dropped an unterminated final line, so a child
+// killed mid-write cannot present itself as finished.
+func ended(rows []childRow) bool {
+   return len(rows) > 0 && rows[len(rows)-1].Kind == "end"
 }
 
 // isHex reports whether s decodes as hex bytes.
@@ -175,17 +166,21 @@ type childRow struct {
    Msg  string   `json:"e,omitempty"`
 }
 
-// readRows parses a child's stdout. Blank lines are skipped, and every b and s entry must be
-// hex: every caller decodes those fields without a second look, so a malformed one is a
-// parse failure here rather than a silent "no match" ten steps later.
+// readRows parses a child's stdout. The encoder emits one object per line with no indentation,
+// so the only empty chunk is the terminator itself, and json.Unmarshal absorbs whatever
+// whitespace a line does carry. Every b and s entry must be hex: every caller decodes those
+// fields without a second look, so a malformed one is a parse failure here rather than a silent
+// "no match" ten steps later.
 //
-// A final line that does not parse is dropped, not fatal: it has no trailing newline, so it
-// is a row a killed child was still writing.
+// The last chunk of the split has no newline after it. If it does not parse, it is a row a
+// killed child was still writing, and it is dropped rather than failing the whole stream - and
+// because it is dropped, its absence from the returned rows is how a truncated child is
+// recognised.
 func readRows(stdout []byte) ([]childRow, error) {
    lines := bytes.Split(stdout, []byte("\n"))
    var out []childRow
    for i, ln := range lines {
-      if len(bytes.TrimSpace(ln)) == 0 {
+      if len(ln) == 0 {
          continue
       }
       var r childRow
@@ -228,12 +223,10 @@ type childSpec struct {
 
 // ------------------------------------------------------------ spawn helpers
 
-// procOut is one collected child run. ended is the completion signal: the last row was
-// k=end. err is non-nil only when the process could not be started or the spec could not be
-// encoded.
+// procOut is one collected child run. err is non-nil only when the process could not be started
+// or the spec could not be encoded; whether it finished is answered by ended() over the rows.
 type procOut struct {
    stdout []byte
-   ended  bool
    err    error
 }
 
@@ -242,9 +235,9 @@ type procOut struct {
 // no child re-parses a hand-built string.
 //
 // timeout > 0 bounds the run; -1's probe passes 0, because a deadline there would make a hang
-// indistinguishable from a fault. A child killed on the deadline simply has no end row, so
-// the timer is never consulted. stream, when non-nil, receives each stderr line as it arrives
-// and before Wait, so a child that never exits still leaves its trace.
+// indistinguishable from a fault. A child killed on the deadline simply has no end row, so the
+// timer is never consulted. stream, when non-nil, receives each stderr line as it arrives and
+// before Wait, so a child that never exits still leaves its trace.
 func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *procOut {
    if selfErr != nil {
       return &procOut{err: selfErr}
@@ -295,7 +288,7 @@ func runCollect(spec *childSpec, timeout time.Duration, stream func(string)) *pr
    // discarded: the rows carry the verdicts and the end row carries completion.
    _ = cmd.Wait()
 
-   return &procOut{stdout: so.Bytes(), ended: endedRow(so.Bytes())}
+   return &procOut{stdout: so.Bytes()}
 }
 
 // child.go end
