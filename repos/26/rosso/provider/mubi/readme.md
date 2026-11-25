@@ -19,9 +19,10 @@ adb shell am start -a android.intent.action.VIEW `
 1. mubi.com/memberships
 2. start your membership
 3. email address:
-    * tempmail.best: valid for 1 hour
-    * mail.tm: sorry this isn't a valid email
-    * mailsac.com: sorry this isn't a valid email
+    - 2timemail.com
+    - tempmail.best: valid for 1 hour
+    - mail.tm: sorry this isn't a valid email
+    - mailsac.com: sorry this isn't a valid email
 4. sign up
 5. we've sent a code. please enter it below to continue.
 6. mubi classic
