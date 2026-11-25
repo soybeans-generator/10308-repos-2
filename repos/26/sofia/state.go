@@ -1,4 +1,4 @@
-// state.go marker preserve
+// state.go KEEP THIS LINE
 package sofia
 
 import (
@@ -153,4 +153,4 @@ func StateFromMoov(moovData []byte) (*RemuxState, error) {
    }, nil
 }
 
-// state.go marker preserve
+// state.go KEEP THIS LINE

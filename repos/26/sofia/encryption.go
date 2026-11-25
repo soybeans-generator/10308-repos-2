@@ -1,4 +1,4 @@
-// encryption.go marker preserve
+// encryption.go KEEP THIS LINE
 package sofia
 
 import (
@@ -173,4 +173,4 @@ func (b *TencBox) Encode() []byte {
    return encodeBox(b.Header, body, nil)
 }
 
-// encryption.go marker preserve
+// encryption.go KEEP THIS LINE

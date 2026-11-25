@@ -1,4 +1,4 @@
-// remuxer.go marker preserve
+// remuxer.go KEEP THIS LINE
 package sofia
 
 import (
@@ -429,4 +429,4 @@ func (b *boxReader) Read(p []byte) (int, error) {
    return n, err
 }
 
-// remuxer.go marker preserve
+// remuxer.go KEEP THIS LINE
