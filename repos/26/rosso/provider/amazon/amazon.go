@@ -27,16 +27,16 @@ const hostAmazonAPI = "https://api.amazon.com"
 // model number: HU43K3110FW
 var Devices = []Device{
    {
+      Manufacturer:  "EXPRESS LUCK TECHNOLOGY LIMITED",
+      Model:         "LE-*",
+      SecurityLevel: 3000,
+      DeviceTypeID:  "A3NM0WFSU3DLT5",
+   },
+   {
       Manufacturer:  "Hisense",
       Model:         "HE55A7000EUWTS",
       SecurityLevel: 3000,
       DeviceTypeID:  "A3REWRVYBYPKUM",
-   },
-   {
-      Manufacturer:  "Hisense",
-      Model:         "HU50A6100UW",
-      SecurityLevel: 3000,
-      DeviceTypeID:  "AAJ692ZPT1X85",
    },
    {
       Manufacturer:  "Hisense",
@@ -45,10 +45,16 @@ var Devices = []Device{
       DeviceTypeID:  "A2RGJ95OVLR12U",
    },
    {
-      Manufacturer:  "EXPRESS LUCK TECHNOLOGY LIMITED",
-      Model:         "LE-*",
+      Manufacturer:  "Hisense",
+      Model:         "HU50A6100UW",
       SecurityLevel: 3000,
-      DeviceTypeID:  "A3NM0WFSU3DLT5",
+      DeviceTypeID:  "AAJ692ZPT1X85",
+   },
+   {
+      Manufacturer:  "SQY",
+      Model:         "SMART TV",
+      SecurityLevel: 3000,
+      DeviceTypeID:  "A2RGJ95OVLR12U",
    },
 }
 
