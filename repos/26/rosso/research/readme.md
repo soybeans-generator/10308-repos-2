@@ -10,9 +10,8 @@
 | 2026-03-23 | CA | Crave | 3 |
 | 2026-02-14 | US | Peacock Premium | 2 |
 | 2026-01-11 | US | Disney Plus | 1 |
-| 2025-03-27 | FR | Molotov TV | 3 |
-| 2025-03-25 | CZ | Canal+ | 2 |
-| 2025-01-23 | US | Kanopy | 1 |
+| 2025-03-27 | FR | Molotov TV | 2 |
+| 2025-03-25 | CZ | Canal+ | 1 |
 | 2024-10-24 | UK | ITVX | 8 |
 | 2024-06-16 | US | HBO Max | 7 |
 | 2024-06-07 | BE | RTBF Auvio | 6 |
