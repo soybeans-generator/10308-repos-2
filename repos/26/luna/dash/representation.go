@@ -84,6 +84,13 @@ func (r *Representation) GetSegmentTemplate() *SegmentTemplate {
    return nil
 }
 
+func (r *Representation) GetWidth() int {
+   if r.Width == 0 && r.Parent != nil {
+      return r.Parent.Width
+   }
+   return r.Width
+}
+
 func (r *Representation) ResolveBaseUrl() (*url.URL, error) {
    if r.Parent == nil {
       return resolveRef(nil, r.BaseUrl)
@@ -100,13 +107,13 @@ func (r *Representation) String() string {
    var b strings.Builder
 
    fmt.Fprintln(&b, "mimeType:", r.GetMimeType())
-   fmt.Fprintln(&b, "bandwidth:", r.Bandwidth)
-   if width := r.getWidth(); width != 0 {
+   if width := r.GetWidth(); width != 0 {
       fmt.Fprintln(&b, "width:", width)
    }
    if height := r.GetHeight(); height != 0 {
       fmt.Fprintln(&b, "height:", height)
    }
+   fmt.Fprintln(&b, "bandwidth:", r.Bandwidth)
    if codecs := r.GetCodecs(); codecs != "" {
       fmt.Fprintln(&b, "codecs:", codecs)
    }
@@ -153,13 +160,6 @@ func (r *Representation) getRole() string {
       return ""
    }
    return r.Parent.Role.Value
-}
-
-func (r *Representation) getWidth() int {
-   if r.Width == 0 && r.Parent != nil {
-      return r.Parent.Width
-   }
-   return r.Width
 }
 
 func (r *Representation) link() {
