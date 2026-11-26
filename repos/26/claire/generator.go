@@ -1,4 +1,4 @@
-// generator.go marker preserve
+// generator.go KEEP THIS LINE
 package claire
 
 import (
@@ -189,4 +189,4 @@ type VarDoc struct {
    Definition template.HTML
 }
 
-// generator.go marker preserve
+// generator.go KEEP THIS LINE
