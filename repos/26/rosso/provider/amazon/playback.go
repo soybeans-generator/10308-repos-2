@@ -137,7 +137,7 @@ type PlaybackExperienceMetadata struct {
 }
 
 func (*PlaybackExperienceMetadata) CachePath() string {
-   return "rosso/amazon/PlaybackExperienceMetadata"
+   return "rosso/provider/amazon/PlaybackExperienceMetadata"
 }
 
 // PlaybackResources is the GetVodPlaybackResources response, trimmed to the

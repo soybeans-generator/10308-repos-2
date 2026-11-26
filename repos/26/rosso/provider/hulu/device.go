@@ -103,7 +103,7 @@ func FetchDevice(email, password string) (*Device, error) {
 }
 
 func (*Device) CachePath() string {
-   return "rosso/hulu/Device"
+   return "rosso/provider/hulu/Device"
 }
 
 func (d *Device) DeepLink(id string) (*DeepLink, error) {

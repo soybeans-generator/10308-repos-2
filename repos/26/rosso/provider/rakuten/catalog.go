@@ -72,7 +72,7 @@ func ParseAddress(targetUrl string) (*Address, error) {
 }
 
 func (*Address) CachePath() string {
-   return "rosso/rakuten/Address"
+   return "rosso/provider/rakuten/Address"
 }
 
 func (a *Address) IsMovie() bool {

@@ -166,7 +166,7 @@ type Cookie struct {
 }
 
 func (*Cookie) CachePath() string {
-   return "rosso/paramount/Cookie"
+   return "rosso/provider/paramount/Cookie"
 }
 
 func (c *Cookie) String() string {

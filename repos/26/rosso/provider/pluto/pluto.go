@@ -114,7 +114,7 @@ func FetchSeries(movieShow string) (*Series, error) {
 }
 
 func (*Series) CachePath() string {
-   return "rosso/pluto/Series"
+   return "rosso/provider/pluto/Series"
 }
 
 func (s *Series) GetEpisodeUrl(episodeId string) (string, error) {

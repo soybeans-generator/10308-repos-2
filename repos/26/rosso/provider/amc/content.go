@@ -162,7 +162,7 @@ func GetPlayback(authToken string, videoId int) (*Playback, error) {
 }
 
 func (*Playback) CachePath() string {
-   return "rosso/amc/Playback"
+   return "rosso/provider/amc/Playback"
 }
 
 func (p *Playback) GetDash() (*Source, error) {
@@ -182,7 +182,7 @@ type Source struct {
 }
 
 func (*Source) CachePath() string {
-   return "rosso/amc/Source"
+   return "rosso/provider/amc/Source"
 }
 
 // content.go KEEP THIS LINE

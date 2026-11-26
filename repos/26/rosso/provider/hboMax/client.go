@@ -183,7 +183,7 @@ type Cookie struct {
 }
 
 func (*Cookie) CachePath() string {
-   return "rosso/hboMax/Cookie"
+   return "rosso/provider/hboMax/Cookie"
 }
 
 func (c *Cookie) String() string {
@@ -191,7 +191,7 @@ func (c *Cookie) String() string {
 }
 
 func (*Playback) CachePath() string {
-   return "rosso/hboMax/Playback"
+   return "rosso/provider/hboMax/Playback"
 }
 
 // GetManifest returns the MPD location with the "_fallback" marker removed.

@@ -284,7 +284,7 @@ func LoginRequest(st *Cookie) (*Login, error) {
 }
 
 func (*Login) CachePath() string {
-   return "rosso/hboMax/Login"
+   return "rosso/provider/hboMax/Login"
 }
 
 type Playback struct {

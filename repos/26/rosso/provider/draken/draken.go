@@ -171,6 +171,10 @@ func FetchLogin(identity, accessKey string) (*Login, error) {
    return &result, nil
 }
 
+func (*Login) CachePath() string {
+   return "rosso/provider/draken/Login"
+}
+
 type Playback struct {
    Headers struct {
       MaginePlayEntitlementId string `json:"Magine-Play-EntitlementId"`
@@ -205,6 +209,10 @@ func FetchPlayback(loginToken, playableId, entitlementId string) (*Playback, err
       return nil, err
    }
    return result, nil
+}
+
+func (*Playback) CachePath() string {
+   return "rosso/provider/draken/Playback"
 }
 
 func (p *Playback) FetchWidevine(loginToken string, body []byte) ([]byte, error) {

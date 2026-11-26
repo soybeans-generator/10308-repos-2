@@ -120,7 +120,7 @@ func RequestDeviceCode() (*DeviceCode, error) {
 // CachePath reports where the pending device code is cached between the two
 // login steps. Same idea as Token and File: one fixed path, no per-value keying.
 func (*DeviceCode) CachePath() string {
-   return "rosso/criterion/DeviceCode"
+   return "rosso/provider/criterion/DeviceCode"
 }
 
 // TokenSet is the body of POST /oauth/token. On a non-200 answer the OAuth
@@ -228,7 +228,7 @@ func postToken(form url.Values) (*TokenSet, error) {
 // CachePath reports where the token set is cached. Unchanged from the
 // password-grant implementation so existing caches still resolve.
 func (*TokenSet) CachePath() string {
-   return "rosso/criterion/Token"
+   return "rosso/provider/criterion/Token"
 }
 
 // Expiry is when AccessToken stops being valid, measured from the moment this

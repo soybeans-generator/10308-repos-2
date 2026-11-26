@@ -76,7 +76,7 @@ func GetAsset(assetID string, signinResp *SigninResponse) (*AssetResponse, error
 }
 
 func (*AssetResponse) CachePath() string {
-   return "rosso/molotov/AssetResponse"
+   return "rosso/provider/molotov/AssetResponse"
 }
 
 // GetLicense requests the DRM license. As a method on *AssetResponse,
@@ -242,7 +242,7 @@ func Signin(username, password string) (*SigninResponse, error) {
 }
 
 func (*SigninResponse) CachePath() string {
-   return "rosso/molotov/SigninResponse"
+   return "rosso/provider/molotov/SigninResponse"
 }
 
 // Refresh uses the Fubo API endpoint to obtain a new access and refresh token,

@@ -126,7 +126,7 @@ type Media struct {
 }
 
 func (*Media) CachePath() string {
-   return "rosso/plex/Media"
+   return "rosso/provider/plex/Media"
 }
 
 func (m *Media) GetManifest(userData *User) string {
@@ -182,7 +182,7 @@ func CreateUser() (*User, error) {
 }
 
 func (*User) CachePath() string {
-   return "rosso/plex/User"
+   return "rosso/provider/plex/User"
 }
 
 type VodMetadata struct {

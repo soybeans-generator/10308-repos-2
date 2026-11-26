@@ -45,7 +45,7 @@ type Session struct {
 
 // CachePath reports where the session is cached.
 func (*Session) CachePath() string {
-   return "rosso/criterion/Session"
+   return "rosso/provider/criterion/Session"
 }
 
 // FetchPlayback returns the signed playback entries for one media id.
@@ -101,7 +101,7 @@ type Source struct {
 
 // CachePath reports where the picked source is cached.
 func (*Source) CachePath() string {
-   return "rosso/criterion/Source"
+   return "rosso/provider/criterion/Source"
 }
 
 // FetchWidevine posts a Widevine challenge to the licence URL from playback and

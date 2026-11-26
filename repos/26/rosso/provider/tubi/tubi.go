@@ -88,7 +88,7 @@ type LicenseServer struct {
 }
 
 func (*LicenseServer) CachePath() string {
-   return "rosso/tubi/LicenseServer"
+   return "rosso/provider/tubi/LicenseServer"
 }
 
 type Manifest struct {

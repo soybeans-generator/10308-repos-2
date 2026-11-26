@@ -148,7 +148,7 @@ func FetchStart(marketCode string) (*Start, error) {
 }
 
 func (*Start) CachePath() string {
-   return "rosso/rakuten/Start"
+   return "rosso/provider/rakuten/Start"
 }
 
 type StartRequest struct {
@@ -234,7 +234,7 @@ func fetchStreaming(contentId string, contentType string, userClassification Cla
 }
 
 func (*StreamInfo) CachePath() string {
-   return "rosso/rakuten/StreamInfo"
+   return "rosso/provider/rakuten/StreamInfo"
 }
 
 func (s *StreamInfo) FetchLicense(challenge []byte) ([]byte, error) {

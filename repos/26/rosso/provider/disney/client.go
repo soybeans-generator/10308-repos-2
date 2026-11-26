@@ -120,7 +120,7 @@ type Token struct {
 }
 
 func (*Token) CachePath() string {
-   return "rosso/disney/Token"
+   return "rosso/provider/disney/Token"
 }
 
 // request: Account

@@ -67,7 +67,7 @@ type Playlist struct {
 }
 
 func (*Playlist) CachePath() string {
-   return "rosso/hulu/Playlist"
+   return "rosso/provider/hulu/Playlist"
 }
 
 func (p *Playlist) FetchPlayReady(body []byte) ([]byte, error) {

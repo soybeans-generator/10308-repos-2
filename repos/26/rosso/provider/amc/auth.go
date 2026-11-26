@@ -136,7 +136,7 @@ func Unauth() (*AuthData, error) {
 }
 
 func (*AuthData) CachePath() string {
-   return "rosso/amc/AuthData"
+   return "rosso/provider/amc/AuthData"
 }
 
 func (a *AuthData) Refresh() error {

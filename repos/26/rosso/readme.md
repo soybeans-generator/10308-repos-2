@@ -11,30 +11,32 @@ streaming API authentication, metadata, and DRM playback
 
 | Titles | Country | Provider |
 |---|---|---|
-| 7627 | US | [Tubi TV] |
-| 5417 | US | [Plex] |
-| 5346 | UK | [Rakuten TV] |
-| 4996 | US | [Amazon Prime Video] |
-| 3686 | US | [The Roku Channel] |
-| 2180 | CA | [Crave] |
-| 1846 | US | [Pluto TV] |
-| 1348 | US | [HBO Max] |
-| 1331 | FR | [Molotov TV] |
+| 7629 | US | [Tubi TV] |
+| 5413 | US | [Plex] |
+| 5349 | UK | [Rakuten TV] |
+| 5010 | US | [Amazon Prime Video] |
+| 3687 | US | [The Roku Channel] |
+| 2177 | CA | [Crave] |
+| 1845 | US | [Pluto TV] |
+| 1349 | US | [HBO Max] |
+| 1272 | FR | [Molotov TV] |
 | 1131 | US | [Criterion Channel] |
-| 1121 | AU | [Stan] |
-| 944 | US | [Hulu] |
+| 1118 | AU | [Stan] |
+| 941 | US | [Hulu] |
+| 876 | SE | [Draken Film] |
 | 852 | US | [AMC+] |
-| 814 | NL | [CineMember] |
-| 679 | US | [Paramount Plus Premium] |
+| 818 | NL | [CineMember] |
+| 678 | US | [Paramount Plus Premium] |
 | 599 | US | [Disney Plus] |
-| 506 | US | [Peacock Premium] |
+| 504 | US | [Peacock Premium] |
 | 392 | BR | [Oldflix] |
-| 391 | UK | [ITVX] |
+| 390 | UK | [ITVX] |
 | 389 | CZ | [Canal+] |
 | 312 | US | [MUBI] |
 | 307 | BE | [RTBF Auvio] |
 | 10 | US | [NBC] |
 
+[Draken Film]:https://justwatch.com/se/leverantör/draken-film?tomatoMeter=50
 [Stan]:https://justwatch.com/au/provider/stan?tomatoMeter=50
 [Plex]:https://justwatch.com/us/provider/plex?tomatoMeter=50
 [Amazon Prime Video]:https://justwatch.com/us/provider/amazon-prime-video?tomatoMeter=50

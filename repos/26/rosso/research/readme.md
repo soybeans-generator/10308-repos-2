@@ -2,6 +2,7 @@
 
 | Date | Country | Provider | Count |
 |---|---|---|---|
+| 2026-11-26 | SE | Draken Film | 9 |
 | 2026-08-29 | AU | Stan | 8 |
 | 2026-08-16 | US | Plex | 7 |
 | 2026-06-28 | US | Amazon Prime Video | 6 |

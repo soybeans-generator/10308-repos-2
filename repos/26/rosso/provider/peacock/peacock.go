@@ -196,7 +196,7 @@ func OAuthAuthorize(cookie *http.Cookie) (*OAuthAuthorizeResponse, error) {
 }
 
 func (*OAuthAuthorizeResponse) CachePath() string {
-   return "rosso/peacock/oauth_authorize"
+   return "rosso/provider/peacock/oauth_authorize"
 }
 
 // SignInParams holds the credentials for the sign-in request.
@@ -268,7 +268,7 @@ func SignIn(params *SignInParams) (*SignInResponse, *http.Cookie, error) {
 }
 
 func (*SignInResponse) CachePath() string {
-   return "rosso/peacock/SignInResponse"
+   return "rosso/provider/peacock/SignInResponse"
 }
 
 // licenseErrorResponse is the error body returned by the licence
@@ -301,7 +301,7 @@ type tokenRequest struct {
 }
 
 func (*TokenResponse) CachePath() string {
-   return "rosso/peacock/TokenResponse"
+   return "rosso/provider/peacock/TokenResponse"
 }
 
 // Error implements the error interface. It returns a non-empty
@@ -318,7 +318,7 @@ func (t *TokenResponse) Error() string {
 }
 
 func (*PlayoutVodResponse) CachePath() string {
-   return "rosso/peacock/PlayoutVodResponse"
+   return "rosso/provider/peacock/PlayoutVodResponse"
 }
 
 // Fastly returns the FASTLY CDN endpoint URL from the playout response.

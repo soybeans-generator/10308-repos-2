@@ -225,7 +225,7 @@ func ParseMedia(rawUrl string) (*Media, error) {
 }
 
 func (*Media) CachePath() string {
-   return "rosso/crave/Media"
+   return "rosso/provider/crave/Media"
 }
 
 type Playback struct {
@@ -263,5 +263,5 @@ func GetPlayback(token *ProfileToken, activeMedia *Media) (*Playback, error) {
 }
 
 func (*Playback) CachePath() string {
-   return "rosso/crave/Playback"
+   return "rosso/provider/crave/Playback"
 }
