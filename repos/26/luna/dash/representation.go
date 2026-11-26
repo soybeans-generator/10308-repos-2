@@ -99,6 +99,7 @@ func (r *Representation) ResolveBaseUrl() (*url.URL, error) {
 func (r *Representation) String() string {
    var b strings.Builder
 
+   fmt.Fprintln(&b, "mimeType:", r.GetMimeType())
    fmt.Fprintln(&b, "bandwidth:", r.Bandwidth)
    if width := r.getWidth(); width != 0 {
       fmt.Fprintln(&b, "width:", width)
@@ -109,7 +110,6 @@ func (r *Representation) String() string {
    if codecs := r.GetCodecs(); codecs != "" {
       fmt.Fprintln(&b, "codecs:", codecs)
    }
-   fmt.Fprintln(&b, "mimeType:", r.GetMimeType())
    if label := r.getLabel(); label != "" {
       fmt.Fprintln(&b, "label:", label)
    } else if lang := r.getLang(); lang != "" {
