@@ -1,4 +1,4 @@
-// movie.go marker preserve
+// movie.go KEEP THIS LINE
 package sofia
 
 import (
@@ -191,4 +191,4 @@ func (b *MvhdBox) SetDuration(duration uint64) {
    }
 }
 
-// movie.go marker preserve
+// movie.go KEEP THIS LINE

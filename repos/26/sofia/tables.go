@@ -1,4 +1,4 @@
-// tables.go marker preserve
+// tables.go KEEP THIS LINE
 package sofia
 
 import (
@@ -460,4 +460,4 @@ type SttsEntry struct {
    SampleDuration uint32
 }
 
-// tables.go marker preserve
+// tables.go KEEP THIS LINE
