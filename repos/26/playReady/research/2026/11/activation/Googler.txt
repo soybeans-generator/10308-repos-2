@@ -3,3 +3,27 @@ Googler
 if you want to implement it, first call is to get devices hwid (can skip this),
 2nd is to generate the primary payload for activation req (requires hwid), 3rd
 is to decrypt activation response. you have to make the activation call yourself 
+
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <Activate xmlns="http://schemas.microsoft.com/PlayReady/ActivationService/v1">
+      <challenge>
+        <clientSdkVersion>4.6.0.0</clientSdkVersion>
+        <clientSdkType>2</clientSdkType>
+        <platform>9</platform>
+        <tid>1</tid>
+        <payload>
+          <primaryPayload>base64.b64encode(payload).decode()</primaryPayload>
+        </payload>
+      </challenge>
+    </Activate>
+  </soap:Body>
+</soap:Envelope>
+
+the payload the function returns is bytes that needs to be turned to base64
+then wrapped in the xml data
+
+and then you need to parse the xml data from the response and grab the
+primaryPayload and base64 decode it then give it to the final function with the
+seed
