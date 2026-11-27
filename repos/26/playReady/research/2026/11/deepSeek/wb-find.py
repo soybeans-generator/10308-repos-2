@@ -8,14 +8,12 @@
   python wb-find.py decrypt                       -> testdata/msprcore.bla
 
 Four files, same directory: this one is the CLI and the one HTTP call, wbprobe.py
-runs probe children and holds both caches, wbimage.py reads the PE and builds the
-decrypted image, warbird.py makes the syscalls.
+runs probe children and the staged sweep, wbimage.py reads the PE, builds the
+decrypted image and the candidate filter, warbird.py makes the syscalls.
 
-discover must run first. It finds the payload routine where the constant 2252
-survives in decrypted code; if that block writes no payload the constant is in a
-callee, so its neighbours are tried, and failing those the anchor is recorded
-unconfirmed and the POST decides. A refusal (E_INVALIDARG in status, NTSTATUS 0) is
-a live process answering, not a fault.
+hwid sweeps with Go's probe block and accepts a descriptor whose output does not
+depend on the key, because a HWID is not keyed. dead.json is honoured, so a rerun
+resumes instead of repeating its faults.
 """
 import base64
 import json
@@ -102,8 +100,10 @@ def discover():
         good = [x["desc"] for x in near if nrows.get(x["desc"], {}).get("ok")]
 
     if len(good) > 1:
-        wb.die("%d payload descriptors wrote a payload%s - set OFFSETS by hand"
-               % (len(good), "".join(" %#x" % d for d in good)))
+        good.sort(key=lambda d: abs(d - cands[0]["desc"]))
+        print("[!] %d descriptors wrote a payload%s - keeping the one nearest the\n"
+              "    constant's block; OFFSETS can pin another."
+              % (len(good), "".join(" %#x" % d for d in good)))
     pick = good[0] if good else cands[0]["desc"]
     c = pr.load_cache()
     c["payload"] = pick
@@ -118,29 +118,37 @@ def discover():
 
 
 def hwid():
+    rows = {}
     d = pr.OFFSETS.get("hwid") or pr.load_cache().get("hwid") or 0
     if not d:
-        g = pr.outward(pr.anchor())
-        print("[*] searching %d descriptors around the payload anchor" % len(g))
-        rows, _ = pr.probe("hwid", g, stop=lambda r: r.get("stable") and r.get("nz")
-                           and 1 <= r.get("n", 0) <= 512)
-        hit = [x["desc"] for x in g if pr.ok(rows.get(x["desc"]))
-               and rows[x["desc"]].get("stable") and rows[x["desc"]]["nz"]
-               and 1 <= rows[x["desc"]]["n"] <= 512]
+        print("[*] walking outward from anchor %#x  %d workers  %d candidates"
+              % (pr.anchor(), pr.WORKERS, len(im.heap_routines())))
+        hit, rows = pr.sweep("hwid", lambda r: r.get("stable") and r.get("nz"))
         if not hit:
-            wb.die("no get-HWID within %d of the payload anchor - write %s by hand"
-                   " and skip this stage (the service does not validate it)"
-                   % (pr.RADIUS, HWID))
-        d = hit[0]
+            wb.die("no descriptor returned a key-independent non-zero blob under\n"
+                   "  Go's probe block. get-HWID is not a heap-exec descriptor on\n"
+                   "  this build, or it writes its length through +0x1C and dies\n"
+                   "  under that block. Skip it - the Activation service does not\n"
+                   "  validate the HWID:\n"
+                   "  python -c \"open('testdata/hwid.bin','wb').write("
+                   "b'FAKE.PR.ID'+b'\\0'*22)\"")
+        d = hit["desc"]
         c = pr.load_cache()
         c["hwid"] = d
         pr.save_cache(c)
-        print("[+] get-HWID desc=%#x" % d)
-    nt, st, data, n = wb.call_hwid(wb.base(), d)
-    if nt or st or not 1 <= n <= 512:
-        wb.die("get-HWID nt=%#x status=%#x len=%d" % (nt, st, n))
+        print("[+] get-HWID desc=%#x  n=%d" % (d, rows[d]["n"]))
+
+    data = bytes.fromhex(rows.get(d, {}).get("h", ""))
+    if not data:
+        one = [x for x in im.heap_routines() if x["desc"] == d]
+        if not one:
+            wb.die("hwid desc=%#x is not a heap routine for this build" % d)
+        rr, _ = pr.probe("hwid", one)
+        data = bytes.fromhex(rr.get(d, {}).get("h", ""))
+    if len(data) < 8:
+        wb.die("get-HWID desc=%#x gave %d bytes" % (d, len(data)))
     pr.wr(HWID, data)
-    print("[+] hwid    %d bytes  %s" % (n, data[:16].hex()))
+    print("[+] hwid    %d bytes  %s" % (len(data), data[:16].hex()))
 
 
 def payload():
@@ -176,15 +184,11 @@ def decrypt():
         req = f.read()
     pr.need(RESP, "activate")
     seed = req[-16:]
-    g = pr.outward(pr.anchor())
-    print("[*] searching %d descriptors around the payload anchor" % len(g))
-    rows, _ = pr.probe("decrypt", g, stop=lambda r: r.get("prkf"), dump=True,
-                       resp=os.path.abspath(RESP), seed=seed.hex())
-    hit = [x["desc"] for x in g if pr.ok(rows.get(x["desc"]))
-           and rows[x["desc"]].get("prkf")]
+    hit, rows = pr.sweep("decrypt", lambda r: r.get("prkf"), dump=True,
+                         resp=os.path.abspath(RESP), seed=seed.hex())
     if not hit:
-        wb.die("no decrypt routine within %d of the payload anchor" % pr.RADIUS)
-    d = hit[0]
+        wb.die("no decrypt routine in the heap descriptor list")
+    d = hit["desc"]
     data = bytes.fromhex(rows[d]["full"])
     k = data.find(b"PRKF")
     pr.wr(BLA, data[k:])
@@ -192,6 +196,8 @@ def decrypt():
     c = pr.load_cache()
     c["decrypt"] = [d]
     pr.save_cache(c)
+    print('\nOFFSETS = {"hwid": %#x, "payload": %#x, "decrypt": [%#x]}'
+          % (c.get("hwid", 0), c.get("payload", 0), d))
 
 
 MODES = {"discover": discover, "hwid": hwid, "payload": payload,
