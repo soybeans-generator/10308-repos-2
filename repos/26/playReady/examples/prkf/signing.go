@@ -1,20 +1,15 @@
 // signing.go begin
 //go:build windows
 
-// prkf -1 and -5: find the signing-key routine's descriptor, then decrypt the signing key
-// with it. One file, because -1 writes prsubs.json and -5 reads it, both call the same ABI
-// in kernel.go, and both name the same DLL.
-//
-// -1 re-executes this binary once per CHUNK of candidates and reads the row each descriptor
-// produced. Discovery rests entirely on properties of the routine itself:
+// prkf -1: find the signing-key routine's descriptor. Discovery rests entirely on properties
+// of the routine itself:
 //
 //  1. accepts exactly 0x20 bytes and succeeds (cmp dword ptr [rcx+10h], 20h)
 //  2. writes its output buffer; 3. different input -> different output
 //  4. REJECTS a size other than 0x20
 //
 // Property 4 is the discriminating one - it collapses the descriptors that merely return
-// success. Verification against a real key is -5's job. Zero accepted descriptors, or more
-// than one, is an error to investigate.
+// success. Zero accepted descriptors, or more than one, is an error to investigate.
 //
 // Chunks of 64, sequentially: a child pays LoadLibrary before its first call, so one child
 // per descriptor spent 981 module loads on 981 probes. A chunk that dies takes its remaining
@@ -23,14 +18,12 @@
 // its last trace line as the final record - there is no deadline, because a timeout would
 // make a hang invisible.
 //
-// Only ONE value differs between DLL builds: the descriptor RVA in prsubsPath, keyed by the
-// DLL sha256, and -5 refuses a cache that does not match.
+// Only ONE value in prsubsPath matters: the descriptor RVA, keyed by the DLL sha256.
 package main
 
 import (
    "bytes"
    "cmp"
-   "crypto/ecdh"
    "crypto/rand"
    "encoding/hex"
    "encoding/json"
@@ -47,45 +40,6 @@ const probeChunk = 64
 
 // childT0 captures the process start, so every trace line can carry a millisecond offset.
 var childT0 = time.Now()
-
-// ------------------------------------------------------------ -5: decrypt
-
-func cmdDecrypt() error {
-   if !isFile(sigPrvPath) {
-      return fmt.Errorf("missing input: %s\n  run prkf -4 first", sigPrvPath)
-   }
-   if !isFile(sigPubPath) {
-      return fmt.Errorf("missing public key: %s\n  run prkf -4 first", sigPubPath)
-   }
-
-   got, err := decryptSigningKey(sigPrvPath)
-   if err != nil {
-      return err
-   }
-   fmt.Printf("%s (%d bytes)\n", sigPrvPath, len(got))
-   fmt.Printf("plaintext %s\n", hex.EncodeToString(got))
-
-   raw, err := os.ReadFile(sigPubPath)
-   if err != nil {
-      return err
-   }
-   // An out-of-range d makes pubFor return nil, which pubMatches reports as a mismatch.
-   if !pubMatches(got, raw) {
-      return fmt.Errorf("d*G != %s - the plaintext is not the private key for\n"+
-         "that public key; the descriptor, the argument layout or the\n"+
-         "input file is wrong; nothing was written", sigPubPath)
-   }
-   want := pubBytes(raw)
-   fmt.Printf("[ OK ] d*G == %s\n", sigPubPath)
-   fmt.Printf("       Q = (%s,\n            %s)\n",
-      hex.EncodeToString(want[1:33]), hex.EncodeToString(want[33:65]))
-
-   if err := os.WriteFile(sigPlainPath, got, 0o666); err != nil {
-      return err
-   }
-   fmt.Printf("\nwrote %s (%d bytes)\n", sigPlainPath, len(got))
-   return nil
-}
 
 // cmdFindSub is the entry point for prkf -1.
 func cmdFindSub() error {
@@ -265,98 +219,6 @@ func cmdFindSub() error {
    return nil
 }
 
-// ---- the kernel call -----------------------------------------------------
-
-// decryptSigningKey decrypts a 32-byte obfuscated PlayReady signing key and returns the
-// 32-byte plaintext. Nothing is written; cmdDecrypt writes after validating.
-func decryptSigningKey(prvPath string) ([]byte, error) {
-   rec, err := loadPrsubs()
-   if err != nil {
-      return nil, err
-   }
-
-   // The module has to be mapped in this process before the call: rec.DescVA is an RVA
-   // relative to its image base, not a file offset.
-   base, err := loadWarbird()
-   if err != nil {
-      return nil, err
-   }
-
-   enc, err := os.ReadFile(prvPath)
-   if err != nil {
-      return nil, err
-   }
-   if len(enc) != keyLen {
-      return nil, fmt.Errorf("%s: expected %d bytes, got %d", prvPath, keyLen, len(enc))
-   }
-
-   // A random fill proves the routine wrote to the output buffer; a fixed sentinel could
-   // collide with real key material.
-   var fill [keyLen]byte
-   if _, err := rand.Read(fill[:]); err != nil {
-      return nil, err
-   }
-   keyBuf := slices.Clone(enc) // the routine gets its own copy
-   var status [0x10]byte       // zero-filled
-   out := slices.Clone(fill[:])
-
-   st := op3Call(base)(rec.DescVA, 0x34, keyLen, status[:], keyBuf, out, nil)
-
-   if st != 0 {
-      msg := fmt.Sprintf("NtQuerySystemInformation -> %#010x", st)
-      if st == 0xC0000095 {
-         msg += " (INTEGER_OVERFLOW: desc_va is wrong for this build)"
-      }
-      return nil, errors.New(msg)
-   }
-   if !statusOK(status[:]) {
-      return nil, fmt.Errorf("routine returned %s - the argument layout no "+
-         "longer matches this build; re-run prkf -1", hex.EncodeToString(status[:4]))
-   }
-   if bytes.Equal(out, fill[:]) {
-      return nil, errors.New("output buffer untouched - out_off is wrong")
-   }
-   if bytes.Equal(out, enc) {
-      return nil, errors.New("output equals input - desc_va is the wrong routine")
-   }
-   return out, nil
-}
-
-func isFile(p string) bool {
-   fi, err := os.Stat(p)
-   return err == nil && fi.Mode().IsRegular()
-}
-
-// pubBytes normalizes a stored public key to the 65-byte SEC 1 form. nil means the point is
-// off the curve or at infinity. slices.Concat allocates unconditionally, so raw is only ever
-// read - cmdDecrypt calls this twice on one buffer.
-func pubBytes(raw []byte) []byte {
-   if len(raw) == 64 {
-      raw = slices.Concat([]byte{4}, raw)
-   }
-   k, err := ecdh.P256().NewPublicKey(raw)
-   if err != nil {
-      return nil
-   }
-   return k.Bytes()
-}
-
-// pubFor returns d*G as 0x04||X||Y, or nil when d is not a valid P-256 scalar.
-func pubFor(d []byte) []byte {
-   priv, err := ecdh.P256().NewPrivateKey(d)
-   if err != nil {
-      return nil
-   }
-   return priv.PublicKey().Bytes()
-}
-
-// pubMatches reports whether d*G is the public key in raw, in either form. The nils are
-// checked first: bytes.Equal treats two empty slices as equal.
-func pubMatches(d, raw []byte) bool {
-   got, want := pubFor(d), pubBytes(raw)
-   return got != nil && want != nil && bytes.Equal(got, want)
-}
-
 // runOne probes one descriptor and emits its verdict row. A probe that cannot be set up still
 // emits a row, because the parent would otherwise retry this descriptor forever.
 func runOne(op3 op3Func, descVA uint32) {
@@ -531,48 +393,6 @@ func probe(op3 op3Func, descVA uint32, tag string, data []byte, size uint32) (*p
       wrote: r1 == 0 && statusOK(status[:]) &&
          !bytes.Equal(out, fill[:]) && !bytes.Equal(out, keyBuf[:]),
    }, nil
-}
-
-// ---------------------------------------------------------------- the cache
-
-// subRecord is prsubs.json: the one build-specific value the pipeline caches, plus the
-// descriptor it came from. -5's validation is the SHA256 comparison.
-type subRecord struct {
-   SHA256  string `json:"sha256"`
-   DescVA  uint32 `json:"desc_va"`
-   CodeRVA uint32 `json:"code_rva"`
-   SegLen  uint32 `json:"seg_len"`
-}
-
-// loadPrsubs loads and validates the build-specific descriptor RVA.
-func loadPrsubs() (*subRecord, error) {
-   _, sha, err := pfDLL()
-   if err != nil {
-      return nil, err
-   }
-
-   if !isFile(prsubsPath) {
-      return nil, fmt.Errorf("no %s - run prkf -1 first", prsubsPath)
-   }
-   raw, err := os.ReadFile(prsubsPath)
-   if err != nil {
-      return nil, err
-   }
-   var rec subRecord
-   if err := json.Unmarshal(raw, &rec); err != nil {
-      return nil, fmt.Errorf("%s: %v", prsubsPath, err)
-   }
-
-   if rec.SHA256 != sha {
-      return nil, fmt.Errorf("%s was built for a different DLL\n"+
-         "  cache : %s\n"+
-         "  actual: %s\n"+
-         "  re-run prkf -1", prsubsPath, rec.SHA256, sha)
-   }
-   if rec.DescVA == 0 {
-      return nil, fmt.Errorf("%s has no desc_va - re-run prkf -1", prsubsPath)
-   }
-   return &rec, nil
 }
 
 // signing.go end

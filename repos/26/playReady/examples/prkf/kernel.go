@@ -1,10 +1,10 @@
 // kernel.go begin
 //go:build windows
 
-// The Warbird kernel interface and the build profile.
+// The Warbird kernel interface.
 //
 // op=1 (segment decrypt) is -2's and lives in warbird.go. op=3 (WbHeapExecuteCall) is op3Call,
-// used by -1, -3 and -6.
+// used by -1, -3 and -4.
 //
 // REJECTION IS IN THE STATUS DWORD, NOT NTSTATUS: the routine writes 0x80070057
 // (E_INVALIDARG) to the status pointer and returns normally, so NtQuerySystemInformation still
@@ -13,11 +13,9 @@
 // A FAULT IN A DESCRIPTOR'S CODE IS A WINDOWS SEH EXCEPTION, not a Go panic: recover() never
 // runs. wbVEH turns it into a fault row.
 //
-// THE PROFILE is everything derived from one DLL build, keyed by its SHA-256: -1..-3 fill it
-// in, -4..-6 read it. Never keyed by the image: LoadLibraryW bakes the load base into IAT slots
-// and relocated fields, so two decrypted images of one DLL never hash alike. Map and Stages are
-// keyed by routine family via vkey. The format is NOT versioned - after changing its shape,
-// re-run -1 through -3.
+// THE TYPES THE FILES ON DISK HAVE - dllProfile, profileCensus, profileMap, profileStages -
+// LIVE IN profile.go, because -5..-7 read them on every platform. This file only holds what
+// needs Windows.
 package main
 
 import (
@@ -28,15 +26,15 @@ import (
    "fmt"
    "os"
    "runtime"
-   "strconv"
    "strings"
    "syscall"
    "unsafe"
 )
 
-// keyLen is 32: the P-256 scalar length, the size -5's routine accepts, and the size it tests
-// for itself with `cmp dword ptr [rcx+10h], 20h`.
-const keyLen = 0x20
+// dllPath is the PlayReady module. It stays outside outDir: a descriptor is an RVA into the
+// mapped image, so the bytes hashed and the image the Warbird gate executes must be the same
+// module.
+const dllPath = `C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll`
 
 var (
    wbKernel32 = syscall.NewLazyDLL("kernel32.dll")
@@ -45,9 +43,11 @@ var (
    // K32GetMappedFileNameW, not GetMappedFileNameW: the unprefixed name lives in psapi.dll,
    // and a LazyProc built for it on kernel32 panics on first Call - which here is inside the
    // VEH callback, turning a reported fault into a silent death.
-   wbMappedName = wbKernel32.NewProc("K32GetMappedFileNameW")
-   wbAddVEH     = wbKernel32.NewProc("AddVectoredExceptionHandler")
-   wbNtQuery    = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
+   wbMappedName   = wbKernel32.NewProc("K32GetMappedFileNameW")
+   wbAddVEH       = wbKernel32.NewProc("AddVectoredExceptionHandler")
+   wbVirtualQuery = wbKernel32.NewProc("VirtualQuery")
+   wbReadProc     = wbKernel32.NewProc("ReadProcessMemory")
+   wbNtQuery      = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQuerySystemInformation")
 )
 
 // loadWarbird maps the PlayReady module into this process and resolves the call gate, returning
@@ -86,58 +86,10 @@ func pfSave(p *dllProfile) error {
    return os.WriteFile(profilePath, append(blob, '\n'), 0o644)
 }
 
-// pfValidate is the check the BLA-phase steps cannot start without: the profile must belong to
-// this build and must already hold a usable map.
-//
-// A 16-element map whose entries are distinct values in 0..15 is a permutation, and stage 4
-// indexes a table with it, so a repeated value would panic inside a child instead of failing
-// here. A short array cannot slip through: Go zero-fills the tail and the duplicate check
-// catches it.
-//
-// The family range comes from len(dmFams) and not from a literal, so a valid profile is not
-// rejected as "not a family index" the day a family is added.
-func pfValidate(p *dllProfile, sha string) error {
-   if p.DLLSHA256 != sha {
-      return fmt.Errorf("%s was built for a different DLL\n"+
-         "  profile: %s\n  actual : %s\n"+
-         "  the DLL changed, so every cached result is void: re-run -1 through -3",
-         profilePath, p.DLLSHA256, sha)
-   }
-   if len(p.Map) == 0 {
-      return fmt.Errorf("%s has no map section - run prkf -3", profilePath)
-   }
-   for k, pm := range p.Map {
-      v, err := strconv.Atoi(k)
-      if err != nil || v < 0 || v >= len(dmFams) {
-         return fmt.Errorf("%s: map key %q is not a family index", profilePath, k)
-      }
-      if pm == nil || pm.Consumer == 0 || pm.Cluster < 0x1000 {
-         return fmt.Errorf("%s: family %d has no usable map - run prkf -3", profilePath, v)
-      }
-      var seen uint32
-      for _, mv := range pm.Map {
-         if mv < 0 || mv > 15 {
-            return fmt.Errorf("%s: family %d: entry %d is not a nibble", profilePath, v, mv)
-         }
-         if seen&(1<<uint(mv)) != 0 {
-            return fmt.Errorf("%s: family %d is not a permutation: 0x%x twice", profilePath, v, mv)
-         }
-         seen |= 1 << uint(mv)
-      }
-   }
-   return nil
-}
-
 // statusOK reports whether the routine's status dword is zero. See the file header for why this
 // and not NTSTATUS is the rejection signal.
 func statusOK(b []byte) bool {
    return len(b) >= 4 && b[0]|b[1]|b[2]|b[3] == 0
-}
-
-// vkey is the profile's key for one routine family. JSON object keys are strings, and every
-// writer and reader goes through this one function.
-func vkey(v int) string {
-   return strconv.Itoa(v)
 }
 
 // wbFree releases one reference taken by wbLoad. The error is returned rather than swallowed:
@@ -223,14 +175,6 @@ func wbVEH(base uintptr) bool {
    return h != 0
 }
 
-type dllProfile struct {
-   DLLSHA256   string                    `json:"dll_sha256"`
-   SizeOfImage uint32                    `json:"size_of_image"`
-   Census      *profileCensus            `json:"census,omitempty"`
-   Map         map[string]*profileMap    `json:"map,omitempty"`
-   Stages      map[string]*profileStages `json:"stages,omitempty"`
-}
-
 // pfLoad returns the profile for sha, or an empty one when the file is missing, unreadable, or
 // written for a different build. Only the DLL-phase steps call it: they are about to fill in a
 // section, so discarding a stale file is free.
@@ -296,35 +240,6 @@ func op3Call(base uintptr) op3Func {
       runtime.KeepAlive(out)
       return uint32(r)
    }
-}
-
-// profileCensus is the descriptor census, flattened. Spans are the segment ranges to patch;
-// Heaps are {va, descVA, codeRVA, codeLen}. All four heap fields are needed: storing only three
-// left every descriptor with va == 0 and collapsed the census onto one map key.
-type profileCensus struct {
-   Spans [][2]uint32 `json:"spans"`
-   Heaps [][4]uint32 `json:"heaps"`
-}
-
-// profileMap is -3's result for one family. Map is an ARRAY because stage 4 indexes a table with
-// it: a string-keyed object bought nothing but a parse on every read.
-type profileMap struct {
-   Cluster  uint32  `json:"cluster"`
-   Magic    string  `json:"magic"`
-   Map      [16]int `json:"map"` // mapped nibble -> real nibble
-   Consumer uint32  `json:"consumer_desc_va"`
-}
-
-// profileStages is -6's result for one family, recording the WHOLE chain rather than just the
-// two descriptors: S1/S2 are descriptor addresses, K1/K2 which 0x20-byte half of the key
-// component each stage receives, O1/O2 which of the two buffers holds its output.
-type profileStages struct {
-   S1 uint32 `json:"s1_desc_va"`
-   S2 uint32 `json:"s2_desc_va"`
-   K1 int    `json:"s1_key_half"`
-   O1 int    `json:"s1_out_buf"`
-   K2 int    `json:"s2_key_half"`
-   O2 int    `json:"s2_out_buf"`
 }
 
 // kernel.go end
