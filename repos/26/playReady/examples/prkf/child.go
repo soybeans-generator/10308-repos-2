@@ -38,7 +38,7 @@ const childEnv = "PRKF_CHILD"
 // statement is the call that never returns.
 var childEnc = json.NewEncoder(os.Stdout)
 
-// selfPath and selfErr are resolved once at init: three drivers spawn children of themselves.
+// selfPath and selfErr are resolved once at init: four drivers spawn children of themselves.
 var selfPath, selfErr = os.Executable()
 
 // childEnvFor renders spec as the one NAME=VALUE entry a spawn site passes.
@@ -91,14 +91,27 @@ func childMode() (ok bool, err error) {
       }
       dmWorker(spec.Descs[0], spec.Fams, spec.Sets)
 
-   case "warm":
-      // -4's child: call every descriptor it is given, then dump the resulting memory. A
-      // fault costs this child, and the parent drops the descriptor that faulted and re-runs
-      // the rest, so the child that finally dumps has called every survivor in one process.
+   case "p1":
+      // Phase 1 is phase 2 with one empty OBF, and the empty value is what selects the
+      // phase-1 argument shape, so exactly one is required and it must be empty.
       if len(spec.Descs) == 0 {
-         return true, fmt.Errorf("%s: warm with no descriptors", childEnv)
+         return true, fmt.Errorf("%s: p1 with no descriptors", childEnv)
       }
-      warmWorker(spec)
+      if len(spec.Obfs) != 1 || spec.Obfs[0] != "" {
+         return true, fmt.Errorf("%s: p1 needs exactly one empty OBF slot, got %d",
+            childEnv, len(spec.Obfs))
+      }
+      dpWorker(spec.Mode, 0, spec.Obfs, spec.Descs)
+
+   case "p2":
+      // One OBF per candidate: the worker indexes obfs[oi] for every triple.
+      if len(spec.Descs) == 0 || len(spec.Obfs) == 0 {
+         return true, fmt.Errorf("%s: p2 needs descriptors and OBFs", childEnv)
+      }
+      if spec.Start < 0 {
+         return true, fmt.Errorf("%s: p2 start %d is negative", childEnv, spec.Start)
+      }
+      dpWorker(spec.Mode, spec.Start, spec.Obfs, spec.Descs)
 
    default:
       return true, fmt.Errorf("%s: unknown mode %q", childEnv, spec.Mode)
@@ -123,19 +136,23 @@ func isHex(s string) bool {
    return err == nil
 }
 
+// isHex32 reports whether s is exactly 0x20 bytes of hex. Length alone is not the test:
+// hex.DecodeString returns the bytes it did decode alongside its error.
+func isHex32(s string) bool { return len(s) == 0x40 && isHex(s) }
+
 // childRow is one line a child prints, and the only thing a parent parses.
 //
-//   k=ok        probe  d, b[0] A output, b[1] B output, s A/B/C status, e the verdict detail
-//   k=reject    probe  d, b, s as above
+//   k=ok        p1/p2  d descriptor, i OBF, h key half, b key buffer then output buffer
+//   k=reject    p1/p2  d, i, h, s the status dword
+//   k=accept    probe  d, b[0] A output, b[1] B output, s A/B/C status, e the verdict detail
 //   k=none      probe  d, e why no verdict was reached
-//   k=call      warm   d the descriptor about to be called
-//   k=meta      sweep/warm e one human log line
+//   k=meta      sweep  e one human log line
 //   k=live      sweep  f family, i set index, d the live set rva
 //   k=nolive    sweep  f family, i how many sets were live
 //   k=out       sweep  f family, i licence, h forced nibble, s status, b[0] value
 //   k=fault     any    e the FAULT detail, emitted by wbVEH just before it exits
-//   k=err       any    e why the child could not run - never a property of a candidate, so it
-//                       aborts the batch instead of being skipped
+//   k=err       any    e why the child could not start or run - never a property of a
+//                      candidate, so it aborts the batch instead of being skipped
 //   k=loadfail  any    e why the module could not be patched
 //   k=end       any    last row; its absence means the child died in native code
 type childRow struct {
@@ -192,13 +209,16 @@ func (r childRow) log() string {
    return string(b)
 }
 
-// childSpec is a child's whole payload. Descs is descriptor VAs for "probe" and "warm", and the
-// single consumer descRVA for "sweep".
+// childSpec is a child's whole payload. Descs is descriptor VAs for "probe", "p1" and "p2",
+// and the single consumer descRVA for "sweep". Obfs is a single "" for "p1", where the empty
+// value selects the phase-1 argument shape, and the full list for "p2".
 type childSpec struct {
-   Mode  string   `json:"mode"`            // probe | sweep | warm
-   Descs []uint32 `json:"descs,omitempty"` // probe, warm; sweep uses the one element
+   Mode  string   `json:"mode"`            // probe | sweep | p1 | p2
+   Descs []uint32 `json:"descs,omitempty"` // probe, p1, p2; sweep uses the one element
    Fams  []int    `json:"fams,omitempty"`  // sweep
    Sets  []uint32 `json:"sets,omitempty"`  // sweep
+   Obfs  []string `json:"obfs,omitempty"`  // p1, p2
+   Start int      `json:"start,omitempty"` // p2
 }
 
 // ------------------------------------------------------------ spawn helpers

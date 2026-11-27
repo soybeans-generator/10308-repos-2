@@ -89,6 +89,9 @@ func diReadMem(base uintptr, n int) []byte {
    return out
 }
 
+func le16(b []byte, o int) uint16 { return binary.LittleEndian.Uint16(b[o:]) }
+func le32(b []byte, o int) uint32 { return binary.LittleEndian.Uint32(b[o:]) }
+
 func stageDecryptImg() (code int) {
    lg := newStepLog(imgLogPath)
    defer lg.Finish(&code)
@@ -216,11 +219,11 @@ func stageDecryptImg() (code int) {
 
    // -2 establishes the profile: it is the first step that knows the DLL's digest and
    // produces the artefact everything else is measured against. The census goes in here, not
-   // just SizeOfImage: scanDescs hashes several gigabytes, and every later child needs the
+   // just SizeOfImage: scanDescs hashes several gigabytes, and every trial child needs the
    // spans and heap blocks it produces.
    //
    // pfLoad, not a fresh profile: re-running -2 against the same build must not discard a map
-   // that is still valid.
+   // and a stage pairing that are still valid.
    cen := &profileCensus{}
    for _, s := range segs {
       for _, sp := range segSpans(f, &s, sizeImg) {
@@ -247,6 +250,18 @@ func stageDecryptImg() (code int) {
 
 // ------------------------------------------------------------- descriptors
 
+// imgDesc is one digest-validated descriptor. va is its own address and identifies a
+// candidate; descVA is +0x28 and is what a call inside the image targets; rva and ln are the
+// code block, meaningful only for heap-exec descriptors; off and size are its file position.
+type imgDesc struct {
+   va     uint32
+   off    uint32
+   size   uint32
+   descVA uint32
+   rva    uint32
+   ln     uint32
+}
+
 // scanDescs returns every digest-validated descriptor in the file, in section order. A
 // candidate is accepted when its size field is plausible and the SHA-256 over [0x20, size)
 // matches the digest that precedes it; nothing else is checked, because the digest is the
@@ -257,7 +272,7 @@ func stageDecryptImg() (code int) {
 //
 // The 0x200000 cap must not be lowered: the two largest descriptors on the recorded build are
 // 0x829c and 0x3cac bytes, and a 0x2000 cap silently skips them, which loses the gap blocks
-// and makes the stage routines execute ciphertext.
+// and makes -6 execute ciphertext.
 func scanDescs(fb []byte, secs []imgSection) []imgDesc {
    var out []imgDesc
    for _, s := range secs {
@@ -306,6 +321,10 @@ func splitDescs(fb []byte, secs []imgSection) (segs, heaps []imgDesc) {
    }
    return segs, heaps
 }
+
+// heap reports whether this is a heap-exec descriptor. 0xF0 is the only size the kernel treats
+// that way, and the size field is covered by the digest.
+func (d *imgDesc) heap() bool { return d.size == 0xF0 }
 
 // imgRun is a half-open RVA range. It serves three jobs with one type: one heap-exec block, a
 // merged run of them, and a segment span to patch.
@@ -431,11 +450,14 @@ func peSections(fb []byte) (sizeImg uint32, secs []imgSection) {
    return sizeImg, secs
 }
 
-// ------------------------------------------------------------- the scan prep
+// ------------------------------------------------------------- the trial prep
 
-// pfImage is everything a sweep or a capture needs: the decrypted image, the census, the patch
-// plan, and the profile those came from. It deliberately does NOT include the module: a child
-// used to read the DLL and re-run scanDescs, which hashes several gigabytes.
+// pfImage is everything a trial child or a -3 sweep needs: the decrypted image, the census,
+// the patch plan, and the profile those came from. It deliberately does NOT include the
+// module: a child used to read the DLL and re-run scanDescs, which hashes several gigabytes.
+//
+// prof is the parse pfPrep already performed, carried so the BLA-phase steps do not read and
+// unmarshal dllprof.json a second time just to reach Map and Stages.
 type pfImage struct {
    sha    string
    size   uint32
@@ -515,9 +537,5 @@ func (p *pfImage) apply(base uintptr) (patched, skipped int) {
    }
    return patched, skipped
 }
-
-// heap reports whether this is a heap-exec descriptor. 0xF0 is the only size the kernel treats
-// that way, and the size field is covered by the digest.
-func (d *imgDesc) heap() bool { return d.size == 0xF0 }
 
 // warbird.go end

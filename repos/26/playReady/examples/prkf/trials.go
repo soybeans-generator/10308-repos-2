@@ -5,8 +5,8 @@
 // plumbing they share - the spec, the spawn, the grammar - is child.go.
 //
 //   dmWorker    -3's sweep: one image patch, then every family
+//   dpWorker    -6's trial, both phases
 //   probeBatch  the parent side of -1's probe child, which lives in signing.go
-//   warmWorker  -4's warm-up and dump, which lives in capture.go
 //
 // A worker returns no verdict. Every one reports by row and closes with k=end; a fault, a
 // kill or a death inside native code is the absence of that row.
@@ -199,14 +199,90 @@ func dmWorker(desc uint32, fams []int, sets []uint32) {
    }
 }
 
-// isHex32 reports whether s is exactly 0x20 bytes of hex. Length alone is not the test:
-// hex.DecodeString returns the bytes it did decode alongside its error.
-func isHex32(s string) bool {
-   if len(s) != 0x40 {
-      return false
+// ------------------------------------------------------- the -6 trial child
+
+// dpHalf returns one 0x20-byte half of the key component. Byte 0x40 is never handed to a
+// stage.
+func dpHalf(prv []byte, h int) []byte {
+   if h == 1 {
+      return prv[0x20:0x40]
    }
-   _, err := hex.DecodeString(s)
-   return err == nil
+   return prv[0:0x20]
+}
+
+// dpPrv reads the sample's 0x41-byte key component. The stage routines reject material that
+// is not real, which is why a synthetic key made the search unfindable.
+func dpPrv() ([]byte, error) {
+   prv, err := os.ReadFile(encPrvPath)
+   if err != nil {
+      return nil, fmt.Errorf("missing %s - run prkf -4 first", encPrvPath)
+   }
+   if len(prv) != 0x41 {
+      return nil, fmt.Errorf("%s is %d bytes, expected 0x41 (65)", encPrvPath, len(prv))
+   }
+   return prv, nil
+}
+
+// dpTrial runs one op=3 trial. k1 goes in the key buffer, k2 in the output buffer; ln and
+// size2 are the only things that differ between the phases.
+func dpTrial(op3 op3Func, desc, ln uint32, k1, k2 []byte, size2 *uint32) (kb, out []byte, rc uint32, st []byte) {
+   var sb [0x40]byte
+   var b1 [0x40]byte
+   var b2 [0x40]byte
+   copy(b1[:], k1)
+   copy(b2[:], k2) // nil k2 leaves this zero-filled
+
+   rc = op3(desc, ln, 0x20, sb[:], b1[:], b2[:], size2)
+   return b1[:0x20], b2[:0x20], rc, sb[:4]
+}
+
+// dpWorker is the trial body for both phases: phase 1 is 0x2C bytes with no second size, key
+// half in the key buffer and a zeroed output; phase 2 is 0x30 with a 0x20 there, OBF in the
+// key buffer and the key half in the output buffer. Phase 1 is phase 2 with one empty OBF.
+//
+// The index is flattened as (di*len(obfs)+oi)*2+h because that is one resume point, but each
+// row names its own descriptor, OBF and half: the parent never re-derives them.
+func dpWorker(mode string, start int, obfs []string, descs []uint32) {
+   defer func() {
+      if r := recover(); r != nil {
+         emit(childRow{Kind: "err", Msg: fmt.Sprint(r)})
+      }
+      emit(childRow{Kind: "end"})
+   }()
+
+   op3, prv, err := dpPrepChild()
+   if err != nil {
+      emit(childRow{Kind: "err", Msg: err.Error()})
+      return
+   }
+
+   sz := uint32(0x20)
+   ln, szp := uint32(0x2C), (*uint32)(nil)
+   if mode == "p2" {
+      ln, szp = 0x30, &sz
+   }
+
+   n := len(obfs)
+   for idx := start; idx < len(descs)*n*2; idx++ {
+      di, oi, h := idx/(n*2), idx%(n*2)/2, idx%2
+      k1, k2 := dpHalf(prv, h), []byte(nil)
+      if obfs[oi] != "" {
+         var derr error
+         if k1, derr = hex.DecodeString(obfs[oi]); derr != nil || len(k1) != 0x20 {
+            emit(childRow{Kind: "err", Msg: fmt.Sprintf("bad obf %q", obfs[oi])})
+            return
+         }
+         k2 = dpHalf(prv, h)
+      }
+      kb, out, rc, st := dpTrial(op3, descs[di], ln, k1, k2, szp)
+      if rc != 0 || !statusOK(st) {
+         emit(childRow{Kind: "reject", Desc: descs[di], Idx: oi, Half: h,
+            St: []string{hex.EncodeToString(st)}})
+         continue
+      }
+      emit(childRow{Kind: "ok", Desc: descs[di], Idx: oi, Half: h,
+         Buf: []string{hex.EncodeToString(kb), hex.EncodeToString(out)}})
+   }
 }
 
 // ------------------------------------------------------------ -1's parent side
@@ -249,6 +325,28 @@ func probeBatch(descs []imgDesc, w func(string)) map[uint32]childRow {
       }
    }
    return out
+}
+
+// dpPrepChild loads what a trial needs and patches the image: the one place a child pays its
+// fixed cost.
+func dpPrepChild() (op3 op3Func, prv []byte, err error) {
+   pi, err := pfPrep()
+   if err != nil {
+      return nil, nil, err
+   }
+   if prv, err = dpPrv(); err != nil {
+      return nil, nil, err
+   }
+   base, err := loadWarbird()
+   if err != nil {
+      return nil, nil, err
+   }
+   pi.apply(base)
+
+   if !wbVEH(base) {
+      return nil, nil, fmt.Errorf("AddVectoredExceptionHandler returned NULL")
+   }
+   return op3Call(base), prv, nil
 }
 
 // ------------------------------------------------------------ -3's parent side
