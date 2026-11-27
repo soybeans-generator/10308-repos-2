@@ -1,5 +1,4 @@
-# wbimage.py
-"""wbimage.py -- PE sections, Warbird descriptors, decrypted image, patch plan.
+"""wbimage.py -- PE sections, Warbird descriptors, decrypted image.
 
 Sections: VirtualSize +8, VirtualAddress +12, SizeOfRawData +16, PointerToRawData
 +20. Taking +8 as the address makes every descriptor VirtualSize+offset and op=1
@@ -7,16 +6,10 @@ rejects every segment with 0xc000000d; the reorder in sections() exists for that
 
 Descriptor: sha256 at +0x00 over [0x20,size), size +0x20 (0xF0 = heap-exec),
 marker +0x24, desc_va +0x28, relocs +0x2C, count +0x30, code rva/len +0x34/+0x38.
-The digest is the only test valid for both kinds; the marker is absent on segment
-descriptors. size < 0x200000 forces byte +0x23 to 0.
+The digest is the only test valid for both kinds. size < 0x200000 forces +0x23 to 0.
 
-heap_routines() is Go's signingCandidates: a heap descriptor whose code span is
-empty or outside every mapped section cannot be a routine, so probing it only buys a
-fault. This is a static filter, applied before any child is spawned.
-
-patch_plan/apply are Go's pfImage.apply, used by the image pass only: segment spans
-hold decrypted plaintext, heap blocks are carved out because op=3 decrypts those
-itself. apply flips protection once per section, not once per range.
+The block descriptor layout is measured by pick_layout rather than assumed: two
+conventions exist and only one returns 0 AND changes the block's bytes.
 """
 import ctypes
 import hashlib
@@ -25,7 +18,7 @@ import time
 
 import warbird as wb
 
-PAYS = (b"\xcc\x08\x00\x00", b"\xbc\x08\x00\x00")   # 2252 / 2236
+PAYS = (b"\xcc\x08\x00\x00", b"\xbc\x08\x00\x00")
 LAYOUTS = ("countf0", "count30", "self")
 TRY = 12
 
@@ -43,20 +36,6 @@ def sections(fb):
         q = p + 40 * i
         vs, va, rs, rp = struct.unpack_from("<IIII", fb, q + 8)
         out.append((va, vs, rs, rp))
-    return out
-
-
-def section_prots(fb):
-    lf = u32(fb, 0x3C)
-    n = struct.unpack_from("<H", fb, lf + 6)[0]
-    p = lf + 24 + struct.unpack_from("<H", fb, lf + 20)[0]
-    out = []
-    for i in range(n):
-        q = p + 40 * i
-        vs, va, rs, _ = struct.unpack_from("<IIII", fb, q + 8)
-        ch = u32(fb, q + 36)
-        prot = 0x20 if ch & 0x20000000 else (0x04 if ch & 0x80000000 else 0x02)
-        out.append((va, max(vs, rs, 1), prot))
     return out
 
 
@@ -104,7 +83,6 @@ _HEAP = None
 
 
 def heap_routines():
-    """Heap descriptors whose code span is non-empty and inside a mapped section."""
     global _HEAP
     if _HEAP is None:
         fb = open(wb.DLL, "rb").read()
@@ -118,64 +96,6 @@ def heap_routines():
 def dll_sha():
     with open(wb.DLL, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
-
-
-def seg_spans(fb, d, size):
-    b = fb[d["off"]:d["off"] + d["size"]]
-    out = []
-    for o in range(0xF4, len(b) - 0xB, 0xC):
-        rva, ln = u32(b, o + 4), u32(b, o + 8)
-        if rva >= 0x1000 and ln >= 8 and rva + ln <= size:
-            out.append((rva, ln))
-    return out
-
-
-def _merge(ivs):
-    ivs.sort()
-    res = []
-    for s, l in ivs:
-        if res and s <= res[-1][0] + res[-1][1]:
-            e = res[-1][0] + res[-1][1]
-            res[-1] = (res[-1][0], max(e, s + l) - res[-1][0])
-        else:
-            res.append((s, l))
-    return res
-
-
-def patch_plan(fb, ds, size):
-    hb = _merge([(h["rva"], h["ln"]) for h in heaps(ds) if h["rva"] and h["ln"]])
-    cuts = []
-    for d in ds:
-        if d["size"] == 0xF0:
-            continue
-        for s, l in seg_spans(fb, d, size):
-            cur, end = s, s + l
-            for hs, hl in hb:
-                if hs + hl <= cur or hs >= end:
-                    continue
-                if hs > cur:
-                    cuts.append((cur, hs - cur))
-                cur = max(cur, hs + hl)
-                if cur >= end:
-                    break
-            if cur < end:
-                cuts.append((cur, end - cur))
-    return _merge(cuts)
-
-
-def apply(b, img, plan, prots):
-    olds = []
-    for rva, sz, _ in prots:
-        olds.append((rva, sz, wb.vp(b + rva, sz, 0x40)))
-    n = 0
-    for rva, ln in plan:
-        if ln > 0 and rva + ln <= len(img):
-            ctypes.memmove(b + rva, img[rva:rva + ln], ln)
-            n += 1
-    for rva, sz, old in olds:
-        if old is not None:
-            wb.vp(b + rva, sz, old)
-    return n
 
 
 def build_desc(hdr, params, layout, rva, size):
@@ -280,4 +200,3 @@ def dec_image(ds=None, say=print):
 
 def pay_candidates(img, hs):
     return [h for h in hs if any(p in img[h["rva"]:h["rva"] + h["ln"]] for p in PAYS)]
-# wbimage.py

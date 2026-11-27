@@ -1,19 +1,20 @@
-# wb-find.py
 """wb-find.py -- build msprcore.bla (PRKF) from the PlayReady DLL alone.
 
-  python wb-find.py discover   once per DLL build -> testdata/offsets.json
-  python wb-find.py hwid       optional           -> testdata/hwid.bin
+  python wb-find.py discover   once per DLL build -> payload descriptor
   python wb-find.py payload                       -> testdata/activation_request.bin
   python wb-find.py activate                      -> testdata/activation_response.bin
   python wb-find.py decrypt                       -> testdata/msprcore.bla
 
-Four files, same directory: this one is the CLI and the one HTTP call, wbprobe.py
-runs probe children and the staged sweep, wbimage.py reads the PE, builds the
-decrypted image and the candidate filter, warbird.py makes the syscalls.
+Four files, same directory: this one is the CLI and the one HTTP call, wbprobe.py runs
+probe children and the staged sweep, wbimage.py reads the PE and builds the decrypted
+image, warbird.py makes the syscalls.
 
-hwid sweeps with Go's probe block and accepts a descriptor whose output does not
-depend on the key, because a HWID is not keyed. dead.json is honoured, so a rerun
-resumes instead of repeating its faults.
+The identity sent to build-payload is 32 bytes and its content is not checked: desc
+0x484c0 accepted 41 x 32 and rejected 8, 10, 16, 20, 24, 28, 36, 37, 38, 40, 48 and 64
+with E_INVALIDARG. payload sends testdata/hwid.bin when it holds exactly 32 non-zero
+bytes, otherwise the built-in default. Nothing searches for the HWID routine: Googler
+marks that call skippable and SE's finding is that the service does not validate the
+field.
 """
 import base64
 import json
@@ -84,91 +85,66 @@ def discover():
     if not cands:
         wb.die("no decrypted heap block carries the constant\n"
                "  blocks did not decrypt (watch ok/err above), or it is not inline\n"
-               "  in this build - set OFFSETS in wbprobe.py and rerun")
+               "  in this build")
 
-    rows, _ = pr.probe("payload", cands, hwid=pr.SYNTH.hex(), dump=True)
+    rows, _ = pr.probe("payload", cands, hwid=pr.ID.hex(), dump=True)
     pr.report(cands, rows)
     good = [d["desc"] for d in cands if rows.get(d["desc"], {}).get("ok")]
 
     if not good:
         a = cands[0]["desc"]
         near = [x for x in pr.outward(a, pr.NEAR) if x["desc"] != a]
-        print("[*] nothing at %#x wrote a payload - trying %d neighbours"
-              % (a, len(near)))
-        nrows, _ = pr.probe("payload", near, hwid=pr.SYNTH.hex(), dump=True)
+        print("[*] nothing at %#x wrote a payload with a %d-byte identity - trying"
+              " %d neighbours" % (a, wb.ID_LEN, len(near)))
+        nrows, _ = pr.probe("payload", near, hwid=pr.ID.hex(), dump=True)
         pr.report(near, nrows)
         good = [x["desc"] for x in near if nrows.get(x["desc"], {}).get("ok")]
+        rows = dict(rows)
+        rows.update(nrows)
 
     if len(good) > 1:
         good.sort(key=lambda d: abs(d - cands[0]["desc"]))
         print("[!] %d descriptors wrote a payload%s - keeping the one nearest the\n"
-              "    constant's block; OFFSETS can pin another."
+              "    constant's block."
               % (len(good), "".join(" %#x" % d for d in good)))
     pick = good[0] if good else cands[0]["desc"]
-    c = pr.load_cache()
-    c["payload"] = pick
-    c.pop("unconfirmed", None)
-    if not good:
-        c["unconfirmed"] = True
+    if good:
+        r = rows[pick]
+        print("[+] payload desc=%#x  n=%d  (id %d + static %d)"
+              % (pick, r["n"], wb.ID_LEN, r["n"] - wb.ID_LEN))
+    else:
         print("[!] nothing wrote a payload; recording %#x anyway - the constant is\n"
-              "    in a callee, not the routine op=3 enters. payload then activate\n"
-              "    is the real test." % pick)
-    pr.save_cache(c)
-    print("[+] payload desc=%#x%s" % (pick, "" if good else " (unconfirmed)"))
+              "    in a callee, not the routine op=3 enters." % pick)
+
+    with open(pr.OFF, "w") as f:
+        json.dump({"dll_sha256": im.dll_sha(), "payload": pick}, f, indent=2)
+    print("[+] payload desc=%#x%s -> %s"
+          % (pick, "" if good else " (unconfirmed)", pr.OFF))
 
 
-def hwid():
-    rows = {}
-    d = pr.OFFSETS.get("hwid") or pr.load_cache().get("hwid") or 0
-    if not d:
-        print("[*] walking outward from anchor %#x  %d workers  %d candidates"
-              % (pr.anchor(), pr.WORKERS, len(im.heap_routines())))
-        hit, rows = pr.sweep("hwid", lambda r: r.get("stable") and r.get("nz"))
-        if not hit:
-            wb.die("no descriptor returned a key-independent non-zero blob under\n"
-                   "  Go's probe block. get-HWID is not a heap-exec descriptor on\n"
-                   "  this build, or it writes its length through +0x1C and dies\n"
-                   "  under that block. Skip it - the Activation service does not\n"
-                   "  validate the HWID:\n"
-                   "  python -c \"open('testdata/hwid.bin','wb').write("
-                   "b'FAKE.PR.ID'+b'\\0'*22)\"")
-        d = hit["desc"]
-        c = pr.load_cache()
-        c["hwid"] = d
-        pr.save_cache(c)
-        print("[+] get-HWID desc=%#x  n=%d" % (d, rows[d]["n"]))
-
-    data = bytes.fromhex(rows.get(d, {}).get("h", ""))
-    if not data:
-        one = [x for x in im.heap_routines() if x["desc"] == d]
-        if not one:
-            wb.die("hwid desc=%#x is not a heap routine for this build" % d)
-        rr, _ = pr.probe("hwid", one)
-        data = bytes.fromhex(rr.get(d, {}).get("h", ""))
-    if len(data) < 8:
-        wb.die("get-HWID desc=%#x gave %d bytes" % (d, len(data)))
-    pr.wr(HWID, data)
-    print("[+] hwid    %d bytes  %s" % (len(data), data[:16].hex()))
+def ident():
+    """32 bytes: testdata/hwid.bin when it fits, else the built-in default."""
+    if os.path.exists(HWID):
+        with open(HWID, "rb") as f:
+            b = f.read()
+        if len(b) == wb.ID_LEN and b.strip(b"\x00"):
+            return b
+        print("[!] %s is %d bytes or all zeros - using the default"
+              % (HWID, len(b)))
+    return pr.ID
 
 
 def payload():
-    if os.path.exists(HWID):
-        with open(HWID, "rb") as f:
-            data = f.read()
-    else:
-        data = pr.SYNTH
-        pr.wr(HWID, data)
-        print("[!] %s absent - wrote a synthetic %d-byte hwid" % (HWID, len(data)))
+    data = ident()
+    print("[*] identity %d bytes  %s" % (len(data), data.hex()))
     d = pr.anchor()
     out, src, n, moved, why = wb.payload(wb.base(), d, data)
     if not out:
         wb.die("build-payload desc=%#x failed: %s - rerun discover" % (d, why))
     pr.wr(REQ, out)
-    print("[+] payload %d bytes  desc=%#x  src=%s  %s" % (n, d, src, out[:16].hex()))
+    print("[+] payload %d bytes  desc=%#x  src=%s  %s"
+          % (n, d, src, out[:16].hex()))
     print("    seed %s  %s" % (out[-16:].hex(), "moved" if moved else "same"))
-    if not moved:
-        print("[!] both calls gave the same tail - the key may be per client\n"
-              "    instance, not per request. activate is what decides.")
 
 
 def activate():
@@ -188,19 +164,13 @@ def decrypt():
                          resp=os.path.abspath(RESP), seed=seed.hex())
     if not hit:
         wb.die("no decrypt routine in the heap descriptor list")
-    d = hit["desc"]
-    data = bytes.fromhex(rows[d]["full"])
+    data = bytes.fromhex(rows[hit]["full"])
     k = data.find(b"PRKF")
     pr.wr(BLA, data[k:])
-    print("[+] %s (%d bytes)  desc=%#x" % (BLA, len(data) - k, d))
-    c = pr.load_cache()
-    c["decrypt"] = [d]
-    pr.save_cache(c)
-    print('\nOFFSETS = {"hwid": %#x, "payload": %#x, "decrypt": [%#x]}'
-          % (c.get("hwid", 0), c.get("payload", 0), d))
+    print("[+] %s (%d bytes)  desc=%#x" % (BLA, len(data) - k, hit))
 
 
-MODES = {"discover": discover, "hwid": hwid, "payload": payload,
+MODES = {"discover": discover, "payload": payload,
          "activate": activate, "decrypt": decrypt}
 
 
@@ -217,4 +187,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-# wb-find.py

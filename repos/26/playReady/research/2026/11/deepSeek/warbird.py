@@ -1,10 +1,14 @@
-# warbird.py
 """warbird.py -- Warbird syscalls.
 
-op=1, 0x30 bytes: op, descriptor, image, image, image+relocs, count
-op=3, WbHeapExecuteCall, 0x34 get-HWID / 0x44 payload / 0x3C decrypt.
-status is 0x10 bytes: at 4 the process dies on the NEXT call. E_INVALIDARG in
-status with NTSTATUS 0 is a refusal by a live process, not a fault.
+op=1, 0x30 bytes: op, descriptor, image, image, image+relocs, count.
+op=3, WbHeapExecuteCall: 0x44 payload, 0x3C decrypt.
+
+status is 0x10 bytes; at 4 the process dies on the NEXT call. E_INVALIDARG in the
+status word with NTSTATUS 0 is a refusal by a live process, not a fault.
+
+The identity is 32 bytes and its content is not checked: desc 0x484c0 accepted
+41 x 32 and rejected 8, 10, 16, 20, 24, 28, 36, 37, 38, 40, 48 and 64 with
+E_INVALIDARG.
 """
 import ctypes
 import os
@@ -17,6 +21,7 @@ DLL = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32",
                    "Windows.Media.Protection.PlayReady.dll")
 ST = 0x10
 STATIC = 2252
+ID_LEN = 32
 
 
 def g32(b):
@@ -28,9 +33,9 @@ def die(m):
 
 
 def _buf(n, data=b""):
-    a = (ctypes.c_ubyte * n)()
+    a = (ctypes.c_ubyte * max(n, 1))()
     if data:
-        ctypes.memmove(a, data, min(len(data), n))
+        ctypes.memmove(a, data, min(len(data), max(n, 1)))
     return a
 
 
@@ -83,14 +88,6 @@ def di_call(b, sac, rel, num):
     return wb(a, 0x30)
 
 
-class Hwid(ctypes.Structure):
-    _pack_ = 1
-    _fields_ = [("op", ctypes.c_uint64), ("seg", ctypes.c_void_p),
-                ("status", ctypes.c_void_p), ("ctx", ctypes.c_void_p),
-                ("type", ctypes.c_uint32), ("out", ctypes.c_void_p),
-                ("out_len", ctypes.c_void_p)]
-
-
 class Payload(ctypes.Structure):
     _pack_ = 1
     _fields_ = [("op", ctypes.c_uint64), ("seg", ctypes.c_void_p),
@@ -106,15 +103,6 @@ class Decrypt(ctypes.Structure):
                 ("status", ctypes.c_void_p), ("inp", ctypes.c_void_p),
                 ("in_len", ctypes.c_uint32), ("seed", ctypes.c_void_p),
                 ("out", ctypes.c_void_p), ("out_len", ctypes.c_void_p)]
-
-
-def call_hwid(b, d):
-    st, ctx = _buf(ST), _buf(0x100)
-    n, out = _u32(512), _buf(512)
-    nt = wb(Hwid(3, b + d, ctypes.addressof(st), ctypes.addressof(ctx), 1,
-                 ctypes.addressof(out), ctypes.addressof(n)), 0x34)
-    m = min(g32(n), 512)
-    return nt, g32(st), bytes(out[:m]), m
 
 
 def _payload(b, d, hwid, mode):
@@ -133,9 +121,11 @@ def payload(b, d, hwid):
     """(bytes, src, n, moved, why); bytes is None when no shape worked.
 
     mode 0 passes len(hwid) as in_len, as Googler's block does; mode 1 passes the
-    whole buffer. The payload may land in the input buffer or the output buffer,
-    so both are compared against what they held before the call.
+    whole buffer. The payload may land in the input buffer or the output buffer, so
+    both are compared with what they held before the call.
     """
+    if len(hwid) != ID_LEN:
+        die("identity must be %d bytes, got %d" % (ID_LEN, len(hwid)))
     sz, why = len(hwid) + STATIC, "no shape tried"
     for m in (0, 1):
         nt, st, inp, out, n = _payload(b, d, hwid, m)
@@ -165,4 +155,3 @@ def call_decrypt(b, d, resp, seed):
                     ctypes.addressof(n)), 0x3C)
     m = g32(n)
     return nt, g32(st), bytes(out[:m]) if 0 <= m <= sz else b"", m
-# warbird.py
