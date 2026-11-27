@@ -1,5 +1,9 @@
 # activation
 
+if you want to implement it, first call is to get devices hwid (can skip this),
+2nd is to generate the primary payload for activation req (requires hwid), 3rd
+is to decrypt activation response. you have to make the activation call yourself 
+
 - https://activation.playready.microsoft.com/PlayReady/ACT/Activation.asmx?WSDL
 - https://activation2.playready.microsoft.com/PlayReady/ACT/Activation.asmx?WSDL&Client=Win10&LinkId=613387
 - https://activationpme.playready.microsoft.com/PlayReady/ACT/Activation.asmx?WSDL
