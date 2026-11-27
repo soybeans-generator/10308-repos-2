@@ -1,44 +1,54 @@
-"""wbfind.py -- PlayReady activation pipeline, Windows x64, Python 3.8+.
+# wb-find.py
+"""wb-find.py -- build msprcore.bla (PRKF) from the PlayReady DLL alone.
 
-Four stages, run once each, in this order. Each stage reads only what the
-previous stage wrote; no stage runs another. The DLL is re-read per stage.
+  python wb-find.py discover   once per DLL build -> testdata/offsets.json
+  python wb-find.py hwid       -> testdata/hwid.bin              (optional)
+  python wb-find.py payload    -> testdata/activation_request.bin
+  python wb-find.py activate   -> testdata/activation_response.bin
+  python wb-find.py decrypt    -> testdata/msprcore.bla
 
-  python wbfind.py hwid      WB get-HWID call        -> testdata/hwid.bin
-  python wbfind.py payload   WB build-payload call   -> testdata/activation_request.bin
-  python wbfind.py activate  SOAP POST to Microsoft  -> testdata/activation_response.bin
-  python wbfind.py decrypt   WB decrypt call         -> testdata/msprcore.bla
+discover is first because it is the only step that searches: the payload routine
+is the heap block whose decrypted code contains 2252 (0x8CC), and the get-HWID
+and decrypt routines are then searched in a window around it. Probing is not
+spread over the other stages, because a probe with a routine's own argument
+block makes a foreign routine dereference a size or a small integer as a pointer
+and die -- one dead process per descriptor.
 
-Each stage reports the desc_va it found and records it in testdata/offsets.json;
-decrypt prints the ready prkf_gen.py command.
+The image itself is decrypted in-process with op=1, where a failure is an
+NTSTATUS rather than a crash, and cached per DLL build in testdata/wbtool_img.bin.
+
+hwid is skippable: the Activation service does not validate it. If testdata/hwid.bin
+is absent, payload writes a synthetic one and says so.
 """
-
 import base64
 import ctypes
-import hashlib
 import json
 import os
-import struct
-import subprocess
 import sys
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
 if os.name != "nt" or ctypes.sizeof(ctypes.c_void_p) != 8:
-    raise SystemExit("wbfind.py: Windows x64 only")
+    raise SystemExit("wb-find.py: Windows x64 only")
 
-DLL = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32",
-                   "Windows.Media.Protection.PlayReady.dll")
+import warbird as wb
+
+OFFSETS = {"hwid": 0x0, "payload": 0x0, "decrypt": []}
+WINDOW = 24                       # neighbours either side of the payload routine
+SYNTH = b"FAKE.PR.ID" + b"\0" * 22
+
 WORK = "testdata"
 HWID = os.path.join(WORK, "hwid.bin")
 REQ = os.path.join(WORK, "activation_request.bin")
 RESP = os.path.join(WORK, "activation_response.bin")
 BLA = os.path.join(WORK, "msprcore.bla")
 OFF = os.path.join(WORK, "offsets.json")
+IMG = os.path.join(WORK, "wbtool_img.bin")
+SYN = os.path.join(WORK, "synthetic.bin")
 
 URL = "https://activation.playready.microsoft.com/PlayReady/ACT/Activation.asmx"
 ACTION = '"http://schemas.microsoft.com/PlayReady/ActivationService/v1/Activate"'
-
-CHUNK, T_CHUNK, T_ONE = 64, 90, 20
 
 SOAP = """<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
@@ -58,188 +68,6 @@ SOAP = """<?xml version="1.0" encoding="utf-8"?>
 </soap:Envelope>"""
 
 
-# ------------------------------------------------------------------- descriptor
-# +0x00 sha256 over [0x20,0xF0), +0x20 size (0xF0 = heap-exec), +0x28 desc_va.
-
-def u32(b, o):
-    return struct.unpack_from("<I", b, o)[0]
-
-
-def scan():
-    """Every digest-validated heap-exec descriptor's desc_va in the DLL."""
-    fb = open(DLL, "rb").read()
-    lf = u32(fb, 0x3C)
-    n = struct.unpack_from("<H", fb, lf + 6)[0]
-    p = lf + 24 + struct.unpack_from("<H", fb, lf + 20)[0]
-    out = set()
-    for i in range(n):
-        vs, va, rs, rp = struct.unpack_from("<IIII", fb, p + 40 * i + 8)
-        b = fb[rp:rp + rs]
-        for off in range(0, len(b) - 0xF0, 4):
-            if (u32(b, off + 0x20) == 0xF0
-                    and hashlib.sha256(b[off + 0x20:off + 0xF0]).digest() == b[off:off + 32]):
-                out.add(u32(b, off + 0x28) & 0x0FFFFFFF)
-    return sorted(out)
-
-
-# ---------------------------------------------------------------------- op=3 ABI
-
-class HwidReq(ctypes.Structure):
-    _pack_ = 1
-    _fields_ = [("op", ctypes.c_uint64), ("seg", ctypes.c_void_p),
-                ("status", ctypes.c_void_p), ("oem", ctypes.c_void_p),
-                ("type", ctypes.c_uint32), ("out", ctypes.c_void_p),
-                ("out_len", ctypes.c_void_p)]
-
-
-class PayloadReq(ctypes.Structure):
-    _pack_ = 1
-    _fields_ = [("op", ctypes.c_uint64), ("seg", ctypes.c_void_p),
-                ("status", ctypes.c_void_p), ("nonce", ctypes.c_void_p),
-                ("in_len", ctypes.c_uint32), ("inp", ctypes.c_void_p),
-                ("out_len", ctypes.c_void_p), ("out", ctypes.c_void_p),
-                ("ver", ctypes.c_void_p)]
-
-
-class DecryptReq(ctypes.Structure):
-    _pack_ = 1
-    _fields_ = [("op", ctypes.c_uint64), ("seg", ctypes.c_void_p),
-                ("status", ctypes.c_void_p), ("inp", ctypes.c_void_p),
-                ("in_len", ctypes.c_uint32), ("seed", ctypes.c_void_p),
-                ("out", ctypes.c_void_p), ("out_len", ctypes.c_void_p)]
-
-
-_nt = ctypes.WinDLL("ntdll").NtQuerySystemInformation
-_nt.restype = ctypes.c_long
-_nt.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
-
-
-def wb(r):
-    return _nt(0xB9, ctypes.byref(r), ctypes.sizeof(r), None) & 0xFFFFFFFF
-
-
-def base():
-    k = ctypes.WinDLL("kernel32", use_last_error=True)
-    k.LoadLibraryW.restype = ctypes.c_void_p
-    k.LoadLibraryW.argtypes = [ctypes.c_wchar_p]
-    b = k.LoadLibraryW(DLL)
-    if not b:
-        raise OSError("LoadLibraryW %s: %d" % (DLL, ctypes.get_last_error()))
-    return b
-
-
-def call_hwid(b, d):
-    st, n = ctypes.c_uint32(), ctypes.c_uint32(512)
-    out = (ctypes.c_ubyte * 512)()
-    nt = wb(HwidReq(3, b + d, ctypes.addressof(st), None, 1,
-                    ctypes.addressof(out), ctypes.addressof(n)))
-    n = min(n.value, 512)
-    return nt, st.value, bytes(out[:n]), n
-
-
-def call_payload(b, d, hwid):
-    sz = len(hwid) + 2252
-    buf, out = (ctypes.c_ubyte * sz)(*hwid), (ctypes.c_ubyte * sz)()
-    nonce = (ctypes.c_ubyte * len(hwid))(*hwid)
-    n, ver, st = ctypes.c_uint32(sz), ctypes.c_uint32(), ctypes.c_uint32()
-    nt = wb(PayloadReq(3, b + d, ctypes.addressof(st), ctypes.addressof(nonce),
-                       len(hwid), ctypes.addressof(buf), ctypes.addressof(n),
-                       ctypes.addressof(out), ctypes.addressof(ver)))
-    m = n.value
-    return nt, st.value, bytes(buf[:m]) if 0 < m <= sz else b"", m
-
-
-def call_decrypt(b, d, resp, seed):
-    sz = len(resp)
-    buf, out = (ctypes.c_ubyte * sz)(*resp), (ctypes.c_ubyte * sz)()
-    key, st = (ctypes.c_ubyte * 16)(*seed), ctypes.c_uint32()
-    n = ctypes.c_uint32(max(sz - 8, 0))
-    nt = wb(DecryptReq(3, b + d, ctypes.addressof(st), ctypes.addressof(buf), sz,
-                       ctypes.addressof(key), ctypes.addressof(out), ctypes.addressof(n)))
-    m = n.value
-    return nt, st.value, bytes(out[:m]) if 0 < m <= sz else b"", m
-
-
-# ------------------------------------------------------------------- child probe
-# A wrong descriptor faults, and a fault is a SEH exception that kills the process,
-# so probes run in a child; a chunk that dies is retried one descriptor at a time.
-
-def child():
-    raw = os.environ.get("WBFIND_CHILD")
-    if not raw:
-        return False
-    s = json.loads(raw)
-    b = base()
-    hwid = bytes.fromhex(s.get("hwid", ""))
-    seed = bytes.fromhex(s.get("seed", ""))
-    resp = open(s["resp"], "rb").read() if s.get("resp") else b""
-
-    for d in s["descs"]:
-        row = {"d": d}
-        try:
-            if s["mode"] == "hwid":
-                a, c = call_hwid(b, d), call_hwid(b, d)
-                row.update(nt=a[0], st=a[1], n=a[3], nz=any(a[2]),
-                           stable=a == c, h=a[2].hex())
-            elif s["mode"] == "payload":
-                a, c = call_payload(b, d, hwid), call_payload(b, d, hwid)
-                row.update(nt=a[0], st=a[1], n=a[3], n2=c[3],
-                           seeddiff=len(a[2]) > 16 and a[2][-16:] != c[2][-16:])
-                if s.get("dump"):
-                    row["full"] = a[2].hex()
-            else:
-                a = call_decrypt(b, d, resp, seed)
-                row.update(nt=a[0], st=a[1], n=a[3],
-                           prkf=0 <= a[2].find(b"PRKF") < 64)
-                if s.get("dump"):
-                    row["full"] = a[2].hex()
-        except Exception as e:
-            row["e"] = repr(e)
-        print(json.dumps(row), flush=True)
-    return True
-
-
-def run(mode, descs, timeout=T_CHUNK, **kw):
-    env = dict(os.environ, WBFIND_CHILD=json.dumps(dict(mode=mode, descs=descs, **kw)))
-    try:
-        out = subprocess.run([sys.executable, os.path.abspath(__file__)], env=env,
-                             capture_output=True, timeout=timeout).stdout
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout or b""
-    rows = {}
-    for ln in out.decode("utf-8", "replace").splitlines():
-        try:
-            r = json.loads(ln)
-            rows[r["d"]] = r
-        except (ValueError, KeyError):
-            pass
-    return rows
-
-
-def probe(mode, descs, **kw):
-    rows = {}
-    for i in range(0, len(descs), CHUNK):
-        chunk = descs[i:i + CHUNK]
-        got = run(mode, chunk, **kw)
-        for d in [d for d in chunk if d not in got]:
-            got.update(run(mode, [d], timeout=T_ONE, **kw))
-        for d in chunk:
-            rows[d] = got.get(d, {"d": d, "dead": True})
-        print("    %d/%d" % (min(i + CHUNK, len(descs)), len(descs)), flush=True)
-    return rows
-
-
-def dump(mode, d, **kw):
-    r = run(mode, [d], timeout=T_ONE, dump=True, **kw).get(d)
-    return bytes.fromhex(r["full"]) if r and r.get("full") else None
-
-
-# ------------------------------------------------------------------------ common
-
-def die(m):
-    raise SystemExit("[-] " + m)
-
-
 def wr(p, b):
     with open(p, "wb") as f:
         f.write(b)
@@ -247,38 +75,58 @@ def wr(p, b):
 
 def need(p, how):
     if not os.path.exists(p):
-        die("missing %s - run: python wbfind.py %s" % (p, how))
-    with open(p, "rb") as f:
-        return f.read()
+        wb.die("missing %s - run: python wb-find.py %s" % (p, how))
+    return p
 
 
-def rec(k, v):
-    o = {}
-    if os.path.exists(OFF):
+def load_cache():
+    try:
         with open(OFF) as f:
-            try:
-                o = json.load(f)
-            except ValueError:
-                pass
-    o[k] = v
+            c = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return c if c.get("dll_sha256") == wb.dll_sha() else {}
+
+
+def save_cache(c):
+    c["dll_sha256"] = wb.dll_sha()
     with open(OFF, "w") as f:
-        json.dump(o, f)
+        json.dump(c, f, indent=2)
 
 
-def good(r):
-    return bool(r) and not r.get("e") and not r.get("dead") \
-        and r.get("nt") == 0 and r.get("st") == 0
+def image():
+    sha = wb.dll_sha()
+    try:
+        with open(IMG + ".json") as f:
+            m = json.load(f)
+        if m.get("dll_sha256") == sha and m.get("size") == os.path.getsize(IMG):
+            print("[*] image cached (%d bytes)" % m["size"])
+            with open(IMG, "rb") as f:
+                return f.read()
+    except (OSError, ValueError):
+        pass
+    print("[*] decrypting the image")
+    img = wb.dec_image()
+    wr(IMG, img)
+    with open(IMG + ".json", "w") as f:
+        json.dump({"dll_sha256": sha, "size": len(img)}, f)
+    return img
 
 
-def pick(mode, descs, test, **kw):
-    rows = probe(mode, descs, **kw)
-    return [(d, r) for d in descs if good(r := rows.get(d)) and test(r)]
+def window(pay):
+    ds = sorted(wb.heaps(wb.scan()), key=lambda d: d["desc"])
+    ids = [d["desc"] for d in ds]
+    if pay not in ids:
+        wb.die("payload desc %#x is not a heap descriptor for this build" % pay)
+    i = ids.index(pay)
+    return ds[max(0, i - WINDOW):i + WINDOW + 1]
 
 
-def one(c, what):
-    if len(c) != 1:
-        die("%d %s descriptors%s" % (len(c), what, "".join(" %#x" % d for d, _ in c)))
-    return c[0]
+def one(c, kind):
+    if len(c) == 1:
+        return c[0]
+    wb.die("%d %s matches%s - raise WINDOW or set OFFSETS" %
+           (len(c), kind, "".join(" %#x" % d for d in c)))
 
 
 def post(payload):
@@ -287,79 +135,129 @@ def post(payload):
         headers={"Content-Type": "text/xml; charset=utf-8",
                  "SOAPAction": ACTION,
                  "User-Agent": "PlayReady PC SDK v3.0"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return r.read().decode("utf-8", "replace")
-
-
-def primary(xml):
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            xml = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        wb.die("HTTP %d: %s" % (e.code, e.read().decode("utf-8", "replace")[:300]))
     for el in ET.fromstring(xml).iter():
         if el.tag.rsplit("}", 1)[-1] == "primaryPayload" and el.text:
             return base64.b64decode(el.text)
-    raise ValueError("no primaryPayload in the response")
+    wb.die("no primaryPayload in the response")
+
+
+# ---------------------------------------------------------------------- discover
+
+def cmd_discover():
+    c = load_cache()
+    img = image()
+    ds = wb.scan()
+    cands = wb.pay_candidates(img, ds)
+    print("[*] payload candidates (0x8CC in decrypted code): %d" % len(cands))
+    if not cands:
+        wb.die("no decrypted heap block contains 0x8CC - delete %s and rerun" % IMG)
+
+    rows, _ = wb.probe("payload", cands, hwid=SYNTH.hex())
+    pay = one([d["desc"] for d in cands
+               if wb.ok(rows.get(d["desc"])) and rows[d["desc"]].get("seeddiff")],
+              "build-payload")
+    c["payload"] = pay
+    print("[+] payload desc=%#x" % pay)
+
+    win = window(pay)
+    print("[*] window %d descriptors around payload" % len(win))
+
+    rows, _ = wb.probe("hwid", win)
+    hw = [d["desc"] for d in win
+          if wb.ok(rows.get(d["desc"])) and rows[d["desc"]].get("stable")
+          and rows[d["desc"]]["nz"] and 1 <= rows[d["desc"]]["n"] <= 512]
+    c["hwid"] = one(hw, "get-HWID") if hw else 0
+    print("[+] hwid    desc=%#x" % c["hwid"] if c["hwid"]
+          else "[!] no get-HWID in window - skippable, write hwid.bin by hand")
+
+    wr(SYN, os.urandom(0x100))
+    rows, _ = wb.probe("decrypt", win, resp=os.path.abspath(SYN), seed="00" * 16)
+    dec = [d["desc"] for d in win
+           if wb.ok(rows.get(d["desc"])) and 0 < rows[d["desc"]]["n"] <= 0x1000]
+    if not dec:
+        wb.die("no decrypt candidate in the window - raise WINDOW and rerun")
+    c["decrypt"] = dec
+    print("[+] decrypt desc=%s"
+          % "".join(" %#x" % d for d in dec))
+    save_cache(c)
+    print("\nOFFSETS = {\"hwid\": %#x, \"payload\": %#x, \"decrypt\": %s}"
+          % (c["hwid"], c["payload"], [hex(d) for d in c["decrypt"]]))
 
 
 # ------------------------------------------------------------------------ stages
 
 def cmd_hwid():
-    d, r = one(pick("hwid", scan(),
-                    lambda r: r["stable"] and r["nz"] and 1 <= r["n"] <= 512), "get-HWID")
-    wr(HWID, bytes.fromhex(r["h"]))
-    rec("hwid", d)
-    print("[+] hwid    desc=%#x len=%d" % (d, r["n"]))
+    d = OFFSETS["hwid"] or load_cache().get("hwid") or 0
+    if not d:
+        wb.die("no get-HWID offset - run discover, or write %s by hand and skip"
+               " this stage (the service does not validate it)" % HWID)
+    nt, st, data, n = wb.call_hwid(wb.base(), d)
+    if nt or st or not 1 <= n <= 512:
+        wb.die("get-HWID nt=%#x status=%#x len=%d - rerun discover" % (nt, st, n))
+    wr(HWID, data)
+    print("[+] hwid    %d bytes  %s" % (n, data[:16].hex()))
 
 
 def cmd_payload():
-    hwid = need(HWID, "hwid")
-    lim = len(hwid) + 2252
-    d, _ = one(pick("payload", scan(),
-                    lambda r: r["n"] == r["n2"] and r["seeddiff"] and 1024 <= r["n"] <= lim,
-                    hwid=hwid.hex()), "build-payload")
-    p = dump("payload", d, hwid=hwid.hex()) or die("dump failed for desc %#x" % d)
-    wr(REQ, p)
-    rec("payload", d)
-    print("[+] payload desc=%#x len=%d seed=%s" % (d, len(p), p[-16:].hex()))
+    if os.path.exists(HWID):
+        hwid = open(HWID, "rb").read()
+    else:
+        hwid = SYNTH
+        wr(HWID, hwid)
+        print("[!] %s absent - wrote a synthetic %d-byte hwid" % (HWID, len(hwid)))
+    d = OFFSETS["payload"] or load_cache().get("payload") or 0
+    if not d:
+        wb.die("no payload offset - run discover")
+    nt, st, data, n = wb.call_payload(wb.base(), d, hwid)
+    if nt or st or len(data) < 32:
+        wb.die("build-payload nt=%#x status=%#x len=%d - rerun discover" % (nt, st, n))
+    wr(REQ, data)
+    print("[+] payload %d bytes  seed=%s" % (n, data[-16:].hex()))
 
 
 def cmd_activate():
-    p = need(REQ, "payload")
-    try:
-        resp = primary(post(p))
-    except Exception as e:
-        die(str(e))
+    p = open(need(REQ, "payload"), "rb").read()
+    resp = post(p)
     wr(RESP, resp)
     print("[+] response %d bytes" % len(resp))
 
 
 def cmd_decrypt():
-    req = need(REQ, "payload")
-    need(RESP, "activate")
-    seed, resp = req[-16:], os.path.abspath(RESP)
-    d, _ = one(pick("decrypt", scan(), lambda r: r["prkf"],
-                    resp=resp, seed=seed.hex()), "decrypt")
-    out = dump("decrypt", d, resp=resp, seed=seed.hex()) or die("dump failed for desc %#x" % d)
-    k = out.find(b"PRKF")
-    if k < 0:
-        die("no PRKF in decrypted output")
-    wr(BLA, out[k:])
-    rec("decrypt", d)
-    print("[+] decrypt desc=%#x -> %s (%d bytes)" % (d, BLA, len(out) - k))
+    req = open(need(REQ, "payload"), "rb").read()
+    resp = open(need(RESP, "activate"), "rb").read()
+    seed = req[-16:]
+    ds = OFFSETS["decrypt"] or load_cache().get("decrypt") or []
+    if isinstance(ds, int):
+        ds = [ds]
+    if not ds:
+        wb.die("no decrypt candidates - run discover")
+    b = wb.base()
+    for d in ds:
+        nt, st, data, _ = wb.call_decrypt(b, d, resp, seed)
+        k = data.find(b"PRKF")
+        if not nt and not st and k >= 0:
+            wr(BLA, data[k:])
+            print("[+] %s (%d bytes)  desc=%#x" % (BLA, len(data) - k, d))
+            c = load_cache()
+            c["decrypt"] = [d]
+            save_cache(c)
+            print("\nOFFSETS = {\"hwid\": %#x, \"payload\": %#x, \"decrypt\": [%#x]}"
+                  % (c.get("hwid", 0), c.get("payload", 0), d))
+            return
+    wb.die("none of %d decrypt candidates produced PRKF - rerun discover"
+           % len(ds))
 
-    o = {}
-    if os.path.exists(OFF):
-        with open(OFF) as f:
-            o = json.load(f)
-    if {"hwid", "payload", "decrypt"} <= set(o):
-        print("\npython prkf_gen.py --hwid-offset %#x --payload-offset %#x "
-              "--decrypt-offset %#x" % (o["hwid"], o["payload"], o["decrypt"]))
 
-
-MODES = {"hwid": cmd_hwid, "payload": cmd_payload,
+MODES = {"discover": cmd_discover, "hwid": cmd_hwid, "payload": cmd_payload,
          "activate": cmd_activate, "decrypt": cmd_decrypt}
 
 
 def main():
-    if child():
-        return 0
     if len(sys.argv) != 2 or sys.argv[1].lower() not in MODES:
         print(__doc__.strip(), file=sys.stderr)
         return 2
@@ -370,3 +268,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+# wb-find.py
