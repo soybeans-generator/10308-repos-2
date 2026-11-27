@@ -102,7 +102,7 @@ func getDashInitSegment(rep *dash.Representation, info *typeInfo) ([]byte, error
 }
 
 // listStreamsDash prints one representative per representation group,
-// ordered by mime type then bandwidth.
+// ordered by mime type, then height, then bandwidth.
 func listStreamsDash(mpd *dash.Mpd) error {
    var reps []*dash.Representation
    for _, group := range mpd.GetRepresentations() {
@@ -111,6 +111,7 @@ func listStreamsDash(mpd *dash.Mpd) error {
    slices.SortFunc(reps, func(a, b *dash.Representation) int {
       return cmp.Or(
          cmp.Compare(a.GetMimeType(), b.GetMimeType()),
+         cmp.Compare(a.GetWidth(), b.GetWidth()),
          cmp.Compare(a.Bandwidth, b.Bandwidth),
       )
    })
