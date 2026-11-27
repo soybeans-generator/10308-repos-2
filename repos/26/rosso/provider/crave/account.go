@@ -47,7 +47,7 @@ func PerformLogin(username string, password string) (*AccountToken, error) {
 }
 
 func (*AccountToken) CachePath() string {
-   return "rosso/crave/AccountToken"
+   return "rosso/provider/crave/AccountToken"
 }
 
 type Profile struct {
@@ -148,7 +148,7 @@ func SwitchProfile(account *AccountToken, profileId string) (*ProfileToken, erro
 }
 
 func (*ProfileToken) CachePath() string {
-   return "rosso/crave/ProfileToken"
+   return "rosso/provider/crave/ProfileToken"
 }
 
 type Subscription struct {

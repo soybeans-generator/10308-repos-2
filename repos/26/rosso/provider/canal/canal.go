@@ -145,7 +145,7 @@ type Player struct {
 }
 
 func (*Player) CachePath() string {
-   return "rosso/canal/Player"
+   return "rosso/provider/canal/Player"
 }
 
 func (p *Player) FetchWidevine(body []byte) ([]byte, error) {
@@ -189,7 +189,7 @@ func FetchSession(ssoToken string) (*Session, error) {
 }
 
 func (*Session) CachePath() string {
-   return "rosso/canal/Session"
+   return "rosso/provider/canal/Session"
 }
 
 func (s *Session) Episodes(tracking string, season int) ([]Episode, error) {

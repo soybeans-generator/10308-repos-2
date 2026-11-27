@@ -2,96 +2,13 @@ package main
 
 import (
    "41.neocities.org/maya"
-   "41.neocities.org/rosso/draken"
+   "41.neocities.org/rosso/provider/draken"
    "log"
+   "os"
    "path"
 )
 
-func (c *client) do_address() error {
-   playable_id, err := draken.FetchPlayableId(path.Base(c.address))
-   if err != nil {
-      return err
-   }
-   entitlement, err := draken.FetchEntitlement(c.Login.Token, playable_id)
-   if err != nil {
-      return err
-   }
-   c.Playback, err = draken.FetchPlayback(
-      c.Login.Token, playable_id, entitlement.Token,
-   )
-   if err != nil {
-      return err
-   }
-   c.Dash, err = maya.ListDash(c.Playback.GetManifest)
-   if err != nil {
-      return err
-   }
-   return cache.Write(c)
-}
-
-type client struct {
-   Login    *draken.Login
-   Playback *draken.Playback
-   Dash     *maya.Dash
-   //-----------------------
-   Job maya.Job
-   //-----------------------
-   email    string
-   password string
-   //-----------------------
-   address string
-}
-
-func (c *client) do() error {
-   err := cache.Setup("rosso/draken.xml")
-   if err != nil {
-      return err
-   }
-   with_cache := cache.Read(c)
-   widevine := maya.StringFlag(&c.Job.Widevine, "w", "Widevine")
-   //----------------------------------------------
-   email := maya.StringFlag(&c.email, "e", "email")
-   password := maya.StringFlag(&c.password, "p", "password")
-   //----------------------------------------------
-   address := maya.StringFlag(&c.address, "a", "address")
-   //----------------------------------------------
-   dash := maya.StringFlag(&c.Job.Dash, "d", "DASH ID")
-   err = maya.ParseFlags()
-   if err != nil {
-      return err
-   }
-   if widevine.IsSet {
-      return cache.Write(c)
-   }
-   if email.IsSet {
-      if password.IsSet {
-         return c.do_email_password()
-      }
-   }
-   if address.IsSet {
-      return with_cache(c.do_address)
-   }
-   if dash.IsSet {
-      return with_cache(c.do_dash)
-   }
-   return maya.PrintFlags([][]*maya.Flag{
-      {widevine},
-      {email, password},
-      {address},
-      {dash},
-   })
-}
-
-func (c *client) do_dash() error {
-   return c.Dash.Download(&c.Job,
-      func(data []byte) ([]byte, error) {
-         return c.Playback.FetchWidevine(c.Login.Token, data)
-      },
-   )
-}
-
 func main() {
-   maya.SetProxy("", "*.m4s")
    log.SetFlags(log.Ltime)
    err := new(client).do()
    if err != nil {
@@ -99,13 +16,104 @@ func main() {
    }
 }
 
-var cache maya.Cache
+type client struct {
+   Widevine maya.FlagString
+   address  maya.FlagString
+   cache    maya.Cache
+   dash_id  maya.FlagString
+   email    maya.FlagString
+   password maya.FlagString
+}
 
-func (c *client) do_email_password() error {
-   var err error
-   c.Login, err = draken.FetchLogin(c.email, c.password)
+func (*client) CachePath() string {
+   return "rosso/examples/draken/client"
+}
+
+func (c *client) do() error {
+   if err := c.cache.Setup(); err != nil {
+      return err
+   }
+   if err := c.cache.Decode(c); err != nil {
+      if !os.IsNotExist(err) {
+         return err
+      }
+   }
+   flags := maya.FlagSet{
+      {Name: "widevine-folder", Value: &c.Widevine},
+      {Name: "email", Value: &c.email, Needs: []string{"password"}},
+      {Name: "password", Value: &c.password, Needs: []string{"email"}},
+      {Name: "address", Value: &c.address},
+      {Name: "dash-id", Value: &c.dash_id},
+   }
+   if err := flags.Parse(os.Args[1:]); err != nil {
+      return err
+   }
+   if flags.IsSet(&c.Widevine) {
+      return c.cache.Encode(c)
+   }
+   if c.email != "" {
+      if c.password != "" {
+         return c.do_email_password()
+      }
+   }
+   if c.address != "" {
+      return c.do_address()
+   }
+   if c.dash_id != "" {
+      return c.do_dash_id()
+   }
+   return flags.Usage(os.Stderr, "draken")
+}
+
+func (c *client) do_address() error {
+   var login draken.Login
+   if err := c.cache.Decode(&login); err != nil {
+      return err
+   }
+   playable_id, err := draken.FetchPlayableId(
+      path.Base(string(c.address)),
+   )
    if err != nil {
       return err
    }
-   return cache.Write(c)
+   entitlement, err := draken.FetchEntitlement(login.Token, playable_id)
+   if err != nil {
+      return err
+   }
+   playback, err := draken.FetchPlayback(login.Token, playable_id, entitlement.Token)
+   if err != nil {
+      return err
+   }
+   manifest, err := maya.DashList(playback.Playlist)
+   if err != nil {
+      return err
+   }
+   return c.cache.Encode(manifest, playback)
+}
+
+func (c *client) do_dash_id() error {
+   var (
+      login    draken.Login
+      manifest maya.Manifest
+      playback draken.Playback
+   )
+   if err := c.cache.Decode(&login, &manifest, &playback); err != nil {
+      return err
+   }
+   license := func(data []byte) ([]byte, error) {
+      return playback.FetchWidevine(login.Token, data)
+   }
+   return maya.DashDownload(string(c.dash_id), &manifest, &maya.Options{
+      Device:  string(c.Widevine),
+      Drm:     maya.DrmWidevine,
+      License: license,
+   })
+}
+
+func (c *client) do_email_password() error {
+   login, err := draken.FetchLogin(string(c.email), string(c.password))
+   if err != nil {
+      return err
+   }
+   return c.cache.Encode(login)
 }

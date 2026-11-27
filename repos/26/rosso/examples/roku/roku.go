@@ -35,7 +35,9 @@ func (c *client) do() error {
       return err
    }
    if err := c.cache.Decode(c); err != nil {
-      return c.cache.Encode(c)
+      if !os.IsNotExist(err) {
+         return err
+      }
    }
    flags := maya.FlagSet{
       {Name: "widevine-folder", Value: &c.Widevine},

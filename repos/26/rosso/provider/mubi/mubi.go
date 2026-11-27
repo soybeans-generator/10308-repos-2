@@ -105,7 +105,7 @@ func FetchLinkCode() (*LinkCode, error) {
 }
 
 func (*LinkCode) CachePath() string {
-   return "rosso/mubi/LinkCode"
+   return "rosso/provider/mubi/LinkCode"
 }
 
 func (l *LinkCode) FetchSession() (*Session, error) {
@@ -169,7 +169,7 @@ type Session struct {
 }
 
 func (*Session) CachePath() string {
-   return "rosso/mubi/Session"
+   return "rosso/provider/mubi/Session"
 }
 
 func (s *Session) FetchSecureUrl(id int) (*SecureUrl, error) {

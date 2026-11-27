@@ -129,7 +129,7 @@ func GetActorToken(tokens *TokenPair, profile *Profile, deviceTypeID string) (*A
 }
 
 func (*ActorToken) CachePath() string {
-   return "rosso/amazon/ActorToken"
+   return "rosso/provider/amazon/ActorToken"
 }
 
 // CodePair represents the public and private codes used for device linking.
@@ -183,7 +183,7 @@ func CreateCodePair(deviceTypeID string) (*CodePair, error) {
 }
 
 func (*CodePair) CachePath() string {
-   return "rosso/amazon/CodePair"
+   return "rosso/provider/amazon/CodePair"
 }
 
 func (c *CodePair) String() string {
@@ -340,7 +340,7 @@ func PollRegister(codes *CodePair, deviceTypeID string) (*TokenPair, error) {
 }
 
 func (*TokenPair) CachePath() string {
-   return "rosso/amazon/TokenPair"
+   return "rosso/provider/amazon/TokenPair"
 }
 
 // Refresh exchanges the existing refresh token for a new access token

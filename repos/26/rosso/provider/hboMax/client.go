@@ -183,7 +183,7 @@ type Cookie struct {
 }
 
 func (*Cookie) CachePath() string {
-   return "rosso/hboMax/Cookie"
+   return "rosso/provider/hboMax/Cookie"
 }
 
 func (c *Cookie) String() string {
@@ -191,7 +191,7 @@ func (c *Cookie) String() string {
 }
 
 func (*Playback) CachePath() string {
-   return "rosso/hboMax/Playback"
+   return "rosso/provider/hboMax/Playback"
 }
 
 // GetManifest returns the MPD location with the "_fallback" marker removed.
@@ -199,8 +199,7 @@ func (p *Playback) GetManifest() string {
    return strings.Replace(p.Fallback.Manifest.Url, "_fallback", "", 1)
 }
 
-// SL2000 max 1080p
-// SL3000 max 2160p
+// SL3000 L1
 func (p *Playback) PlayReadyRequest(body []byte) ([]byte, error) {
    req, err := http.NewRequest(http.MethodPost, p.Drm.Schemes.PlayReady.LicenseUrl, bytes.NewReader(body))
    if err != nil {

@@ -39,7 +39,9 @@ func (c *client) do() error {
       return err
    }
    if err := c.cache.Decode(c); err != nil {
-      return c.cache.Encode(c)
+      if !os.IsNotExist(err) {
+         return err
+      }
    }
 
    c.bitrate_adaptation = "CVBR"

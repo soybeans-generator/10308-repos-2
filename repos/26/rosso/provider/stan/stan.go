@@ -56,7 +56,7 @@ func FetchActivationCode() (*ActivationCode, error) {
 }
 
 func (*ActivationCode) CachePath() string {
-   return "rosso/stan/ActivationCode"
+   return "rosso/provider/stan/ActivationCode"
 }
 
 func (a *ActivationCode) FetchToken() (*WebToken, error) {
@@ -120,7 +120,7 @@ type AppSession struct {
 }
 
 func (*AppSession) CachePath() string {
-   return "rosso/stan/AppSession"
+   return "rosso/provider/stan/AppSession"
 }
 
 // DRM options: "widevine" or "playready"
@@ -195,7 +195,7 @@ func (m *Media) BaseUrl(host string) (string, error) {
 }
 
 func (*Media) CachePath() string {
-   return "rosso/stan/Media"
+   return "rosso/provider/stan/Media"
 }
 
 // LicensePlayReady requests a PlayReady license. The response is raw XML.
@@ -270,7 +270,7 @@ type WebToken struct {
 }
 
 func (*WebToken) CachePath() string {
-   return "rosso/stan/WebToken"
+   return "rosso/provider/stan/WebToken"
 }
 
 // FetchSession exchanges the WebToken for a full AppSession.

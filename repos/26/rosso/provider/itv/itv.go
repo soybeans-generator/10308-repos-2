@@ -43,7 +43,7 @@ type MediaFile struct {
 }
 
 func (*MediaFile) CachePath() string {
-   return "rosso/itv/MediaFile"
+   return "rosso/provider/itv/MediaFile"
 }
 
 func (m *MediaFile) FetchKeyService(body []byte) ([]byte, error) {

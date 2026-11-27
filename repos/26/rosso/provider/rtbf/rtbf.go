@@ -108,7 +108,7 @@ func FetchAccount(id, password string) (*Account, error) {
 }
 
 func (*Account) CachePath() string {
-   return "rosso/rtbf/Account"
+   return "rosso/provider/rtbf/Account"
 }
 
 func (a *Account) Identity() (*Identity, error) {
@@ -148,7 +148,7 @@ type Entitlement struct {
 }
 
 func (*Entitlement) CachePath() string {
-   return "rosso/rtbf/Entitlement"
+   return "rosso/provider/rtbf/Entitlement"
 }
 
 func (e *Entitlement) FetchWidevine(body []byte) ([]byte, error) {

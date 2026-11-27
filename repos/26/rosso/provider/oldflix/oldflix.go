@@ -117,7 +117,7 @@ func FetchLogin(username, password string) (*Login, error) {
 }
 
 func (*Login) CachePath() string {
-   return "rosso/oldflix/Login"
+   return "rosso/provider/oldflix/Login"
 }
 
 // https://oldflix.com.br/browse/play/5d5d54a4d55dc050f8468513

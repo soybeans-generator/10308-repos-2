@@ -56,7 +56,7 @@ func CreateAccountActivation(token *AccountToken) (*AccountActivation, error) {
 }
 
 func (*AccountActivation) CachePath() string {
-   return "rosso/roku/AccountActivation"
+   return "rosso/provider/roku/AccountActivation"
 }
 
 func (a *AccountActivation) String() string {
@@ -107,7 +107,7 @@ func GetAccountToken(status *ActivationStatus) (*AccountToken, error) {
 }
 
 func (*AccountToken) CachePath() string {
-   return "rosso/roku/AccountToken"
+   return "rosso/provider/roku/AccountToken"
 }
 
 type ActivationStatus struct {
@@ -147,7 +147,7 @@ func GetActivationStatus(token *AccountToken, activation *AccountActivation) (*A
 }
 
 func (*ActivationStatus) CachePath() string {
-   return "rosso/roku/ActivationStatus"
+   return "rosso/provider/roku/ActivationStatus"
 }
 
 type Drm struct {
@@ -203,7 +203,7 @@ func GetPlayback(token *AccountToken, rokuId string) (*Playback, error) {
 }
 
 func (*Playback) CachePath() string {
-   return "rosso/roku/Playback"
+   return "rosso/provider/roku/Playback"
 }
 
 func (p *Playback) LicenseWidevine(challenge []byte) ([]byte, error) {

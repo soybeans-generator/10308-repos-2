@@ -97,7 +97,7 @@ func GetPhpSessId() (*Cookie, error) {
 }
 
 func (*Cookie) CachePath() string {
-   return "rosso/cineMember/Cookie"
+   return "rosso/provider/cineMember/Cookie"
 }
 
 func (c *Cookie) String() string {
