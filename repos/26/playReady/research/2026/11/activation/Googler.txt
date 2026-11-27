@@ -27,3 +27,7 @@ then wrapped in the xml data
 and then you need to parse the xml data from the response and grab the
 primaryPayload and base64 decode it then give it to the final function with the
 seed
+
+https://activation.playready.microsoft.com/PlayReady/ACT/Activation.asmx
+
+that is the real post url

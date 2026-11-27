@@ -2,12 +2,32 @@
 # usage: python prkf_gen.py --hwid-offset 0x.. --payload-offset 0x.. --decrypt-offset 0x..
 
 import argparse
+import base64
 import ctypes
 import sys
 import urllib.request
+import xml.etree.ElementTree as ET
 
-URL = "https://prp.spserv.microsoft.com/prp"
+URL = "https://activation.playready.microsoft.com/PlayReady/ACT/Activation.asmx"
+SOAP_ACTION = '"http://schemas.microsoft.com/PlayReady/ActivationService/v1/Activate"'
 DLL_NAME = "Windows.Media.Protection.PlayReady.dll"
+
+SOAP_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <Activate xmlns="http://schemas.microsoft.com/PlayReady/ActivationService/v1">
+      <challenge>
+        <clientSdkVersion>4.6.0.0</clientSdkVersion>
+        <clientSdkType>2</clientSdkType>
+        <platform>9</platform>
+        <tid>1</tid>
+        <payload>
+          <primaryPayload>{b64}</primaryPayload>
+        </payload>
+      </challenge>
+    </Activate>
+  </soap:Body>
+</soap:Envelope>"""
 
 
 class GetHwid(ctypes.Structure):
@@ -88,6 +108,22 @@ def decrypt_resp(off, dll, resp, key):
     return bytes(out[:outlen.value])
 
 
+def soap_post(payload):
+    body = SOAP_TEMPLATE.format(b64=base64.b64encode(payload).decode()).encode()
+    req = urllib.request.Request(URL, data=body, method="POST", headers={
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": SOAP_ACTION,
+        "User-Agent": "PlayReady PC SDK v3.0"})
+    return urllib.request.urlopen(req, timeout=60).read().decode()
+
+
+def extract_primary_payload(xml_text):
+    for el in ET.fromstring(xml_text).iter():
+        if el.tag.rsplit("}", 1)[-1] == "primaryPayload":
+            return base64.b64decode(el.text)
+    sys.exit("primaryPayload not found in response")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hwid-offset", type=lambda s: int(s, 0), required=True)
@@ -108,12 +144,8 @@ def main():
     payload = build_payload(a.payload_offset, dll, hwid)
     seed = payload[-16:]
 
-    req = urllib.request.Request(URL, data=payload, method="POST",
-                                 headers={"Content-Type": "application/octet-stream",
-                                          "User-Agent": "PlayReady PC SDK v3.0"})
-    resp = urllib.request.urlopen(req, timeout=60).read()
-    if len(resp) < 16:
-        sys.exit("bad activation response")
+    resp_xml = soap_post(payload)
+    resp = extract_primary_payload(resp_xml)
 
     prkf = decrypt_resp(a.decrypt_offset, dll, resp, seed)
     with open("msprcore.bla", "wb") as f:
