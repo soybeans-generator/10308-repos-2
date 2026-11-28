@@ -88,6 +88,9 @@ func (m Message) Encode() ([]byte, error) {
       if v.Field < 1 || v.Field > maxFieldNumber {
          return nil, fmt.Errorf("protobuf: index %d: invalid field number %d", i, v.Field)
       }
+      if v.Children != nil && v.Type != WireBytes {
+         return nil, fmt.Errorf("protobuf: field %d: children require wire type %d", v.Field, WireBytes)
+      }
 
       out = appendTag(out, v.Field, v.Type)
 
@@ -216,11 +219,11 @@ func (v *Value) Message() (Message, error) {
    if v == nil {
       return nil, fmt.Errorf("protobuf: nil value")
    }
-   if v.Children != nil {
-      return v.Children, nil
-   }
    if v.Type != WireBytes {
       return nil, fmt.Errorf("protobuf: field %d: wire type %d is not an embedded message", v.Field, v.Type)
+   }
+   if v.Children != nil {
+      return v.Children, nil
    }
    return Decode(v.Bytes)
 }
