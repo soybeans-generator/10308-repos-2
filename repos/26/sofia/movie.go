@@ -1,5 +1,4 @@
-// movie.go KEEP THIS LINE
-package sofia
+package sofia // movie.go
 
 import (
    "bytes"
@@ -190,5 +189,3 @@ func (b *MvhdBox) SetDuration(duration uint64) {
       b.Version = 1
    }
 }
-
-// movie.go KEEP THIS LINE

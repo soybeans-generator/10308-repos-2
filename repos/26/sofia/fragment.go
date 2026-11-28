@@ -1,5 +1,4 @@
-// fragment.go KEEP THIS LINE
-package sofia
+package sofia // fragment.go
 
 import (
    "errors"
@@ -361,5 +360,3 @@ func (r *Remuxer) processFragment(moof *MoofBox, mdat *MdatBox) error {
    r.segmentSampleCounts = append(r.segmentSampleCounts, uint32(len(newSamples)))
    return nil
 }
-
-// fragment.go KEEP THIS LINE

@@ -1,5 +1,4 @@
-// track.go KEEP THIS LINE
-package sofia
+package sofia // track.go
 
 import (
    "errors"
@@ -423,5 +422,3 @@ func (b *TrakBox) Encode() []byte {
 func (b *TrakBox) RemoveEdts() {
    b.RawChildren = removeChildren(b.RawChildren, "edts")
 }
-
-// track.go KEEP THIS LINE
