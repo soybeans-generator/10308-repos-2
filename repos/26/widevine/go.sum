@@ -1,4 +1,4 @@
-41.neocities.org/protobuf v1.8.3 h1:deIyOF4eaPhHfrFcerE0d5yxAYG3/MmQQQ3x5stHzJM=
-41.neocities.org/protobuf v1.8.3/go.mod h1:oxOLuB0urSf6Tt1GaEXVMJBS1SIvyY23ax4It1o3iNQ=
-github.com/emmansun/gmsm v0.45.3 h1:HARYZrtG4JqFl4ZKwk01Oym1WnSPmafQME7TxuTaGYk=
-github.com/emmansun/gmsm v0.45.3/go.mod h1:RfnfrzyB9XbDi73nF1NHbJeqJj+a6pg/pXr5lrZKMok=
+41.neocities.org/protobuf v1.8.4 h1:Qb5EdB4rhEr+88NPllbXvwxyYY+AwSVYLzOQzT+Y44M=
+41.neocities.org/protobuf v1.8.4/go.mod h1:oxOLuB0urSf6Tt1GaEXVMJBS1SIvyY23ax4It1o3iNQ=
+github.com/emmansun/gmsm v0.45.4 h1:8JGSr/aos2cnU75keyXgKV9Vri633y0522jlvR4Qa78=
+github.com/emmansun/gmsm v0.45.4/go.mod h1:1wuVNp9NKEbJxv9bwHFgQdhv62ztAnUIiDqR8uvMau4=
