@@ -1,5 +1,4 @@
-// generator.go KEEP THIS LINE
-package claire
+package claire // generator.go
 
 import (
    _ "embed"
@@ -188,5 +187,3 @@ type VarDoc struct {
    Doc        string
    Definition template.HTML
 }
-
-// generator.go KEEP THIS LINE

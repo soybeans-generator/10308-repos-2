@@ -1,5 +1,4 @@
-// highlight.go KEEP THIS LINE
-package claire
+package claire // highlight.go
 
 import (
    "bytes"
