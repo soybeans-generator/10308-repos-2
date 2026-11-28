@@ -1,5 +1,4 @@
-// remuxer.go KEEP THIS LINE
-package sofia
+package sofia // remuxer.go
 
 import (
    "encoding/binary"
@@ -428,5 +427,3 @@ func (b *boxReader) Read(p []byte) (int, error) {
    b.N += int64(n)
    return n, err
 }
-
-// remuxer.go KEEP THIS LINE

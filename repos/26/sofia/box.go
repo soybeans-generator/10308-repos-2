@@ -1,5 +1,4 @@
-// box.go KEEP THIS LINE
-package sofia
+package sofia // box.go
 
 import (
    "encoding/binary"
@@ -240,5 +239,3 @@ func (w *writer) PutUint64(val uint64) {
    binary.BigEndian.PutUint64(w.buf[w.offset:], val)
    w.offset += 8
 }
-
-// box.go KEEP THIS LINE

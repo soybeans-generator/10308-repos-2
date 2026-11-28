@@ -1,5 +1,4 @@
-// state.go KEEP THIS LINE
-package sofia
+package sofia // state.go
 
 import (
    "errors"
@@ -152,5 +151,3 @@ func StateFromMoov(moovData []byte) (*RemuxState, error) {
       SamplesPerChunk: samplesPerChunk,
    }, nil
 }
-
-// state.go KEEP THIS LINE

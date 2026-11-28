@@ -1,5 +1,4 @@
-// tables.go KEEP THIS LINE
-package sofia
+package sofia // tables.go
 
 import (
    "encoding/binary"
@@ -459,5 +458,3 @@ type SttsEntry struct {
    SampleCount    uint32
    SampleDuration uint32
 }
-
-// tables.go KEEP THIS LINE

@@ -1,5 +1,4 @@
-// encryption.go KEEP THIS LINE
-package sofia
+package sofia // encryption.go
 
 import (
    "crypto/cipher"
@@ -172,5 +171,3 @@ func (b *TencBox) Encode() []byte {
    }
    return encodeBox(b.Header, body, nil)
 }
-
-// encryption.go KEEP THIS LINE
