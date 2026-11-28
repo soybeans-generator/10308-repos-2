@@ -1,5 +1,4 @@
-// parser.go KEEP THIS LINE
-package claire
+package claire // parser.go
 
 import (
    "fmt"
