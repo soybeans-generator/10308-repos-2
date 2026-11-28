@@ -60,11 +60,8 @@ def pe_sections(fb):
     p = lf + 24 + opt
     if n <= 0 or p + 40 * n > len(fb):
         return []
-    out = []
-    for _ in range(n):
-        out.append((u32(fb, p + 12), u32(fb, p + 16), u32(fb, p + 20)))
-        p += 40
-    return out
+    return [(u32(fb, p + 40 * i + 12), u32(fb, p + 40 * i + 16),
+             u32(fb, p + 40 * i + 20)) for i in range(n)]
 
 
 def census(fb, maxsize=0x200000):

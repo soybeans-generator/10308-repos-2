@@ -1,20 +1,21 @@
 # tool.py
 #
-#   python tool.py --hwid "MY.ID.TEXT"   request, save the response
-#   python tool.py --decrypt             decrypt it to msprcore.bla
+#   python tool.py --hwid "MY.ID.TEXT"   request
+#   python tool.py --decrypt             decrypt to testdata/msprcore.bla
 #
-# Every file it writes goes in testdata/:
-#   testdata/payload.bin       request payload; its tail is the next seed
-#   testdata/response.bin      the decoded primaryPayload
-#   testdata/msprcore.bla      the decrypted PRKF
-#   testdata/tool-state.json   census and discovered RVAs (also wbcall.py's)
+# Everything written goes in testdata/: payload.bin, response.bin,
+# msprcore.bla, tool-state.json, sweep.log.
 #
-# No RVA is hardcoded. Both descriptor offsets differ between DLL builds, so
-# each is discovered once and cached under the DLL sha256:
+# One probe = one child process, PROBE_TIMEOUT seconds each. A descriptor that
+# hangs in native code is recorded once and never probed again; every verdict
+# is appended to testdata/sweep.log as it is known, so an interrupted run
+# resumes.
+#
+# No RVA is hardcoded; both are discovered and cached under the DLL sha256:
 #   builder   output length input + 2252 with a constant 20-byte prologue
 #   decrypt   returns PRKF or CHAI
 #
-# No captured file is required. The 49-byte nonce is built here:
+# No captured file is needed: the 49-byte nonce is built here,
 #   01 | FILETIME(8) | 28 | 27 constants | 12-byte HWID tail
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from xml.etree import ElementTree as ET
 DLL = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
 OUT = "testdata"
 STATE = os.path.join(OUT, "tool-state.json")
+LOG = os.path.join(OUT, "sweep.log")
 PAYLOAD = os.path.join(OUT, "payload.bin")
 RESPONSE = os.path.join(OUT, "response.bin")
 BLA = os.path.join(OUT, "msprcore.bla")
@@ -45,20 +47,23 @@ NO_WINDOW = 0x08000000
 
 SDK, SDK_TYPE, PLATFORM, TID = "4.3.0.0", "2", "9", "1"
 TIMEOUT = 60.0
-EXTRA, TAIL, NVAR, LANES, CHUNK = 2252, 12, 4, 16, 40
+PROBE_TIMEOUT = 15.0
+EXTRA, TAIL, NVAR, LANES = 2252, 12, 4, 16
 
 PROLOGUE = bytes.fromhex("010000000c1bfa0084723e622f607a2c5e80f5f7")
 CONST27 = bytes.fromhex("0000000000000000" "02000000" "00020000"
                         "000100" "010001" "0096" "7d0000")
 
 
-def wbcall(*args, timeout=900):
+def wbcall(*args, timeout=PROBE_TIMEOUT):
     exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wbcall.py")
     try:
         p = subprocess.run([sys.executable, exe, *args], capture_output=True,
                            timeout=timeout, creationflags=NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return [], f"timeout {timeout:g}s"
     except Exception as e:
-        return [], str(e)
+        return [], f"{type(e).__name__}: {e}"
     rows, err = [], None
     for line in p.stdout.decode("utf-8", "replace").splitlines():
         line = line.strip()
@@ -85,8 +90,7 @@ def state():
 
 def remember(sha, **kv):
     d = state()
-    rec = d.setdefault("rva:" + sha, {})
-    rec.update(kv)
+    d.setdefault("rva:" + sha, {}).update(kv)
     try:
         os.makedirs(OUT, exist_ok=True)
         with open(STATE, "w") as f:
@@ -99,89 +103,89 @@ def cached(sha, key):
     return state().get("rva:" + sha, {}).get(key)
 
 
+def log_load():
+    s = set()
+    try:
+        with open(LOG) as f:
+            lines = f.readlines()
+    except OSError:
+        return s
+    for line in lines:
+        p = line.split()
+        if len(p) == 3:
+            try:
+                s.add((p[0], int(p[1]), int(p[2])))
+            except ValueError:
+                pass
+    return s
+
+
+def log_add(kind, idx, var):
+    try:
+        os.makedirs(OUT, exist_ok=True)
+        with open(LOG, "a") as f:
+            f.write(f"{kind} {idx} {var}\n")
+    except OSError:
+        pass
+
+
 def census_info():
-    """(sha, heap count, descriptor VAs), computing the census if absent."""
-    rows, err = wbcall("census", "--dll", DLL)
-    if err:
-        raise RuntimeError(err)
+    rows, err = wbcall("census", "--dll", DLL, timeout=120)
+    if err or not rows:
+        raise RuntimeError(err or "no census row")
     sha = rows[0]["sha"]
     st = state().get("census:" + sha, {})
     return sha, rows[0]["census"][0], [h[0] for h in st.get("heaps") or []]
 
 
-class Sweeper:
-    """Binary-split recovery: a crashed chunk halves instead of bleeding."""
+def run(probes, fn, label):
+    """probes: [(kind, idx, var)]. fn(kind, idx, var) -> (hit row | None, err)."""
+    done = log_load()
+    todo = [p for p in probes if p not in done]
+    skip = len(probes) - len(todo)
+    print(f"[{label}] {len(todo)} probe(s)" + (f", {skip} cached" if skip else ""))
+    if not todo:
+        return None
 
-    def __init__(self, jobs, fn, hit):
-        self.fn, self.hit, self.jobs = fn, hit, jobs
-        self.lock = threading.Lock()
-        self.stop = threading.Event()
-        self.found, self.errs = [], []
-        self.done = self.faults = 0
-        self.qi = 0
+    lock = threading.Lock()
+    stop = threading.Event()
+    box = {"qi": 0, "n": 0, "hit": None}
+    errs = []
+    t0 = time.monotonic()
 
-    def run(self, job):
-        var, ids = job
-        if not ids or self.stop.is_set():
-            return
-        rows, err = self.fn(var, ids)
-        if err:
-            with self.lock:
-                if len(self.errs) < 4 and err not in self.errs:
-                    self.errs.append(err)
-        last = -1
-        for k, i in enumerate(ids):
-            r = rows.get(i)
-            if r is None:
-                break
-            last = k
-            with self.lock:
-                self.done += 1
-            if self.hit(r):
-                with self.lock:
-                    self.found.append(r)
-                self.stop.set()
-                return
-        rest = ids[last + 1:]
-        if not rest:
-            return
-        with self.lock:
-            self.faults += 1
-        if len(rest) == 1:
-            return
-        mid = len(rest) // 2
-        self.run((var, rest[:mid]))
-        self.run((var, rest[mid:]))
-
-    def lane(self):
-        while not self.stop.is_set():
-            with self.lock:
-                if self.qi >= len(self.jobs):
+    def lane():
+        while not stop.is_set():
+            with lock:
+                if box["qi"] >= len(todo):
                     return
-                job = self.jobs[self.qi]
-                self.qi += 1
-            self.run(job)
+                p = todo[box["qi"]]
+                box["qi"] += 1
+            r, err = fn(*p)
+            log_add(*p)
+            with lock:
+                box["n"] += 1
+                k = box["n"]
+                if err and err not in errs and len(errs) < 6:
+                    errs.append(err)
+                if r is not None:
+                    box["hit"] = r
+                    stop.set()
+                    return
+            if k % 100 == 0:
+                el = max(time.monotonic() - t0, 1e-9)
+                print(f"    {k}/{len(todo)}  {el:.0f}s  {k / el:.0f}/s",
+                      flush=True)
 
-    def go(self, total):
-        ts = [threading.Thread(target=self.lane, daemon=True)
-              for _ in range(LANES)]
-        t0 = time.monotonic()
-        for t in ts:
-            t.start()
-        last = 0.0
-        while any(t.is_alive() for t in ts):
-            time.sleep(0.4)
-            if self.stop.is_set():
-                break
-            if time.monotonic() - last >= 2.0:
-                last = time.monotonic()
-                with self.lock:
-                    n, f = self.done, self.faults
-                print(f"    {n}/{total}  faults {f}  "
-                      f"({time.monotonic() - t0:.1f}s)", flush=True)
-        for t in ts:
-            t.join(timeout=0.5)
-        return self.found, self.errs, time.monotonic() - t0, self.done
+    ts = [threading.Thread(target=lane, daemon=True) for _ in range(LANES)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    el = time.monotonic() - t0
+    print(f"[{label}] {box['n']}/{len(todo)} in {el:.0f}s")
+    for e in errs:
+        print(f"    {e}")
+    return box["hit"]
 
 
 def near_first(count, vas, anchor):
@@ -191,68 +195,71 @@ def near_first(count, vas, anchor):
 
 
 def find_build(sha, count, vas):
-    if (got := cached(sha, "build")) is not None:
-        print(f"[i] builder  {got:#x}  (cached)")
-        return got
-    ids = near_first(count, vas, None)
-    jobs = [("", ids[i:i + CHUNK]) for i in range(0, len(ids), CHUNK)]
+    rva = cached(sha, "build")
+    if rva is not None:
+        print(f"[i] builder  {rva:#x}  (cached)")
+        return rva
 
-    def fn(_var, chunk):
-        rows, err = wbcall("sweepbuild", (b"\x00" * 49).hex(),
-                           ",".join(map(str, chunk)), "--dll", DLL)
-        return {r["i"]: r for r in rows if "i" in r}, err
+    ident = b"\x00" * 49
+    info = {}
 
-    def hit(r):
-        return (r["st"] == 0 and r["nt"] == 0 and r["n"] == 49 + EXTRA
-                and r["head"] == PROLOGUE.hex())
+    def fn(_k, i, _v):
+        rows, err = wbcall("sweepbuild", ident.hex(), str(i), "--dll", DLL)
+        for r in rows:
+            if "prep" in r and "prep" not in info:
+                info["prep"] = r["prep"]
+            if ("i" in r and r["st"] == 0 and r["nt"] == 0
+                    and r["n"] == 49 + EXTRA and r["head"] == PROLOGUE.hex()):
+                return r, None
+        return None, err
 
-    print(f"\n[find] builder: {count} descriptors")
-    hits, errs, dt, n = Sweeper(jobs, fn, hit).go(count)
-    print(f"[find] {n}/{count} in {dt:.1f}s  hits {len(hits)}")
-    for e in errs:
-        print(f"    child: {e}")
-    if not hits:
-        print(f"[-] nothing produced {49 + EXTRA} bytes with prologue "
+    hit = run([("b", i, 0) for i in near_first(count, vas, None)], fn, "builder")
+    if "prep" in info:
+        p = info["prep"]
+        print(f"[i] prep     {p[0]}/{p[1]} segments"
+              + (f"  first err {p[2]}" if p[2] else ""))
+    if hit is None:
+        print(f"[-] no descriptor produced {49 + EXTRA} B with prologue "
               f"{PROLOGUE.hex()}")
         return None
-    rva = hits[0]["d"]
-    remember(sha, build=rva)
-    print(f"[i] builder  {rva:#x}  (discovered)")
-    return rva
+    remember(sha, build=hit["d"])
+    print(f"[i] builder  {hit['d']:#x}  (discovered)")
+    return hit["d"]
 
 
 def find_dec(sha, count, vas, resp, seed, build_rva):
     rva = cached(sha, "dec")
     if rva is not None:
-        print(f"[i] decrypt  {rva:#x}  (cached)")
-        return rva, cached(sha, "decvar") or 0
-    ids = near_first(count, vas, build_rva)
-    jobs = [(v, ids[i:i + CHUNK])
-            for v in range(NVAR) for i in range(0, len(ids), CHUNK)]
+        var = cached(sha, "decvar") or 0
+        print(f"[i] decrypt  {rva:#x} variant {var}  (cached)")
+        return rva, var
 
-    def fn(var, chunk):
-        rows, err = wbcall("sweepdec", resp.hex(), seed.hex(), str(var),
-                           ",".join(map(str, chunk)), "--dll", DLL)
-        return ({r["i"]: r for r in rows
-                 if "i" in r and r.get("v") == var}, err)
+    info = {}
 
-    def hit(r):
-        return r["st"] == 0 and r["nt"] == 0 and (r["prkf"] >= 0 or r["chai"] >= 0)
+    def fn(_k, i, v):
+        rows, err = wbcall("sweepdec", resp.hex(), seed.hex(), str(v), str(i),
+                           "--dll", DLL)
+        for r in rows:
+            if "prep" in r and "prep" not in info:
+                info["prep"] = r["prep"]
+            if ("i" in r and r["v"] == v and r["st"] == 0 and r["nt"] == 0
+                    and (r["prkf"] >= 0 or r["chai"] >= 0)):
+                return r, None
+        return None, err
 
-    total = count * NVAR
-    print(f"\n[find] decrypt: {count} descriptors x {NVAR} variants")
-    hits, errs, dt, n = Sweeper(jobs, fn, hit).go(total)
-    print(f"[find] {n}/{total} in {dt:.1f}s  hits {len(hits)}")
-    for e in errs:
-        print(f"    child: {e}")
-    if not hits:
-        print(f"[-] no descriptor decrypted this response "
-              f"({n}/{total} probed)")
+    order = near_first(count, vas, build_rva)
+    hit = run([("d", i, v) for v in range(NVAR) for i in order], fn, "decrypt")
+    if "prep" in info:
+        p = info["prep"]
+        print(f"[i] prep     {p[0]}/{p[1]} segments"
+              + (f"  first err {p[2]}" if p[2] else ""))
+    if hit is None:
+        print(f"[-] no descriptor decrypted this response under any of the "
+              f"{NVAR} block shapes")
         return None, None
-    rva, var = hits[0]["d"], hits[0]["v"]
-    remember(sha, dec=rva, decvar=var)
-    print(f"[i] decrypt  {rva:#x} variant {var}  (discovered)")
-    return rva, var
+    remember(sha, dec=hit["d"], decvar=hit["v"])
+    print(f"[i] decrypt  {hit['d']:#x} variant {hit['v']}  (discovered)")
+    return hit["d"], hit["v"]
 
 
 def make_nonce(label):
@@ -324,7 +331,7 @@ def build(rva, ident):
         raise RuntimeError(err)
     row = next((r for r in rows if "tag" in r), None)
     if not row or row["st"] or row["nt"]:
-        raise RuntimeError(err or f"call failed {row and row['st']:#010x}")
+        raise RuntimeError(f"call failed {row and row['st']:#010x}")
     return bytes.fromhex(row["payload"])
 
 
@@ -372,7 +379,8 @@ def cmd_request(hwid):
         dec = base64.b64decode(info["payload"])
         with open(RESPONSE, "wb") as f:
             f.write(dec)
-        print(f"    saved {RESPONSE} ({len(dec)} B)\n\nnext: python tool.py --decrypt")
+        print(f"    saved {RESPONSE} ({len(dec)} B)"
+              f"\n\nnext: python tool.py --decrypt")
     else:
         print("    no primaryPayload in the reply")
     return 0
@@ -421,7 +429,7 @@ def cmd_decrypt():
         return 1
 
     rows, err = wbcall("dec", f"{rva:x}", resp.hex(), seed.hex(), str(var),
-                       "--dll", DLL)
+                       "--dll", DLL, timeout=120)
     row = next((r for r in rows if "out" in r), None) if not err else None
     if not row or row["st"] or row["nt"]:
         print(f"[x] dec failed: {err or hex(row and row['st'])}")
@@ -451,7 +459,12 @@ def main(argv=None):
     mode.add_argument("--decrypt", action="store_true", help="decrypt mode")
     a = ap.parse_args(argv)
     os.makedirs(OUT, exist_ok=True)
-    return cmd_request(a.hwid) if a.hwid is not None else cmd_decrypt()
+    try:
+        return cmd_request(a.hwid) if a.hwid is not None else cmd_decrypt()
+    except KeyboardInterrupt:
+        print("\n[!] interrupted - rerun the same command to resume; "
+              "verdicts so far are in testdata\\sweep.log")
+        os._exit(130)
 
 
 if __name__ == "__main__":
