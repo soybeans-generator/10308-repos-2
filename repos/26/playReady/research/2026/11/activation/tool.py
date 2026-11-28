@@ -3,22 +3,18 @@
 #   python tool.py --hwid "MY.ID.TEXT"   request
 #   python tool.py --decrypt             decrypt to testdata/msprcore.bla
 #
-# Everything written goes in testdata/: payload.bin, response.bin,
-# msprcore.bla, tool-state.json, sweep.log.
+# Writes only testdata/: payload.bin, response.bin, msprcore.bla,
+# tool-state.json. The DLL path lives in wbcall.py and every call inherits it.
 #
-# One probe = one child process, PROBE_TIMEOUT seconds each. A descriptor that
-# hangs in native code is recorded once and never probed again; every verdict
-# is appended to testdata/sweep.log as it is known, so an interrupted run
-# resumes.
+# A fault is free: wbcall.py catches it per descriptor. A death costs one index,
+# which is retired and cached; a hang is caught by IDLE and treated the same.
+# That cache is why a second run against the same DLL is instant.
 #
-# No RVA is hardcoded; both are discovered and cached under the DLL sha256:
-#   builder   output length input + 2252 with a constant 20-byte prologue
-#   decrypt   returns PRKF or CHAI
+# The builder is chosen by the service, not by a heuristic: candidates that
+# answer with 01000000 and size output to input are POSTed until one is
+# accepted. Rejected ones are remembered.
 #
-# No captured file is needed: the 49-byte nonce is built here,
-#   01 | FILETIME(8) | 28 | 27 constants | 12-byte HWID tail
-
-from __future__ import annotations
+# The 49-byte nonce is built locally: 01 | FILETIME | 28 | 27 constants | HWID.
 
 import argparse
 import base64
@@ -34,50 +30,87 @@ import time
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
-DLL = r"C:\Windows\SYSTEM32\Windows.Media.Protection.PlayReady.dll"
 OUT = "testdata"
 STATE = os.path.join(OUT, "tool-state.json")
-LOG = os.path.join(OUT, "sweep.log")
 PAYLOAD = os.path.join(OUT, "payload.bin")
 RESPONSE = os.path.join(OUT, "response.bin")
 BLA = os.path.join(OUT, "msprcore.bla")
 URL = "https://activation.playready.microsoft.com/PlayReady/ACT/Activation.asmx"
 NS = "http://schemas.microsoft.com/PlayReady/ActivationService/v1"
 NO_WINDOW = 0x08000000
+FAULT = 0xFFFFFFFF
 
 SDK, SDK_TYPE, PLATFORM, TID = "4.3.0.0", "2", "9", "1"
 TIMEOUT = 60.0
-PROBE_TIMEOUT = 15.0
-EXTRA, TAIL, NVAR, LANES = 2252, 12, 4, 16
+IDLE = 4.0
+HARD = 300.0
+EXTRA, TAIL, NVAR = 2252, 12, 4
+CHUNK, LANES, CAND = 200, 6, 8
+HEAD4 = "01000000"
 
-PROLOGUE = bytes.fromhex("010000000c1bfa0084723e622f607a2c5e80f5f7")
 CONST27 = bytes.fromhex("0000000000000000" "02000000" "00020000"
                         "000100" "010001" "0096" "7d0000")
 
 
-def wbcall(*args, timeout=PROBE_TIMEOUT):
+def batch_run(argv, idle=IDLE, hard=HARD):
+    """Run wbcall.py, collecting rows as they arrive.
+
+    stderr is merged into stdout so a traceback cannot fill a pipe, and the
+    child is killed when no new row has appeared for idle seconds. Rows already
+    received are kept: the caller needs to know how far it got.
+    """
     exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wbcall.py")
     try:
-        p = subprocess.run([sys.executable, exe, *args], capture_output=True,
-                           timeout=timeout, creationflags=NO_WINDOW)
-    except subprocess.TimeoutExpired:
-        return [], f"timeout {timeout:g}s"
+        p = subprocess.Popen([sys.executable, exe] + argv,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT,
+                             creationflags=NO_WINDOW)
     except Exception as e:
-        return [], f"{type(e).__name__}: {e}"
-    rows, err = [], None
-    for line in p.stdout.decode("utf-8", "replace").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
+        return [], "%s: %s" % (type(e).__name__, e)
+
+    rows, tail = [], []
+
+    def read():
+        for raw in p.stdout:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("{"):
+                if line:
+                    tail.append(line)
+                    del tail[:-4]
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "err" in r and "tag" not in r and "i" not in r:
+                tail.append(r["err"])
+            else:
+                rows.append(r)
+
+    t = threading.Thread(target=read, daemon=True)
+    t.start()
+
+    t0 = mark = time.monotonic()
+    seen = 0
+    while t.is_alive():
+        time.sleep(0.05)
+        n = len(rows)
+        if n != seen:
+            seen, mark = n, time.monotonic()
             continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if "err" in r:
-            err = r["err"]
-        else:
-            rows.append(r)
-    return rows, err
+        now = time.monotonic()
+        if now - mark > idle or now - t0 > hard:
+            p.kill()
+            return rows, "stall"
+    try:
+        p.wait(timeout=5)
+    except Exception:
+        p.kill()
+    return rows, (tail[-1] if tail and not rows else None)
+
+
+def wbcall(*args, timeout=120):
+    return batch_run(list(args), idle=timeout, hard=timeout * 4)
 
 
 def state():
@@ -88,9 +121,7 @@ def state():
         return {}
 
 
-def remember(sha, **kv):
-    d = state()
-    d.setdefault("rva:" + sha, {}).update(kv)
+def save(d):
     try:
         os.makedirs(OUT, exist_ok=True)
         with open(STATE, "w") as f:
@@ -103,89 +134,109 @@ def cached(sha, key):
     return state().get("rva:" + sha, {}).get(key)
 
 
-def log_load():
-    s = set()
-    try:
-        with open(LOG) as f:
-            lines = f.readlines()
-    except OSError:
-        return s
-    for line in lines:
-        p = line.split()
-        if len(p) == 3:
-            try:
-                s.add((p[0], int(p[1]), int(p[2])))
-            except ValueError:
-                pass
-    return s
+def remember(sha, **kv):
+    d = state()
+    d.setdefault("rva:" + sha, {}).update(kv)
+    save(d)
 
 
-def log_add(kind, idx, var):
-    try:
-        os.makedirs(OUT, exist_ok=True)
-        with open(LOG, "a") as f:
-            f.write(f"{kind} {idx} {var}\n")
-    except OSError:
-        pass
+def get_list(key):
+    return list(state().get(key, []))
+
+
+def add_list(key, vals):
+    if vals:
+        d = state()
+        d[key] = sorted(set(d.get(key, [])) | set(vals))
+        save(d)
+
+
+def dead(sha, kind):
+    return set(state().get("dead:%s:%s" % (kind, sha), []))
 
 
 def census_info():
-    rows, err = wbcall("census", "--dll", DLL, timeout=120)
-    if err or not rows:
+    rows, err = wbcall("census")
+    if not rows:
         raise RuntimeError(err or "no census row")
     sha = rows[0]["sha"]
     st = state().get("census:" + sha, {})
     return sha, rows[0]["census"][0], [h[0] for h in st.get("heaps") or []]
 
 
-def run(probes, fn, label):
-    """probes: [(kind, idx, var)]. fn(kind, idx, var) -> (hit row | None, err)."""
-    done = log_load()
-    todo = [p for p in probes if p not in done]
-    skip = len(probes) - len(todo)
-    print(f"[{label}] {len(todo)} probe(s)" + (f", {skip} cached" if skip else ""))
-    if not todo:
-        return None
-
+def sweep(ids, fn, hit, label, sha, kind, maxhits=1):
+    """A missing row means the child died there: retire that index, resume after
+    it. Each iteration therefore either answers descriptors or eliminates one."""
+    known = dead(sha, kind)
+    ids = [i for i in ids if i not in known]
     lock = threading.Lock()
     stop = threading.Event()
-    box = {"qi": 0, "n": 0, "hit": None}
+    box = {"qi": 0, "ok": 0, "fault": 0, "retired": [], "hits": []}
     errs = []
+    queue = [ids[i:i + CHUNK] for i in range(0, len(ids), CHUNK)]
+    total = len(ids)
     t0 = time.monotonic()
+
+    def one(batch):
+        pending = list(batch)
+        while pending and not stop.is_set():
+            rows, err = fn(pending)
+            if err and err not in errs and len(errs) < 6:
+                errs.append(err)
+            missing = None
+            for i in pending:
+                r = rows.get(i)
+                if r is None:
+                    missing = i
+                    break
+                with lock:
+                    if r["st"] == FAULT:
+                        box["fault"] += 1
+                    else:
+                        box["ok"] += 1
+                    n = box["ok"] + box["fault"]
+                if hit(r):
+                    with lock:
+                        box["hits"].append(r)
+                        full = len(box["hits"]) >= maxhits
+                    if full:
+                        stop.set()
+                        return
+                if n % 200 == 0:
+                    print("    %d/%d  %.0fs" % (n, total, time.monotonic() - t0),
+                          flush=True)
+            if missing is None:
+                return
+            with lock:
+                box["retired"].append(missing)
+                nr = len(box["retired"])
+            if nr % 25 == 0:
+                print("    %d retired" % nr, flush=True)
+            pending = pending[pending.index(missing) + 1:]
 
     def lane():
         while not stop.is_set():
             with lock:
-                if box["qi"] >= len(todo):
+                if box["qi"] >= len(queue):
                     return
-                p = todo[box["qi"]]
+                b = queue[box["qi"]]
                 box["qi"] += 1
-            r, err = fn(*p)
-            log_add(*p)
-            with lock:
-                box["n"] += 1
-                k = box["n"]
-                if err and err not in errs and len(errs) < 6:
-                    errs.append(err)
-                if r is not None:
-                    box["hit"] = r
-                    stop.set()
-                    return
-            if k % 100 == 0:
-                el = max(time.monotonic() - t0, 1e-9)
-                print(f"    {k}/{len(todo)}  {el:.0f}s  {k / el:.0f}/s",
-                      flush=True)
+            one(b)
 
+    print("[%s] %d probe(s)%s" % (label, len(ids),
+                                  ", %d known-dead" % len(known) if known else ""))
     ts = [threading.Thread(target=lane, daemon=True) for _ in range(LANES)]
     for t in ts:
         t.start()
     for t in ts:
         t.join()
-    el = time.monotonic() - t0
-    print(f"[{label}] {box['n']}/{len(todo)} in {el:.0f}s")
+    add_list("dead:%s:%s" % (kind, sha), box["retired"])
+    print("[%s] %d answered, %d fault, %d retired in %.0fs"
+          % (label, box["ok"], box["fault"], len(box["retired"]),
+             time.monotonic() - t0))
     for e in errs:
-        print(f"    {e}")
-    return box["hit"]
+        print("    " + e)
+    return box["hits"]
 
 
 def near_first(count, vas, anchor):
@@ -194,109 +245,134 @@ def near_first(count, vas, anchor):
     return list(range(count))
 
 
-def find_build(sha, count, vas):
-    rva = cached(sha, "build")
-    if rva is not None:
-        print(f"[i] builder  {rva:#x}  (cached)")
-        return rva
+def build(rva, ident):
+    rows, err = wbcall("build", "%x" % rva, json.dumps({"x": ident.hex()}))
+    row = next((r for r in rows if "tag" in r), None) if rows else None
+    if row is None:
+        raise RuntimeError(err or "no build row")
+    if row["st"] == FAULT:
+        raise RuntimeError("access violation")
+    if row["st"] or row["nt"]:
+        raise RuntimeError("call failed %#010x" % row["st"])
+    return bytes.fromhex(row["payload"])
 
-    ident = b"\x00" * 49
+
+def find_builds(sha, count, vas):
+    cand = get_list("bcand:" + sha)
+    if cand:
+        print("[i] builders %d candidate(s)  (cached)" % len(cand))
+        return cand
+
     info = {}
 
-    def fn(_k, i, _v):
-        rows, err = wbcall("sweepbuild", ident.hex(), str(i), "--dll", DLL)
+    def fn(batch):
+        rows, err = batch_run(["sweepbuild", (b"\x00" * 49).hex(),
+                               ",".join(map(str, batch))])
         for r in rows:
             if "prep" in r and "prep" not in info:
                 info["prep"] = r["prep"]
-            if ("i" in r and r["st"] == 0 and r["nt"] == 0
-                    and r["n"] == 49 + EXTRA and r["head"] == PROLOGUE.hex()):
-                return r, None
-        return None, err
+        return {r["i"]: r for r in rows if "i" in r}, err
 
-    hit = run([("b", i, 0) for i in near_first(count, vas, None)], fn, "builder")
+    def hit(r):
+        return r["st"] == 0 and r["nt"] == 0 and r["head"].startswith(HEAD4)
+
+    print("\n[find] builder: %d descriptors, header %s" % (count, HEAD4))
+    hits = sweep(near_first(count, vas, None), fn, hit, "builder", sha, "b",
+                 maxhits=CAND)
     if "prep" in info:
         p = info["prep"]
-        print(f"[i] prep     {p[0]}/{p[1]} segments"
-              + (f"  first err {p[2]}" if p[2] else ""))
-    if hit is None:
-        print(f"[-] no descriptor produced {49 + EXTRA} B with prologue "
-              f"{PROLOGUE.hex()}")
-        return None
-    remember(sha, build=hit["d"])
-    print(f"[i] builder  {hit['d']:#x}  (discovered)")
-    return hit["d"]
+        print("[i] prep     %d/%d segments%s"
+              % (p[0], p[1], "  first err " + str(p[2]) if p[2] else ""))
+    if not hits:
+        print("[-] no descriptor returned a buffer starting " + HEAD4)
+        return []
+
+    good = []
+    for r in sorted(hits, key=lambda x: x["d"]):
+        try:
+            p = build(r["d"], b"\x00" * 33)
+        except RuntimeError as e:
+            print("    %#x unusable: %s" % (r["d"], e))
+            continue
+        ok = len(p) == 33 + EXTRA and p[:4].hex() == HEAD4
+        print("    %#x sizes-to-input %s (%d B)" % (r["d"], ok, len(p)))
+        if ok:
+            good.append(r["d"])
+    if good:
+        add_list("bcand:" + sha, good)
+        print("[i] builders %d candidate(s)" % len(good))
+    else:
+        print("[-] none of them sized output to input")
+    return good
 
 
 def find_dec(sha, count, vas, resp, seed, build_rva):
     rva = cached(sha, "dec")
     if rva is not None:
         var = cached(sha, "decvar") or 0
-        print(f"[i] decrypt  {rva:#x} variant {var}  (cached)")
+        print("[i] decrypt  %#x variant %d  (cached)" % (rva, var))
         return rva, var
 
-    info = {}
-
-    def fn(_k, i, v):
-        rows, err = wbcall("sweepdec", resp.hex(), seed.hex(), str(v), str(i),
-                           "--dll", DLL)
-        for r in rows:
-            if "prep" in r and "prep" not in info:
-                info["prep"] = r["prep"]
-            if ("i" in r and r["v"] == v and r["st"] == 0 and r["nt"] == 0
-                    and (r["prkf"] >= 0 or r["chai"] >= 0)):
-                return r, None
-        return None, err
-
     order = near_first(count, vas, build_rva)
-    hit = run([("d", i, v) for v in range(NVAR) for i in order], fn, "decrypt")
-    if "prep" in info:
-        p = info["prep"]
-        print(f"[i] prep     {p[0]}/{p[1]} segments"
-              + (f"  first err {p[2]}" if p[2] else ""))
-    if hit is None:
-        print(f"[-] no descriptor decrypted this response under any of the "
-              f"{NVAR} block shapes")
-        return None, None
-    remember(sha, dec=hit["d"], decvar=hit["v"])
-    print(f"[i] decrypt  {hit['d']:#x} variant {hit['v']}  (discovered)")
-    return hit["d"], hit["v"]
+    info = {}
+    for var in range(NVAR):
+        def fn(batch, v=var):
+            rows, err = batch_run(["sweepdec", resp.hex(), seed.hex(), str(v),
+                                   ",".join(map(str, batch))])
+            for r in rows:
+                if "prep" in r and "prep" not in info:
+                    info["prep"] = r["prep"]
+            return ({r["i"]: r for r in rows
+                     if "i" in r and r.get("v") == v}, err)
+
+        def hit(r):
+            return (r["st"] == 0 and r["nt"] == 0
+                    and (r["prkf"] >= 0 or r["chai"] >= 0))
+
+        found = sweep(order, fn, hit, "decrypt/v%d" % var, sha, "d%d" % var)
+        if found:
+            r = found[0]
+            remember(sha, dec=r["d"], decvar=r["v"])
+            print("[i] decrypt  %#x variant %d  (discovered)" % (r["d"], r["v"]))
+            return r["d"], r["v"]
+    print("[-] no descriptor decrypted this response, %d block shapes" % NVAR)
+    return None, None
 
 
 def make_nonce(label):
     ft = int((datetime.now(timezone.utc).timestamp() + 11_644_473_600) * 10_000_000)
-    return b"\x01" + struct.pack("<Q", ft) + b"\x28" + CONST27 + \
-        (label + b"\x00" * TAIL)[:TAIL]
+    return (b"\x01" + struct.pack("<Q", ft) + b"\x28" + CONST27
+            + (label + b"\x00" * TAIL)[:TAIL])
 
 
 def envelope(p):
-    b64 = base64.b64encode(p).decode("ascii")
     return ('<?xml version="1.0" encoding="utf-8"?>'
             '<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
             ' xmlns:xsd="http://www.w3.org/2001/XMLSchema"'
             ' xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
-            f'<soap:Body><Activate xmlns="{NS}"><challenge>'
-            f'<clientSdkVersion>{SDK}</clientSdkVersion>'
-            f'<clientSdkType>{SDK_TYPE}</clientSdkType>'
-            f'<platform>{PLATFORM}</platform><tid>{TID}</tid>'
-            f'<payload><primaryPayload>{b64}</primaryPayload></payload>'
-            '</challenge></Activate></soap:Body></soap:Envelope>').encode()
-
-
-def headers():
-    return {"Accept": "*/*", "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": f'"{NS}/Activate"',
-            "User-Agent": "Microsoft-PlayReady-DRM/1.0",
-            "x-playready-info": (
-                "OSVersion=10.0; ClientDllVersion=Windows.Media.Protection."
-                "PlayReady.dll/10.0.19041.4780 (WinBuild.160101.0800); "
-                f"Session={secrets.token_hex(16)};"),
-            "X-XblCorrelationId": str(secrets.randbits(63))}
+            '<soap:Body><Activate xmlns="%s"><challenge>'
+            '<clientSdkVersion>%s</clientSdkVersion>'
+            '<clientSdkType>%s</clientSdkType>'
+            '<platform>%s</platform><tid>%s</tid>'
+            '<payload><primaryPayload>%s</primaryPayload></payload>'
+            '</challenge></Activate></soap:Body></soap:Envelope>'
+            % (NS, SDK, SDK_TYPE, PLATFORM, TID,
+               base64.b64encode(p).decode("ascii"))).encode()
 
 
 def post(p):
     import requests
     try:
-        r = requests.post(URL, data=envelope(p), timeout=TIMEOUT, headers=headers())
+        r = requests.post(URL, data=envelope(p), timeout=TIMEOUT, headers={
+            "Accept": "*/*",
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": '"%s/Activate"' % NS,
+            "User-Agent": "Microsoft-PlayReady-DRM/1.0",
+            "x-playready-info": ("OSVersion=10.0; ClientDllVersion=Windows.Media."
+                                 "Protection.PlayReady.dll/10.0.19041.4780 "
+                                 "(WinBuild.160101.0800); Session=%s;"
+                                 % secrets.token_hex(16)),
+            "X-XblCorrelationId": str(secrets.randbits(63))})
     except Exception as e:
         return "err", str(e), {}
     try:
@@ -318,72 +394,76 @@ def post(p):
     if info["fault"]:
         return str(r.status_code), info["fault"], info
     if info["status"] is not None:
-        return str(r.status_code), f"statusCode {info['status']}", info
+        return str(r.status_code), "statusCode " + info["status"], info
     if info["payload"] or info["keyfile"]:
         return str(r.status_code), "ACCEPTED", info
     return str(r.status_code), "unexpected", info
 
 
-def build(rva, ident):
-    rows, err = wbcall("build", f"{rva:x}",
-                       json.dumps({"x": ident.hex()}), "--dll", DLL)
-    if err:
-        raise RuntimeError(err)
-    row = next((r for r in rows if "tag" in r), None)
-    if not row or row["st"] or row["nt"]:
-        raise RuntimeError(f"call failed {row and row['st']:#010x}")
-    return bytes.fromhex(row["payload"])
-
-
 def cmd_request(hwid):
     sha, count, vas = census_info()
-    print(f"[i] sha256   {sha}\n[i] census   {count} heap-exec")
-    rva = find_build(sha, count, vas)
-    if rva is None:
+    print("[i] sha256   %s\n[i] census   %d heap-exec" % (sha, count))
+
+    known = cached(sha, "build")
+    if known is not None:
+        print("[i] builder  %#x  (cached)" % known)
+        cands = [known]
+    else:
+        cands = find_builds(sha, count, vas)
+    if not cands:
         return 1
 
+    bad = set(get_list("bbad:" + sha))
     nonce, label = make_nonce(hwid.encode()), hwid.encode()[:TAIL]
     head = 49 - TAIL
-    print(f"\n[i] nonce    {nonce.hex()}\n[i] hwid     {hwid!r}")
-
-    def tail(fill):
-        return (label + fill * TAIL)[:TAIL]
-
+    print("\n[i] nonce    %s\n[i] hwid     %r" % (nonce.hex(), hwid))
+    tail = lambda fill: (label + fill * TAIL)[:TAIL]
     todo = [("zero", nonce[:head] + tail(b"\x00")),
             ("dot", nonce[:head] + tail(b"."))]
-    print(f"\n[post] {len(todo)} variant(s)")
-    ok = None
-    for tag, n in todo:
-        try:
-            p = build(rva, n)
-        except RuntimeError as e:
-            print(f"    {tag:<6} build failed: {e}")
-            continue
-        http, verdict, info = post(p)
-        t = n[head:]
-        print(f"    {tag:<6} {len(p):>4} B  {http:<4} {verdict}  tail "
-              f"{t.hex()} {''.join(chr(c) if 32 <= c < 127 else '.' for c in t)!r}")
-        if verdict == "ACCEPTED" and ok is None:
-            ok = (tag, p, info)
-        time.sleep(0.3)
 
-    print()
-    if not ok:
-        print("[-] rejected")
-        return 1
-    tag, p, info = ok
-    with open(PAYLOAD, "wb") as f:
-        f.write(p)
-    print(f"[+] ACCEPTED as '{tag}'   saved {PAYLOAD} ({len(p)} B)")
-    if info.get("payload"):
-        dec = base64.b64decode(info["payload"])
-        with open(RESPONSE, "wb") as f:
-            f.write(dec)
-        print(f"    saved {RESPONSE} ({len(dec)} B)"
-              f"\n\nnext: python tool.py --decrypt")
-    else:
-        print("    no primaryPayload in the reply")
-    return 0
+    for rva in cands:
+        if rva in bad:
+            continue
+        print("\n[post] %d variant(s) via %#x" % (len(todo), rva))
+        win = None
+        for tag, n in todo:
+            try:
+                p = build(rva, n)
+            except RuntimeError as e:
+                print("    %-6s build failed: %s" % (tag, e))
+                continue
+            http, verdict, info = post(p)
+            t = n[head:]
+            print("    %-6s %4d B  %-4s %s  tail %s %r"
+                  % (tag, len(p), http, verdict, t.hex(),
+                     "".join(chr(c) if 32 <= c < 127 else "." for c in t)))
+            if verdict == "ACCEPTED" and win is None:
+                win = (tag, p, info)
+            time.sleep(0.3)
+
+        if win is None:
+            print("    %#x rejected" % rva)
+            add_list("bbad:" + sha, [rva])
+            continue
+
+        tag, p, info = win
+        remember(sha, build=rva)
+        with open(PAYLOAD, "wb") as f:
+            f.write(p)
+        print("\n[+] ACCEPTED as '%s' via %#x   saved %s (%d B)"
+              % (tag, rva, PAYLOAD, len(p)))
+        if info.get("payload"):
+            dec = base64.b64decode(info["payload"])
+            with open(RESPONSE, "wb") as f:
+                f.write(dec)
+            print("    saved %s (%d B)\n\nnext: python tool.py --decrypt"
+                  % (RESPONSE, len(dec)))
+        else:
+            print("    no primaryPayload in the reply")
+        return 0
+
+    print("\n[-] no builder candidate was accepted")
+    return 1
 
 
 def read_response(path):
@@ -394,64 +474,53 @@ def read_response(path):
     m = re.search(rb"<primaryPayload>([A-Za-z0-9+/=\s]+)</primaryPayload>", raw)
     if m:
         return base64.b64decode(re.sub(rb"\s", b"", m.group(1)))
-    try:
-        root = ET.fromstring(raw)
-    except ET.ParseError:
-        return None
-    for el in root.iter():
-        if el.tag.rsplit("}", 1)[-1].lower() == "primarypayload":
-            txt = "".join(el.itertext()).strip()
-            if txt:
-                return base64.b64decode(txt)
     return None
 
 
 def cmd_decrypt():
     if not os.path.exists(RESPONSE) or not os.path.exists(PAYLOAD):
-        print(f"[x] need {RESPONSE} and {PAYLOAD} - run a request first")
+        print("[x] need %s and %s - run a request first" % (RESPONSE, PAYLOAD))
         return 2
     resp = read_response(RESPONSE)
     if not resp:
-        print(f"[x] {RESPONSE}: no primaryPayload")
+        print("[x] %s: no primaryPayload" % RESPONSE)
         return 2
     seed = open(PAYLOAD, "rb").read()[-16:]
     if len(seed) != 16:
-        print(f"[x] seed is {len(seed)} B, expected 16")
+        print("[x] seed is %d B, expected 16" % len(seed))
         return 2
 
     sha, count, vas = census_info()
-    print(f"[i] seed     {seed.hex()}")
-    print(f"[i] response {RESPONSE}  {len(resp)} B")
-    print(f"[i] expect   {max(len(resp) - 8, 0)} B of PRKF")
+    print("[i] seed     %s\n[i] response %s  %d B\n[i] expect   %d B of PRKF"
+          % (seed.hex(), RESPONSE, len(resp), max(len(resp) - 8, 0)))
 
     rva, var = find_dec(sha, count, vas, resp, seed, cached(sha, "build"))
     if rva is None:
         return 1
 
-    rows, err = wbcall("dec", f"{rva:x}", resp.hex(), seed.hex(), str(var),
-                       "--dll", DLL, timeout=120)
-    row = next((r for r in rows if "out" in r), None) if not err else None
-    if not row or row["st"] or row["nt"]:
-        print(f"[x] dec failed: {err or hex(row and row['st'])}")
+    rows, err = wbcall("dec", "%x" % rva, resp.hex(), seed.hex(), str(var))
+    row = next((r for r in rows if "out" in r), None) if rows else None
+    if row is None or row["st"] or row["nt"]:
+        print("[x] dec failed: %s" % (err or "no row"))
         return 1
 
     plain = bytes.fromhex(row["out"])
     for o in range(0, min(len(plain), 0x60), 16):
-        rowb = plain[o:o + 16]
-        print(f"    {o:04x}  {' '.join(f'{c:02x}' for c in rowb):<47}  "
-              f"{''.join(chr(c) if 32 <= c < 127 else '.' for c in rowb)}")
+        b = plain[o:o + 16]
+        print("    %04x  %-47s  %s" % (o, " ".join("%02x" % c for c in b),
+                                       "".join(chr(c) if 32 <= c < 127 else "."
+                                               for c in b)))
     ok = plain[:4] == b"PRKF"
-    print(f"    PRKF     {ok}")
+    print("    PRKF     %s" % ok)
     with open(BLA, "wb") as f:
         f.write(plain)
-    print(f"\n[i] saved    {BLA}  ({len(plain)} B)")
+    print("\n[i] saved    %s  (%d B)" % (BLA, len(plain)))
     return 0 if ok else 1
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="  python tool.py --hwid \"MY.ID\"   request\n"
+        epilog='  python tool.py --hwid "MY.ID"   request\n'
                "  python tool.py --decrypt         decrypt")
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--hwid", metavar="TEXT",
@@ -462,8 +531,7 @@ def main(argv=None):
     try:
         return cmd_request(a.hwid) if a.hwid is not None else cmd_decrypt()
     except KeyboardInterrupt:
-        print("\n[!] interrupted - rerun the same command to resume; "
-              "verdicts so far are in testdata\\sweep.log")
+        print("\n[!] interrupted - rerun to resume")
         os._exit(130)
 
 

@@ -1,25 +1,20 @@
 # wbcall.py - Warbird call layer, and the child process tool.py spawns.
-# One JSON object per line on stdout. No HTTP.
+# Modes emit one JSON object per line on stdout:
 #
 #   census                        descriptor census, cached by DLL sha256
-#   build RVA JSON                call with 2.py's 0x44 block
-#   sweepbuild IDENT IDXCSV       the same over an index list, one row per call
-#   dec RVA RESP SEED VAR         call with 3.py's 0x3C block
-#   sweepdec RESP SEED VAR IDXCSV the same over an index list
+#   build RVA JSON                op=3, 2.py block
+#   sweepbuild IDENT IDXCSV       op=3, 2.py block, over an index list
+#   dec RVA RESP SEED VAR         op=3, 3.py block
+#   sweepdec RESP SEED VAR IDXCSV op=3, 3.py block, over an index list
 #
-# VAR selects how the response and seed are presented:
-#   0  input=resp     in_len=len     out_len=len-8
-#   1  input=resp     in_len=len-8   out_len=len-8
-#   2  input=resp[8:] in_len=len-8   out_len=len-8
-#   3  input=resp     in_len=len     out_len=len
+# VAR: 0 resp/len/len-8, 1 resp/len-8/len-8, 2 resp[8:]/len-8/len-8, 3 resp/len/len
 #
-# Every mode initialises COM and runs the op=1 segment pass first: a fresh
-# LoadLibraryW leaves the segment-encrypted .rdata/.data tables as ciphertext,
-# and the routines read them.
+# A fault inside a call is caught per descriptor and reported as status
+# ffffffff, so one child covers a whole chunk. COM init and the op=1 segment
+# pass run first: a fresh LoadLibraryW leaves the segment-encrypted .rdata and
+# .data tables as ciphertext, and the routines read them.
 #
-# The only file this writes is testdata/tool-state.json, the census cache.
-
-from __future__ import annotations
+# The only file written is testdata/tool-state.json.
 
 import argparse
 import hashlib
@@ -29,7 +24,7 @@ import struct
 import sys
 
 if sys.platform != "win32":
-    sys.exit("wbcall.py: Windows x64 only")
+    sys.exit("wbcall.py: Windows only")
 if struct.calcsize("P") != 8:
     sys.exit("wbcall.py: 64-bit Python required")
 
@@ -40,6 +35,7 @@ OUT = "testdata"
 STATE = os.path.join(OUT, "tool-state.json")
 WB = 0xB9
 EXTRA = 2252
+FAULT = 0xFFFFFFFF
 
 
 def u32(b, o):
@@ -91,8 +87,7 @@ def census(fb, maxsize=0x200000):
             if d[0] not in seen:
                 seen.add(d[0])
                 out.append(d)
-        out.sort()
-        return out
+        return sorted(out)
 
     return dedup(heaps), dedup(segs)
 
@@ -146,23 +141,21 @@ def load(dll):
     k32.LoadLibraryW.restype = ctypes.c_void_p
     base = k32.LoadLibraryW(dll)
     if not base:
-        raise OSError(ctypes.get_last_error(), f"LoadLibraryW({dll!r})")
+        raise OSError(ctypes.get_last_error(), "LoadLibraryW failed")
     ntq = ctypes.WinDLL("ntdll.dll").NtQuerySystemInformation
-    ntq.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+    ntq.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+                    ctypes.c_void_p]
     ntq.restype = ctypes.c_int32
     return base, ntq
 
 
 def op1(base, ntq, addr, rel, num):
     a = bytearray(0x30)
-    struct.pack_into("<Q", a, 0x00, 1)
-    struct.pack_into("<Q", a, 0x08, addr)
-    struct.pack_into("<Q", a, 0x10, base)
-    struct.pack_into("<Q", a, 0x18, base)
-    struct.pack_into("<Q", a, 0x20, (base + rel) & 0xFFFFFFFFFFFFFFFF)
-    struct.pack_into("<Q", a, 0x28, num)
-    buf = ctypes.create_string_buffer(bytes(a), 0x30)
-    return ntq(WB, ctypes.byref(buf), 0x30, None) & 0xFFFFFFFF
+    for off, val in ((0x00, 1), (0x08, addr), (0x10, base), (0x18, base),
+                     (0x20, base + rel), (0x28, num)):
+        struct.pack_into("<Q", a, off, val & 0xFFFFFFFFFFFFFFFF)
+    return ntq(WB, ctypes.byref(ctypes.create_string_buffer(bytes(a), 0x30)),
+               0x30, None) & 0xFFFFFFFF
 
 
 def prepare(base, ntq, segs):
@@ -172,7 +165,7 @@ def prepare(base, ntq, segs):
         if st == 0:
             ok += 1
         elif first is None:
-            first = f"0x{va:x}:{st:#010x}"
+            first = "0x%x:%#010x" % (va, st)
     return ok, len(segs), first
 
 
@@ -204,23 +197,20 @@ def payload(base, ntq, rva, ident):
     return {"st": int(st.value) & 0xFFFFFFFF, "nt": nt, "n": got, "payload": body}
 
 
-def shape(resp, var):
-    n = len(resp)
-    return {
-        0: (resp, n, max(n - 8, 0)),
-        1: (resp, max(n - 8, 0), max(n - 8, 0)),
-        2: (resp[8:], max(n - 8, 0), max(n - 8, 0)),
-        3: (resp, n, n),
-    }.get(var, (resp, n, max(n - 8, 0)))
-
-
 def decrypt(base, ntq, rva, resp, seed, var=0):
-    body, inlen, want = shape(resp, var)
-    cap = max(len(resp), want, 0x1000) + 0x40
+    n = len(resp)
+    body, inlen, want = resp, n, max(n - 8, 0)
+    if var == 1:
+        inlen = want
+    elif var == 2:
+        body, inlen = resp[8:], want
+    elif var == 3:
+        want = n
+    cap = max(n, want, 0x1000) + 0x40
     inp = (ctypes.c_ubyte * max(len(body), 1)).from_buffer_copy(body or b"\x00")
     sd = (ctypes.c_ubyte * 16).from_buffer_copy(seed)
     out = (ctypes.c_ubyte * cap)()
-    n = ctypes.c_uint32(want)
+    nn = ctypes.c_uint32(want)
     st = ctypes.c_uint32(0)
     r = R3()
     r.operation = 3
@@ -230,9 +220,9 @@ def decrypt(base, ntq, rva, resp, seed, var=0):
     r.input_len = inlen
     r.seed = ctypes.addressof(sd)
     r.output = ctypes.addressof(out)
-    r.output_len = ctypes.addressof(n)
+    r.output_len = ctypes.addressof(nn)
     nt = ntq(WB, ctypes.byref(r), ctypes.sizeof(r), None) & 0xFFFFFFFF
-    got = int(n.value)
+    got = int(nn.value)
     m = got if 0 < got <= cap else want
     return {"st": int(st.value) & 0xFFFFFFFF, "nt": nt, "n": got,
             "out": bytes(out)[:m]}
@@ -254,7 +244,7 @@ def idxs(csv, n):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Warbird call layer.")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--dll", default=DLL)
     ap.add_argument("mode", choices=("census", "build", "sweepbuild",
                                      "dec", "sweepdec"))
@@ -270,39 +260,55 @@ def main(argv):
         return 0
 
     base, ntq = load(a.dll)
-    ok, n, err = prepare(base, ntq, segs)
-    emit({"prep": [ok, n, err]})
+    emit({"prep": list(prepare(base, ntq, segs))})
 
     if a.mode == "build":
         for tag, hx in json.loads(a.b).items():
-            p = payload(base, ntq, int(a.a, 16), bytes.fromhex(hx))
-            emit({"tag": tag, "st": p["st"], "nt": p["nt"], "n": p["n"],
-                  "payload": p["payload"].hex()})
+            ident = bytes.fromhex(hx)
+            try:
+                p = payload(base, ntq, int(a.a, 16), ident)
+                emit({"tag": tag, "st": p["st"], "nt": p["nt"], "n": p["n"],
+                      "payload": p["payload"].hex()})
+            except OSError as e:
+                emit({"tag": tag, "st": FAULT, "nt": 0, "n": 0,
+                      "payload": "", "err": str(e)})
         return 0
 
     if a.mode == "sweepbuild":
         ident = bytes.fromhex(a.a)
         for i in idxs(a.b, len(heaps)):
             rva = heaps[i][0]
-            p = payload(base, ntq, rva, ident)
-            emit({"i": i, "d": rva, "st": p["st"], "nt": p["nt"],
-                  "n": p["n"], "head": p["payload"][:20].hex()})
+            try:
+                p = payload(base, ntq, rva, ident)
+                emit({"i": i, "d": rva, "st": p["st"], "nt": p["nt"],
+                      "n": p["n"], "head": p["payload"][:20].hex()})
+            except OSError:
+                emit({"i": i, "d": rva, "st": FAULT, "nt": 0, "n": 0,
+                      "head": ""})
         return 0
 
     if a.mode == "dec":
-        r = decrypt(base, ntq, int(a.a, 16), bytes.fromhex(a.b),
-                    bytes.fromhex(a.c), int(a.d) if a.d else 0)
-        emit({"st": r["st"], "nt": r["nt"], "n": r["n"], "out": r["out"].hex()})
+        try:
+            r = decrypt(base, ntq, int(a.a, 16), bytes.fromhex(a.b),
+                        bytes.fromhex(a.c), int(a.d) if a.d else 0)
+            emit({"st": r["st"], "nt": r["nt"], "n": r["n"],
+                  "out": r["out"].hex()})
+        except OSError as e:
+            emit({"st": FAULT, "nt": 0, "n": 0, "out": "", "err": str(e)})
         return 0
 
     resp, seed, var = bytes.fromhex(a.a), bytes.fromhex(a.b), int(a.c)
     for i in idxs(a.d, len(heaps)):
         rva = heaps[i][0]
-        r = decrypt(base, ntq, rva, resp, seed, var)
-        o = r["out"]
-        emit({"i": i, "v": var, "d": rva, "st": r["st"], "nt": r["nt"],
-              "n": r["n"], "len": len(o), "prkf": o.find(b"PRKF"),
-              "chai": o.find(b"CHAI"), "head": o[:8].hex()})
+        try:
+            r = decrypt(base, ntq, rva, resp, seed, var)
+            o = r["out"]
+            emit({"i": i, "v": var, "d": rva, "st": r["st"], "nt": r["nt"],
+                  "n": r["n"], "len": len(o), "prkf": o.find(b"PRKF"),
+                  "chai": o.find(b"CHAI"), "head": o[:8].hex()})
+        except OSError:
+            emit({"i": i, "v": var, "d": rva, "st": FAULT, "nt": 0, "n": 0,
+                  "len": 0, "prkf": -1, "chai": -1, "head": ""})
     return 0
 
 
@@ -312,7 +318,7 @@ if __name__ == "__main__":
         code = main(sys.argv[1:])
     except SystemExit:
         raise
-    except BaseException as e:  # noqa: BLE001
-        emit({"err": f"{type(e).__name__}: {e}"})
+    except BaseException as e:
+        emit({"err": "%s: %s" % (type(e).__name__, e)})
         code = 1
     sys.exit(code)
